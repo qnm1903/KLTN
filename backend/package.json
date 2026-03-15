@@ -1,0 +1,25 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "elliptic": "^6.6.1",
+    "ethers": "^6.16.0",
+    "express": "^5.2.1",
+    "secrets.js-grempe": "^2.0.0",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "jest": "^30.3.0"
+  }
+}

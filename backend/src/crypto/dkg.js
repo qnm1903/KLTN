@@ -1,42 +1,66 @@
-import EC_Module from 'elliptic';
-import Secrets from 'secrets.js-grempe';
-import { getPublicKey, pubKeyToAddress } from './ecc.js';
+/**
+ * DKG — Distributed Key Generation (No Trusted Dealer)
+ *
+ * Option 2 upgrade từ trusted dealer:
+ *   - Mỗi bên (buyer, seller, mediator) tự sinh (s_i, PK_i) ở FRONTEND
+ *   - Frontend gửi PUBLIC keys lên backend (không bao giờ private keys)
+ *   - Backend tính 3 đôi PKagg cho 3 tổ hợp 2-of-3:
+ *       PKagg_buyerSeller   = PK_buyer + PK_seller    -> dùng cho 'release'
+ *       PKagg_buyerMediator = PK_buyer + PK_mediator  -> dùng cho 'refund'
+ *       PKagg_sellerMediator = PK_seller + PK_mediator -> dùng cho 'timeout'
+ *   - Backend không biết bất kỳ private key nào
+ */
 
-const ec = new EC_Module.ec('secp256k1');
+import { aggregatePublicKeys } from './schnorr.js';
 
-export async function initDKG(escrowId, sessionStore) {
-  // 1. Sinh private key ngẫu nhiên s
-  const keyPair = ec.genKeyPair();
-  let s = keyPair.getPrivate('hex');               // private key gốc
+export const SESSION_TTL_MS = 30 * 60 * 1000; // 30 phút
 
-  // 2. Shamir SSS: chia s thành 3 shares, threshold = 2
-  const sharesHex = Secrets.share(s, 3, 2);        // [ share1, share2, share3 ]
-  // sharesHex[i] là hex string; Secrets.combine([any 2]) sẽ trả về s
+/**
+ * Khởi tạo session DKG từ 3 public keys do frontend cung cấp.
+ *
+ * @param {string} escrowId
+ * @param {{ buyerPubKey, sellerPubKey, mediatorPubKey }} pubKeys
+ * @param {object} sessionStore
+ * @returns {{ pkAgg_bs, pkAgg_bm, pkAgg_sm }}
+ */
+export function initDKG(escrowId, { buyerPubKey, sellerPubKey, mediatorPubKey }, sessionStore) {
+  const pkAgg_bs = aggregatePublicKeys([buyerPubKey, sellerPubKey]);
+  const pkAgg_bm = aggregatePublicKeys([buyerPubKey, mediatorPubKey]);
+  const pkAgg_sm = aggregatePublicKeys([sellerPubKey, mediatorPubKey]);
 
-  // 3. Tính PKagg và Ethereum address của nó
-  const pkAggHex = getPublicKey(s);            // uncompressed pubkey hex
-  const pkAggAddress = pubKeyToAddress(pkAggHex);  // 0x... Ethereum address
-
-  // 4. Lưu session (Không lưu s, chỉ lưu address và shares tạm)
   sessionStore.set(escrowId, {
-    pkAggAddress,
-    pkAggHex,
-    shares: {
-      buyer: { index: 1, share: sharesHex[0] },
-      seller: { index: 2, share: sharesHex[1] },
-      mediator: { index: 3, share: sharesHex[2] }
+    pubKeys: { buyer: buyerPubKey, seller: sellerPubKey, mediator: mediatorPubKey },
+    pkAgg: {
+      buyerSeller: pkAgg_bs,
+      buyerMediator: pkAgg_bm,
+      sellerMediator: pkAgg_sm
     },
-    partialShares: [],  // sẽ nhận lại khi cần ký
+    nonces: {},          // Round 1: { role: { R_x, R_y } }
+    zShares: {},         // Round 2: { role: z_hex }
+    signingRoles: null,  // 2 bên đang ký, set khi bắt đầu round 1
+    signingAction: null,
+    completedActions: [],
+    createdAt: Date.now(),
     status: 'INITIALIZED'
   });
 
-  // 5. Xóa s
-  s = null;
-
   return {
-    pkAggAddress,       // lưu vào Smart Contract
-    buyerShare: sharesHex[0],
-    sellerShare: sharesHex[1],
-    mediatorShare: sharesHex[2]
+    pkAgg_bs: { x: pkAgg_bs.x, y: pkAgg_bs.y },
+    pkAgg_bm: { x: pkAgg_bm.x, y: pkAgg_bm.y },
+    pkAgg_sm: { x: pkAgg_sm.x, y: pkAgg_sm.y }
   };
+}
+
+/**
+ * Lấy PKagg phù hợp cho 2 bên đang ký.
+ */
+export function getPkAggForRoles(session, roles) {
+  const key = [...roles].sort().join('+');
+  const map = {
+    'buyer+seller':    session.pkAgg.buyerSeller,
+    'buyer+mediator':  session.pkAgg.buyerMediator,
+    'mediator+seller': session.pkAgg.sellerMediator
+  };
+  if (!map[key]) throw new Error(`No PKagg for role pair: ${key}`);
+  return map[key];
 }

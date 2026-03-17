@@ -5,17 +5,56 @@ const { ethers } = require("hardhat");
 describe("EscrowVault & EscrowFactory", function () {
   let factory, vault;
   let owner, buyer, seller, mediator, otherAccount;
-  let pkAggWallet; // Represents the aggregated DKG key for testing
+  let aggSigner;
+  let pkAgg;
 
   const AMOUNT = ethers.parseEther("1.0");
   const CONFIRM_DAYS = 14;
   const TIMEOUT_DAYS = 21;
+  const ORDER = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+
+  function mulmod(a, b, m) {
+    return (a * b) % m;
+  }
+
+  function toPublicXY(privateKey) {
+    const pub = ethers.SigningKey.computePublicKey(privateKey, false); // 0x04 + x + y
+    return {
+      x: "0x" + pub.slice(4, 68),
+      y: "0x" + pub.slice(68, 132)
+    };
+  }
+
+  function buildSchnorrSignature(privateKey, pkX, pkY, msgHash) {
+    const nonce = ethers.hexlify(ethers.randomBytes(32));
+    const noncePub = ethers.SigningKey.computePublicKey(nonce, false);
+    const R_x = "0x" + noncePub.slice(4, 68);
+    const R_y = "0x" + noncePub.slice(68, 132);
+    const R_addr = ethers.computeAddress("0x04" + R_x.slice(2) + R_y.slice(2));
+
+    const e = ethers.solidityPackedKeccak256(
+      ["address", "uint256", "uint256", "bytes32"],
+      [R_addr, pkX, pkY, msgHash]
+    );
+
+    const k = BigInt(nonce);
+    const s = BigInt(privateKey);
+    const ev = BigInt(e);
+    const z = (k + (ev * s) % ORDER) % ORDER;
+
+    return {
+      R_addr,
+      z: ethers.toBeHex(z, 32),
+      e
+    };
+  }
 
   beforeEach(async function () {
     [owner, buyer, seller, mediator, otherAccount] = await ethers.getSigners();
 
-    // Create a random wallet to simulate the aggregate DKG key
-    pkAggWallet = ethers.Wallet.createRandom();
+    // Use one signer keypair for all three PKagg lanes in tests
+    aggSigner = ethers.Wallet.createRandom();
+    pkAgg = toPublicXY(aggSigner.privateKey);
 
     // Deploy Factory
     const Factory = await ethers.getContractFactory("EscrowFactory");
@@ -25,7 +64,14 @@ describe("EscrowVault & EscrowFactory", function () {
     const tx = await factory.connect(buyer).createEscrow(
       seller.address,
       mediator.address,
-      pkAggWallet.address,
+      [
+        BigInt(pkAgg.x),
+        BigInt(pkAgg.y),
+        BigInt(pkAgg.x),
+        BigInt(pkAgg.y),
+        BigInt(pkAgg.x),
+        BigInt(pkAgg.y)
+      ],
       AMOUNT,
       CONFIRM_DAYS,
       TIMEOUT_DAYS
@@ -85,16 +131,12 @@ describe("EscrowVault & EscrowFactory", function () {
       const escrowId = await vault.escrowId();
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "release"]);
       const msgHash = ethers.keccak256(payload);
-
-      // Sign the raw message hash without EIP-191 prefix to match Solidity's ecrecover exactly
-      // ethers.SigningKey can sign a digest directly
-      const signingKey = new ethers.SigningKey(pkAggWallet.privateKey);
-      const signature = signingKey.sign(msgHash);
+      const signature = buildSchnorrSignature(aggSigner.privateKey, pkAgg.x, pkAgg.y, msgHash);
 
       const sellerBalanceBefore = await ethers.provider.getBalance(seller.address);
 
-      const tx = await vault.release(signature.r, signature.s, signature.v, msgHash);
-      const receipt = await tx.wait();
+      const tx = await vault.release(signature.R_addr, signature.z, signature.e, msgHash);
+      await tx.wait();
       
       console.log(`\t[Metric] Payload size for TSS release(): ${ethers.getBytes(tx.data).length} bytes`);
 
@@ -111,13 +153,10 @@ describe("EscrowVault & EscrowFactory", function () {
       const escrowId = await vault.escrowId();
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "release"]);
       const msgHash = ethers.keccak256(payload);
-
-      // Sign with WRONG key
       const wrongWallet = ethers.Wallet.createRandom();
-      const signingKey = new ethers.SigningKey(wrongWallet.privateKey);
-      const signature = signingKey.sign(msgHash);
+      const signature = buildSchnorrSignature(wrongWallet.privateKey, pkAgg.x, pkAgg.y, msgHash);
 
-      await expect(vault.release(signature.r, signature.s, signature.v, msgHash))
+      await expect(vault.release(signature.R_addr, signature.z, signature.e, msgHash))
         .to.be.revertedWith("Invalid signature");
     });
 
@@ -126,12 +165,10 @@ describe("EscrowVault & EscrowFactory", function () {
       // Sign "refund" instead of "release"
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "refund"]);
       const tamperedHash = ethers.keccak256(payload);
-
-      const signingKey = new ethers.SigningKey(pkAggWallet.privateKey);
-      const signature = signingKey.sign(tamperedHash);
+      const signature = buildSchnorrSignature(aggSigner.privateKey, pkAgg.x, pkAgg.y, tamperedHash);
 
       // Calling release() expects hash of "release"
-      await expect(vault.release(signature.r, signature.s, signature.v, tamperedHash))
+      await expect(vault.release(signature.R_addr, signature.z, signature.e, tamperedHash))
         .to.be.revertedWith("Invalid msgHash");
     });
   });
@@ -153,12 +190,11 @@ describe("EscrowVault & EscrowFactory", function () {
       // Refund
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "refund"]);
       const msgHash = ethers.keccak256(payload);
-      const signingKey = new ethers.SigningKey(pkAggWallet.privateKey);
-      const signature = signingKey.sign(msgHash);
+      const signature = buildSchnorrSignature(aggSigner.privateKey, pkAgg.x, pkAgg.y, msgHash);
 
       const buyerBalanceBefore = await ethers.provider.getBalance(buyer.address);
 
-      const tx = await vault.connect(buyer).refund(signature.r, signature.s, signature.v, msgHash);
+      const tx = await vault.connect(buyer).refund(signature.R_addr, signature.z, signature.e, msgHash);
       const receipt = await tx.wait();
       const gasCost = receipt.gasUsed * receipt.gasPrice;
 
@@ -178,10 +214,9 @@ describe("EscrowVault & EscrowFactory", function () {
       const escrowId = await vault.escrowId();
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "timeout"]);
       const msgHash = ethers.keccak256(payload);
-      const signingKey = new ethers.SigningKey(pkAggWallet.privateKey);
-      const signature = signingKey.sign(msgHash);
+      const signature = buildSchnorrSignature(aggSigner.privateKey, pkAgg.x, pkAgg.y, msgHash);
 
-      await expect(vault.timeoutRelease(signature.r, signature.s, signature.v, msgHash))
+      await expect(vault.timeoutRelease(signature.R_addr, signature.z, signature.e, msgHash))
         .to.be.revertedWith("Not timed out");
     });
 
@@ -189,13 +224,12 @@ describe("EscrowVault & EscrowFactory", function () {
       const escrowId = await vault.escrowId();
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "timeout"]);
       const msgHash = ethers.keccak256(payload);
-      const signingKey = new ethers.SigningKey(pkAggWallet.privateKey);
-      const signature = signingKey.sign(msgHash);
+      const signature = buildSchnorrSignature(aggSigner.privateKey, pkAgg.x, pkAgg.y, msgHash);
 
       // Fast forward time
       await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);
 
-      await expect(vault.timeoutRelease(signature.r, signature.s, signature.v, msgHash))
+      await expect(vault.timeoutRelease(signature.R_addr, signature.z, signature.e, msgHash))
         .to.emit(vault, "FundsReleased")
         .withArgs(escrowId, seller.address);
     });

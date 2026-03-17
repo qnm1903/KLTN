@@ -1,30 +1,64 @@
 import express from 'express';
 import { sessions } from '../store/session.js';
-import { initDKG } from '../crypto/dkg.js';
-import { aggregateAndSign } from '../crypto/tss.js';
+import { initDKG, getPkAggForRoles, SESSION_TTL_MS } from '../crypto/dkg.js';
+import { aggregateNonces, computeChallenge, aggregateZShares } from '../crypto/schnorr.js';
 import { ethers } from 'ethers';
 
 const router = express.Router();
 
-// Phase 1: DKG (khởi tạo escrow)
-router.post('/init', async (req, res) => {
-  try {
-    const { escrowId, buyerAddr, sellerAddr, mediatorAddr } = req.body;
+const VALID_ROLES = ['buyer', 'seller', 'mediator'];
+const VALID_ACTIONS = ['release', 'refund', 'timeout'];
 
-    if (!escrowId || !buyerAddr || !sellerAddr || !mediatorAddr) {
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function checkSession(escrowId, res) {
+  const session = sessions.get(escrowId);
+  if (!session) { res.status(404).json({ error: 'Escrow session not found' }); return null; }
+  if (Date.now() - session.createdAt > SESSION_TTL_MS) {
+    sessions.delete(escrowId);
+    res.status(410).json({ error: 'Session expired' });
+    return null;
+  }
+  return session;
+}
+
+function buildMsgHash(escrowId, action) {
+  const id = escrowId.startsWith('0x') ? escrowId : ethers.id(escrowId);
+  return ethers.solidityPackedKeccak256(['bytes32', 'string'], [id, action]);
+}
+
+// ─── Phase 1: DKG ─────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/escrow/init
+ * Frontend gửi 3 public keys (mỗi bên tự sinh s_i ở thiết bị của mình).
+ * Backend chỉ tổng hợp PKagg pairs — không sinh hoặc biết private key nào.
+ * Trả về 3 PKagg pairs để frontend đưa vào lúc tạo EscrowVault.
+ */
+router.post('/init', (req, res) => {
+  try {
+    const { escrowId, buyerAddr, sellerAddr, mediatorAddr,
+            buyerPubKey, sellerPubKey, mediatorPubKey } = req.body;
+
+    if (!escrowId || !buyerAddr || !sellerAddr || !mediatorAddr ||
+        !buyerPubKey || !sellerPubKey || !mediatorPubKey) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
+    if (sessions.has(escrowId)) {
+      return res.status(409).json({ error: 'Session already exists for this escrowId' });
+    }
 
-    const result = await initDKG(escrowId, sessions);
+    const result = initDKG(escrowId, { buyerPubKey, sellerPubKey, mediatorPubKey }, sessions);
 
-    const sessionDetail = sessions.get(escrowId);
-    sessionDetail.parties = {
+    const session = sessions.get(escrowId);
+    session.parties = {
       buyer: buyerAddr.toLowerCase(),
       seller: sellerAddr.toLowerCase(),
       mediator: mediatorAddr.toLowerCase()
     };
-    sessions.set(escrowId, sessionDetail);
+    sessions.set(escrowId, session);
 
+    // Trả về 3 PKagg pairs để đưa vào constructor EscrowVault
     res.json(result);
   } catch (error) {
     console.error('Error in /init:', error);
@@ -32,102 +66,174 @@ router.post('/init', async (req, res) => {
   }
 });
 
-// Phase 2: Threshold Signing
-router.post('/partial-sign', async (req, res) => {
-  try {
-    const { escrowId, role, action, share } = req.body;
+// ─── Phase 2: Threshold Signing — Round 1 (Nonce submission) ──────────────────
 
-    if (!escrowId || !role || !action || !share) {
+/**
+ * POST /api/escrow/nonce
+ * Mỗi bên gửi nonce point R_i = k_i * G (không gửi k_i).
+ * Khi đủ 2 bên: backend tổng hợp R, tính challenge e, broadcast qua WebSocket.
+ *
+ * Body: { escrowId, role, action, R_x, R_y }
+ */
+router.post('/nonce', (req, res) => {
+  try {
+    const { escrowId, role, action, R_x, R_y } = req.body;
+
+    if (!escrowId || !role || !action || !R_x || !R_y) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-
-    const sessionData = sessions.get(escrowId);
-    if (!sessionData) {
-      return res.status(404).json({ error: 'Escrow session not found' });
+    if (!VALID_ROLES.includes(role)) {
+      return res.status(400).json({ error: `Invalid role. Allowed: ${VALID_ROLES.join(', ')}` });
+    }
+    if (!VALID_ACTIONS.includes(action)) {
+      return res.status(400).json({ error: `Invalid action. Allowed: ${VALID_ACTIONS.join(', ')}` });
     }
 
-    // TODO: Verify signature Ethereum của user ở đây để authenticate (Phase tăng cường bảo mật, Làm khi có Frontend)
+    const session = checkSession(escrowId, res);
+    if (!session) return;
 
-    const existingShare = sessionData.partialShares.find(s => s.role === role);
-    if (!existingShare) {
-      const shareIndex = sessionData.shares[role].index;
-      sessionData.partialShares.push({ index: shareIndex, share: share, role });
-
-      const io = req.app.get('io');
-      if (io) {
-        io.to(escrowId).emit('sig_received', { count: sessionData.partialShares.length, needed: 2 });
-      }
+    if (session.completedActions.includes(action)) {
+      return res.status(409).json({ error: `Action '${action}' already signed` });
     }
 
-    if (sessionData.partialShares.length >= 2) {
-      // Đủ 2 share -> tổng hợp thành chữ ký
-      // Lấy toàn bộ mảng share copy và CLEAR trạng thái Session ngay lập tức để tránh Deadlock
-      const currentShares = [...sessionData.partialShares];
-      sessionData.partialShares = [];
-      sessions.set(escrowId, sessionData);
-
-      // Tạo Raw Hash (tương đương ABI.encodePacked của Solidity)
-      const formattedEscrowId = typeof escrowId === 'string' && escrowId.startsWith('0x') ? escrowId : ethers.id(escrowId);
-      const packedHash = ethers.solidityPackedKeccak256(
-        ['bytes32', 'string'],
-        [formattedEscrowId, action]
-      );
-      
-      // Hầu hết Smart Contract (OpenZeppelin) dùng chuẩn \x19Ethereum Signed Message:\n32 kèm độ dài.
-      // Ethers hashMessage sẽ làm việc này thay vì hash trần bytes32, giúp chữ ký không bị giả mạo.
-      const ethSignedMessageHash = ethers.hashMessage(ethers.getBytes(packedHash));
-
-      // Thực thi gom khoá và Ký với format Signed Message Hash
-      const sig = aggregateAndSign(currentShares, ethSignedMessageHash);
-
-      const io = req.app.get('io');
-      if (io) {
-        io.to(escrowId).emit('sig_complete', {
-          r: sig.r,
-          s: sig.s,
-          v: sig.v,
-          msgHash: ethSignedMessageHash, // Chú ý: Đây là Hash đã prepended
-          rawHash: packedHash // Hash nguyên bản trên SC để debug
-        });
-      }
-
-      return res.json({ r: sig.r, s: sig.s, v: sig.v, msgHash: ethSignedMessageHash, rawHash: packedHash });
-    } else {
-      // Cập nhật session tạm khi chưa đủ share
-      sessions.set(escrowId, sessionData);
-      return res.json({ received: sessionData.partialShares.length, needed: 2 });
+    // Khi round 1 bắt đầu, lock action và xác định 2 bên tham gia
+    if (!session.signingAction) {
+      session.signingAction = action;
+      session.nonces = {};
+      session.zShares = {};
+    } else if (session.signingAction !== action) {
+      return res.status(409).json({ error: 'Different action already in progress' });
     }
 
+    // Verify role này có trong session
+    if (!session.pubKeys[role]) {
+      return res.status(403).json({ error: `Role '${role}' not found in this escrow` });
+    }
+
+    session.nonces[role] = { R_x, R_y };
+    sessions.set(escrowId, session);
+
+    const io = req.app.get('io');
+    const nonceCount = Object.keys(session.nonces).length;
+
+    if (nonceCount < 2) {
+      if (io) io.to(escrowId).emit('nonce_received', { count: nonceCount, needed: 2 });
+      return res.json({ received: nonceCount, needed: 2 });
+    }
+
+    // Đủ 2 nonces — tổng hợp R, tính PKagg và challenge e
+    const roles = Object.keys(session.nonces);
+    session.signingRoles = roles;
+
+    const pkAgg = getPkAggForRoles(session, roles);
+    const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNonces(Object.values(session.nonces));
+
+    const msgHash = buildMsgHash(escrowId, action);
+    const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
+
+    // Lưu context cho round 2
+    session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge };
+    sessions.set(escrowId, session);
+
+    // Broadcast challenge — mỗi bên dùng e để tính z_i = k_i + e * s_i
+    if (io) {
+      io.to(escrowId).emit('nonce_collected', { R_addr, challenge, msgHash, pkAgg });
+    }
+
+    return res.json({ ok: true, R_addr, challenge, msgHash, pkAgg });
   } catch (error) {
-    console.error('Error in /partial-sign:', error);
-    // Văng lỗi thì báo frontend, session vẫn sạch vì đã cleard array từ bên trên
+    console.error('Error in /nonce:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Lấy thông tin session status
-router.get('/:id/status', (req, res) => {
-  const sessionData = sessions.get(req.params.id);
-  if (!sessionData) {
-    return res.status(404).json({ error: 'Escrow session not found' });
+// ─── Phase 2: Threshold Signing — Round 2 (z share submission) ───────────────
+
+/**
+ * POST /api/escrow/sign
+ * Mỗi bên tự tính z_i = k_i + e * s_i ở FRONTEND rồi gửi z_i lên.
+ * Backend tổng hợp z = z_1 + z_2 (mod ORDER).
+ * Chữ ký cuối: (R_addr, z, e) — dùng để gọi contract.release/refund/timeoutRelease.
+ *
+ * Body: { escrowId, role, z }
+ */
+router.post('/sign', (req, res) => {
+  try {
+    const { escrowId, role, z } = req.body;
+
+    if (!escrowId || !role || !z) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    if (!VALID_ROLES.includes(role)) {
+      return res.status(400).json({ error: `Invalid role. Allowed: ${VALID_ROLES.join(', ')}` });
+    }
+
+    const session = checkSession(escrowId, res);
+    if (!session) return;
+
+    if (!session.round2Context) {
+      return res.status(400).json({ error: 'Round 1 not completed. Submit nonces first.' });
+    }
+    if (!session.signingRoles.includes(role)) {
+      return res.status(403).json({ error: `Role '${role}' is not part of current signing session` });
+    }
+
+    session.zShares[role] = z;
+    sessions.set(escrowId, session);
+
+    const io = req.app.get('io');
+    const zCount = Object.keys(session.zShares).length;
+
+    if (zCount < 2) {
+      if (io) io.to(escrowId).emit('z_received', { count: zCount, needed: 2 });
+      return res.json({ received: zCount, needed: 2 });
+    }
+
+    // Đủ 2 z shares — tổng hợp chữ ký cuối
+    const { R_addr, pkAgg, msgHash, challenge: e } = session.round2Context;
+    const z_agg = aggregateZShares(Object.values(session.zShares));
+
+    // Đánh dấu action hoàn thành, dọn trạng thái signing
+    session.completedActions.push(session.signingAction);
+    session.nonces = {};
+    session.zShares = {};
+    session.signingRoles = null;
+    session.signingAction = null;
+    session.round2Context = null;
+    sessions.set(escrowId, session);
+
+    const sig = { R_addr, z: z_agg, e, msgHash };
+
+    if (io) io.to(escrowId).emit('schnorr_complete', sig);
+
+    return res.json(sig);
+  } catch (error) {
+    console.error('Error in /sign:', error);
+    res.status(500).json({ error: error.message });
   }
+});
+
+// ─── Status & Dispute ─────────────────────────────────────────────────────────
+
+router.get('/:id/status', (req, res) => {
+  const session = sessions.get(req.params.id);
+  if (!session) return res.status(404).json({ error: 'Escrow session not found' });
   res.json({
-    status: sessionData.status,
-    sigCount: sessionData.partialShares.length,
-    parties: sessionData.parties,
-    pkAggAddress: sessionData.pkAggAddress
+    status: session.status,
+    signingAction: session.signingAction,
+    nonceCount: Object.keys(session.nonces).length,
+    zShareCount: Object.keys(session.zShares).length,
+    parties: session.parties,
+    completedActions: session.completedActions
   });
 });
 
-// Dispute endpoint (gọi khi buyer tranh chấp)
 router.post('/dispute', (req, res) => {
-  const { escrowId, reason } = req.body;
-  const sessionData = sessions.get(escrowId);
-  if (!sessionData) {
-    return res.status(404).json({ error: 'Session not found' });
-  }
-  sessionData.status = 'DISPUTED';
-  sessions.set(escrowId, sessionData);
+  const { escrowId } = req.body;
+  const session = sessions.get(escrowId);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  session.status = 'DISPUTED';
+  sessions.set(escrowId, session);
   res.json({ ok: true });
 });
 

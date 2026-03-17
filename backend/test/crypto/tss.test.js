@@ -1,65 +1,66 @@
-import { reconstructPrivateKey, signWithReconstructed, aggregateAndSign } from '../../src/crypto/tss.js';
+import {
+  aggregatePublicKeys,
+  aggregateNonces,
+  computeChallenge,
+  computeSignatureShare,
+  aggregateZShares,
+  verifySchnorr
+} from '../../src/crypto/schnorr.js';
 import { generateKeyPair } from '../../src/crypto/ecc.js';
-import Secrets from 'secrets.js-grempe';
 import { ethers } from 'ethers';
 
-describe('TSS Crypto Functions', () => {
-  let privateKeyHex;
-  let sharesRaw;
-  let sharesObj;
+describe('Schnorr Crypto Functions', () => {
+  let buyer;
+  let seller;
+  let pkAgg;
 
   beforeAll(() => {
-    const keyPair = generateKeyPair();
-    privateKeyHex = keyPair.privKey;
-
-    // Create 3 shares with threshold 2
-    sharesRaw = Secrets.share(privateKeyHex, 3, 2);
-    sharesObj = [
-      { index: 1, share: sharesRaw[0] },
-      { index: 2, share: sharesRaw[1] }
-    ];
+    buyer = generateKeyPair();
+    seller = generateKeyPair();
+    pkAgg = aggregatePublicKeys([buyer.pubKey, seller.pubKey]);
   });
 
-  it('should correctly reconstruct the private key from shares', () => {
-    // sharesObj has 2 shares (threshold is 2), so it should reconstruct
-    const reconstructedKey = reconstructPrivateKey(sharesObj);
+  it('should aggregate public keys and nonces correctly', () => {
+    const nonceA = ethers.hexlify(ethers.randomBytes(32));
+    const nonceB = ethers.hexlify(ethers.randomBytes(32));
+    const zero = '0x' + '00'.repeat(32);
 
-    // Zero padded if secrets.js decides differently, but usually length 64 hex
-    // Ensure we parse it relatively safely padding zeroes if necessary
-    // Secrets drops leading zeroes sometimes, so let's normalize:
-    const normalizedRecon = reconstructedKey.padStart(64, '0');
-    const normalizedOriginal = privateKeyHex.padStart(64, '0');
+    const a = computeSignatureShare(buyer.privKey, nonceA, zero);
+    const b = computeSignatureShare(seller.privKey, nonceB, zero);
 
-    expect(normalizedRecon).toBe(normalizedOriginal);
+    const agg = aggregateNonces([
+      { R_x: a.R_x, R_y: a.R_y },
+      { R_x: b.R_x, R_y: b.R_y }
+    ]);
+
+    expect(agg.R_x.startsWith('0x')).toBe(true);
+    expect(agg.R_y.startsWith('0x')).toBe(true);
+    expect(agg.R_addr.startsWith('0x')).toBe(true);
   });
 
-  it('should sign a message hash correctly', () => {
-    // Create a 32-byte dummy hash (64 hex characters)
-    const msgHashHex = '0x' + Buffer.from('test-message-hash-1234567890xy').toString('hex');
+  it('should produce verifiable Schnorr signature from two signature shares', () => {
+    const msgHash = ethers.solidityPackedKeccak256(
+      ['bytes32', 'string'],
+      ['0x' + 'ab'.repeat(32), 'release']
+    );
 
-    const sig = signWithReconstructed(privateKeyHex, msgHashHex);
+    const nonceA = ethers.hexlify(ethers.randomBytes(32));
+    const nonceB = ethers.hexlify(ethers.randomBytes(32));
+    const zero = '0x' + '00'.repeat(32);
 
-    expect(sig).toHaveProperty('r');
-    expect(sig).toHaveProperty('s');
-    expect(sig).toHaveProperty('v');
+    const round1A = computeSignatureShare(buyer.privKey, nonceA, zero);
+    const round1B = computeSignatureShare(seller.privKey, nonceB, zero);
 
-    expect(sig.r.startsWith('0x')).toBe(true);
-    expect(sig.s.startsWith('0x')).toBe(true);
-    // r and s should be 32 bytes (64 hex chars) + '0x' = 66 chars
-    expect(sig.r.length).toBe(66);
-    expect(sig.s.length).toBe(66);
+    const { R_addr } = aggregateNonces([
+      { R_x: round1A.R_x, R_y: round1A.R_y },
+      { R_x: round1B.R_x, R_y: round1B.R_y }
+    ]);
 
-    // v should be 27 or 28
-    expect([27, 28]).toContain(sig.v);
-  });
+    const e = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
+    const shareA = computeSignatureShare(buyer.privKey, nonceA, e);
+    const shareB = computeSignatureShare(seller.privKey, nonceB, e);
+    const z = aggregateZShares([shareA.z, shareB.z]);
 
-  it('should aggregate shares and sign the payload', () => {
-    const msgHashHex = '0x' + Buffer.from('test-aggregate-and-sign-xyzabc').toString('hex');
-
-    const sig = aggregateAndSign(sharesObj, msgHashHex);
-
-    expect(sig).toHaveProperty('r');
-    expect(sig).toHaveProperty('s');
-    expect(sig).toHaveProperty('v');
+    expect(verifySchnorr(pkAgg, msgHash, R_addr, z, e)).toBe(true);
   });
 });

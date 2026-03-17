@@ -12,21 +12,33 @@ contract EscrowFactory {
     function createEscrow(
         address seller,
         address mediator,
-        address pkAggAddress,
+        uint256[6] calldata pkAggCoords,
         uint256 amount,
         uint256 confirmDays,
         uint256 timeoutDays
     ) external returns (address) {
         address buyer = msg.sender;
         // Generate pseudo-random escrowId based on inputs and timestamp
-        bytes32 escrowId = keccak256(abi.encodePacked(buyer, seller, block.timestamp, pkAggAddress));
+        bytes32 escrowId = keccak256(
+            abi.encodePacked(
+                buyer,
+                seller,
+                block.timestamp,
+                pkAggCoords[0],
+                pkAggCoords[1],
+                pkAggCoords[2],
+                pkAggCoords[3],
+                pkAggCoords[4],
+                pkAggCoords[5]
+            )
+        );
 
         EscrowVault vault = new EscrowVault(
             escrowId,
             buyer,
             seller,
             mediator,
-            pkAggAddress,
+            pkAggCoords,
             amount,
             confirmDays,
             timeoutDays

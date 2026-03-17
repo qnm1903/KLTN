@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-
 contract EscrowVault {
-    using ECDSA for bytes32;
+    uint256 private constant ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
 
     bytes32 public escrowId;
     address public buyer;
     address public seller;
     address public mediator;
-    address public pkAggAddress;
+    uint256 public pkAggBsX;
+    uint256 public pkAggBsY;
+    uint256 public pkAggBmX;
+    uint256 public pkAggBmY;
+    uint256 public pkAggSmX;
+    uint256 public pkAggSmY;
     uint256 public amount;
     Status public status;
     uint256 public confirmDeadline;
@@ -28,7 +31,7 @@ contract EscrowVault {
         address _buyer,
         address _seller,
         address _mediator,
-        address _pkAggAddress,
+        uint256[6] memory _pkAggCoords,
         uint256 _amount,
         uint256 _confirmDays,
         uint256 _timeoutDays
@@ -37,7 +40,12 @@ contract EscrowVault {
         buyer = _buyer;
         seller = _seller;
         mediator = _mediator;
-        pkAggAddress = _pkAggAddress;
+        pkAggBsX = _pkAggCoords[0];
+        pkAggBsY = _pkAggCoords[1];
+        pkAggBmX = _pkAggCoords[2];
+        pkAggBmY = _pkAggCoords[3];
+        pkAggSmX = _pkAggCoords[4];
+        pkAggSmY = _pkAggCoords[5];
         amount = _amount;
         status = Status.CREATED;
         
@@ -59,15 +67,14 @@ contract EscrowVault {
         emit FundsLocked(escrowId, amount);
     }
 
-    function release(bytes32 r, bytes32 s, uint8 v, bytes32 msgHash) external {
+    function release(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash) external {
         require(status == Status.LOCKED || status == Status.DISPUTED, "Invalid status");
         
         // Reconstruct expected msg hash
         bytes32 expectedHash = keccak256(abi.encodePacked(escrowId, "release"));
         require(msgHash == expectedHash, "Invalid msgHash");
         
-        // Verify signature
-        require(_verifySignature(r, s, v, msgHash), "Invalid signature");
+        require(_verifySchnorr(pkAggBsX, pkAggBsY, msgHash, rAddr, z, e), "Invalid signature");
 
         status = Status.RELEASED;
         payable(seller).transfer(amount);
@@ -75,13 +82,13 @@ contract EscrowVault {
         emit FundsReleased(escrowId, seller);
     }
 
-    function refund(bytes32 r, bytes32 s, uint8 v, bytes32 msgHash) external {
+    function refund(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash) external {
         require(status == Status.LOCKED || status == Status.DISPUTED, "Invalid status");
 
         bytes32 expectedHash = keccak256(abi.encodePacked(escrowId, "refund"));
         require(msgHash == expectedHash, "Invalid msgHash");
 
-        require(_verifySignature(r, s, v, msgHash), "Invalid signature");
+        require(_verifySchnorr(pkAggBmX, pkAggBmY, msgHash, rAddr, z, e), "Invalid signature");
 
         status = Status.REFUNDED;
         payable(buyer).transfer(amount);
@@ -99,14 +106,14 @@ contract EscrowVault {
         emit DisputeOpened(escrowId);
     }
 
-    function timeoutRelease(bytes32 r, bytes32 s, uint8 v, bytes32 msgHash) external {
+    function timeoutRelease(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash) external {
         require(status == Status.LOCKED, "Invalid status");
         require(block.timestamp > timeoutDeadline, "Not timed out");
 
         bytes32 expectedHash = keccak256(abi.encodePacked(escrowId, "timeout"));
         require(msgHash == expectedHash, "Invalid msgHash");
 
-        require(_verifySignature(r, s, v, msgHash), "Invalid signature");
+        require(_verifySchnorr(pkAggSmX, pkAggSmY, msgHash, rAddr, z, e), "Invalid signature");
 
         status = Status.RELEASED;
         payable(seller).transfer(amount);
@@ -114,8 +121,27 @@ contract EscrowVault {
         emit FundsReleased(escrowId, seller);
     }
 
-    function _verifySignature(bytes32 r, bytes32 s, uint8 v, bytes32 msgHash) internal view returns (bool) {
-        address recovered = ecrecover(msgHash, v, r, s);
-        return recovered == pkAggAddress;
+    function _verifySchnorr(
+        uint256 pkX,
+        uint256 pkY,
+        bytes32 msgHash,
+        address rAddr,
+        bytes32 z,
+        bytes32 e
+    ) internal pure returns (bool) {
+        if (keccak256(abi.encodePacked(rAddr, pkX, pkY, msgHash)) != e) {
+            return false;
+        }
+
+        uint256 negZ = addmod(0, ORDER - (uint256(z) % ORDER), ORDER);
+        uint256 negE = addmod(0, ORDER - (uint256(e) % ORDER), ORDER);
+
+        address computed = ecrecover(
+            bytes32(mulmod(negZ, pkX, ORDER)),
+            pkY % 2 == 0 ? 27 : 28,
+            bytes32(pkX),
+            bytes32(mulmod(negE, pkX, ORDER))
+        );
+        return computed == rAddr;
     }
 }

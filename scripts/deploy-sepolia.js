@@ -22,7 +22,20 @@ async function main() {
 
   const factoryAddress = await factory.getAddress();
   const deployTx = factory.deploymentTransaction();
+  if (!deployTx) {
+    throw new Error(
+      "EscrowFactory deployment transaction is unavailable (deploymentTransaction() returned null). " +
+      "Cannot determine tx hash/block metadata for this deployment."
+    );
+  }
+
   const receipt = await deployTx.wait();
+  if (!receipt) {
+    console.warn(
+      "Deployment transaction receipt is null (possibly dropped/replaced). " +
+      "Address is available from waitForDeployment(), but blockNumber metadata will be saved as null."
+    );
+  }
 
   const output = {
     network: hre.network.name,
@@ -33,7 +46,7 @@ async function main() {
       EscrowFactory: {
         address: factoryAddress,
         txHash: deployTx.hash,
-        blockNumber: receipt.blockNumber,
+        blockNumber: receipt ? receipt.blockNumber : null,
         constructorArgs: []
       }
     }
@@ -45,6 +58,12 @@ async function main() {
   fs.writeFileSync(outFile, JSON.stringify(output, null, 2));
 
   console.log("EscrowFactory deployed at:", factoryAddress);
+  console.log("Deployment tx hash:", deployTx.hash);
+  if (receipt) {
+    console.log("Deployment block:", receipt.blockNumber);
+  } else {
+    console.log("Deployment block: unavailable (receipt is null)");
+  }
   console.log("Deployment metadata saved to:", outFile);
   console.log("\nVerify command:");
   console.log(`npx hardhat verify --network sepolia ${factoryAddress}`);

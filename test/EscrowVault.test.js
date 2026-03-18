@@ -5,8 +5,8 @@ const { ethers } = require("hardhat");
 describe("EscrowVault & EscrowFactory", function () {
   let factory, vault;
   let owner, buyer, seller, mediator, otherAccount;
-  let aggSigner;
-  let pkAgg;
+  let laneSigners;
+  let lanePk;
 
   const AMOUNT = ethers.parseEther("1.0");
   const CONFIRM_DAYS = 14;
@@ -52,9 +52,16 @@ describe("EscrowVault & EscrowFactory", function () {
   beforeEach(async function () {
     [owner, buyer, seller, mediator, otherAccount] = await ethers.getSigners();
 
-    // Use one signer keypair for all three PKagg lanes in tests
-    aggSigner = ethers.Wallet.createRandom();
-    pkAgg = toPublicXY(aggSigner.privateKey);
+    laneSigners = {
+      release: ethers.Wallet.createRandom(),
+      refund: ethers.Wallet.createRandom(),
+      timeout: ethers.Wallet.createRandom()
+    };
+    lanePk = {
+      release: toPublicXY(laneSigners.release.privateKey),
+      refund: toPublicXY(laneSigners.refund.privateKey),
+      timeout: toPublicXY(laneSigners.timeout.privateKey)
+    };
 
     // Deploy Factory
     const Factory = await ethers.getContractFactory("EscrowFactory");
@@ -65,12 +72,12 @@ describe("EscrowVault & EscrowFactory", function () {
       seller.address,
       mediator.address,
       [
-        BigInt(pkAgg.x),
-        BigInt(pkAgg.y),
-        BigInt(pkAgg.x),
-        BigInt(pkAgg.y),
-        BigInt(pkAgg.x),
-        BigInt(pkAgg.y)
+        BigInt(lanePk.release.x),
+        BigInt(lanePk.release.y),
+        BigInt(lanePk.refund.x),
+        BigInt(lanePk.refund.y),
+        BigInt(lanePk.timeout.x),
+        BigInt(lanePk.timeout.y)
       ],
       AMOUNT,
       CONFIRM_DAYS,
@@ -131,7 +138,12 @@ describe("EscrowVault & EscrowFactory", function () {
       const escrowId = await vault.escrowId();
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "release"]);
       const msgHash = ethers.keccak256(payload);
-      const signature = buildSchnorrSignature(aggSigner.privateKey, pkAgg.x, pkAgg.y, msgHash);
+      const signature = buildSchnorrSignature(
+        laneSigners.release.privateKey,
+        lanePk.release.x,
+        lanePk.release.y,
+        msgHash
+      );
 
       const sellerBalanceBefore = await ethers.provider.getBalance(seller.address);
 
@@ -154,9 +166,30 @@ describe("EscrowVault & EscrowFactory", function () {
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "release"]);
       const msgHash = ethers.keccak256(payload);
       const wrongWallet = ethers.Wallet.createRandom();
-      const signature = buildSchnorrSignature(wrongWallet.privateKey, pkAgg.x, pkAgg.y, msgHash);
+      const signature = buildSchnorrSignature(
+        wrongWallet.privateKey,
+        lanePk.release.x,
+        lanePk.release.y,
+        msgHash
+      );
 
       await expect(vault.release(signature.R_addr, signature.z, signature.e, msgHash))
+        .to.be.revertedWith("Invalid signature");
+    });
+
+    it("Should reject release signed with refund lane key", async function () {
+      const escrowId = await vault.escrowId();
+      const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "release"]);
+      const msgHash = ethers.keccak256(payload);
+
+      const wrongLaneSig = buildSchnorrSignature(
+        laneSigners.refund.privateKey,
+        lanePk.refund.x,
+        lanePk.refund.y,
+        msgHash
+      );
+
+      await expect(vault.release(wrongLaneSig.R_addr, wrongLaneSig.z, wrongLaneSig.e, msgHash))
         .to.be.revertedWith("Invalid signature");
     });
 
@@ -165,7 +198,12 @@ describe("EscrowVault & EscrowFactory", function () {
       // Sign "refund" instead of "release"
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "refund"]);
       const tamperedHash = ethers.keccak256(payload);
-      const signature = buildSchnorrSignature(aggSigner.privateKey, pkAgg.x, pkAgg.y, tamperedHash);
+      const signature = buildSchnorrSignature(
+        laneSigners.release.privateKey,
+        lanePk.release.x,
+        lanePk.release.y,
+        tamperedHash
+      );
 
       // Calling release() expects hash of "release"
       await expect(vault.release(signature.R_addr, signature.z, signature.e, tamperedHash))
@@ -190,7 +228,12 @@ describe("EscrowVault & EscrowFactory", function () {
       // Refund
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "refund"]);
       const msgHash = ethers.keccak256(payload);
-      const signature = buildSchnorrSignature(aggSigner.privateKey, pkAgg.x, pkAgg.y, msgHash);
+      const signature = buildSchnorrSignature(
+        laneSigners.refund.privateKey,
+        lanePk.refund.x,
+        lanePk.refund.y,
+        msgHash
+      );
 
       const buyerBalanceBefore = await ethers.provider.getBalance(buyer.address);
 
@@ -214,7 +257,12 @@ describe("EscrowVault & EscrowFactory", function () {
       const escrowId = await vault.escrowId();
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "timeout"]);
       const msgHash = ethers.keccak256(payload);
-      const signature = buildSchnorrSignature(aggSigner.privateKey, pkAgg.x, pkAgg.y, msgHash);
+      const signature = buildSchnorrSignature(
+        laneSigners.timeout.privateKey,
+        lanePk.timeout.x,
+        lanePk.timeout.y,
+        msgHash
+      );
 
       await expect(vault.timeoutRelease(signature.R_addr, signature.z, signature.e, msgHash))
         .to.be.revertedWith("Not timed out");
@@ -224,7 +272,12 @@ describe("EscrowVault & EscrowFactory", function () {
       const escrowId = await vault.escrowId();
       const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "timeout"]);
       const msgHash = ethers.keccak256(payload);
-      const signature = buildSchnorrSignature(aggSigner.privateKey, pkAgg.x, pkAgg.y, msgHash);
+      const signature = buildSchnorrSignature(
+        laneSigners.timeout.privateKey,
+        lanePk.timeout.x,
+        lanePk.timeout.y,
+        msgHash
+      );
 
       // Fast forward time
       await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);

@@ -8,6 +8,11 @@ const router = express.Router();
 
 const VALID_ROLES = ['buyer', 'seller', 'mediator'];
 const VALID_ACTIONS = ['release', 'refund', 'timeout'];
+const ACTION_ROLE_PAIRS = {
+  release: ['buyer', 'seller'],
+  refund: ['buyer', 'mediator'],
+  timeout: ['seller', 'mediator']
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -27,6 +32,21 @@ function buildMsgHash(escrowId, action) {
   return ethers.solidityPackedKeccak256(['bytes32', 'string'], [id, action]);
 }
 
+function normalizePubKey(pubKeyHex) {
+  const clean = pubKeyHex.replace('0x', '');
+  return clean.startsWith('04') ? clean : '04' + clean;
+}
+
+function roleIsAllowedForAction(role, action) {
+  return ACTION_ROLE_PAIRS[action].includes(role);
+}
+
+function rolesMatchAction(roles, action) {
+  const expected = [...ACTION_ROLE_PAIRS[action]].sort().join('+');
+  const actual = [...roles].sort().join('+');
+  return expected === actual;
+}
+
 // ─── Phase 1: DKG ─────────────────────────────────────────────────────────────
 
 /**
@@ -44,6 +64,21 @@ router.post('/init', (req, res) => {
         !buyerPubKey || !sellerPubKey || !mediatorPubKey) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
+
+    const derivedBuyer = ethers.computeAddress('0x' + normalizePubKey(buyerPubKey));
+    const derivedSeller = ethers.computeAddress('0x' + normalizePubKey(sellerPubKey));
+    const derivedMediator = ethers.computeAddress('0x' + normalizePubKey(mediatorPubKey));
+
+    if (derivedBuyer.toLowerCase() !== buyerAddr.toLowerCase()) {
+      return res.status(400).json({ error: 'buyerPubKey does not match buyerAddr' });
+    }
+    if (derivedSeller.toLowerCase() !== sellerAddr.toLowerCase()) {
+      return res.status(400).json({ error: 'sellerPubKey does not match sellerAddr' });
+    }
+    if (derivedMediator.toLowerCase() !== mediatorAddr.toLowerCase()) {
+      return res.status(400).json({ error: 'mediatorPubKey does not match mediatorAddr' });
+    }
+
     if (sessions.has(escrowId)) {
       return res.status(409).json({ error: 'Session already exists for this escrowId' });
     }
@@ -88,6 +123,9 @@ router.post('/nonce', (req, res) => {
     if (!VALID_ACTIONS.includes(action)) {
       return res.status(400).json({ error: `Invalid action. Allowed: ${VALID_ACTIONS.join(', ')}` });
     }
+    if (!roleIsAllowedForAction(role, action)) {
+      return res.status(403).json({ error: `Role '${role}' is not allowed for action '${action}'` });
+    }
 
     const session = checkSession(escrowId, res);
     if (!session) return;
@@ -110,6 +148,11 @@ router.post('/nonce', (req, res) => {
       return res.status(403).json({ error: `Role '${role}' not found in this escrow` });
     }
 
+    const nonceCountBefore = Object.keys(session.nonces).length;
+    if (!session.nonces[role] && nonceCountBefore >= 2) {
+      return res.status(409).json({ error: 'Nonce round already has 2 participants' });
+    }
+
     session.nonces[role] = { R_x, R_y };
     sessions.set(escrowId, session);
 
@@ -123,6 +166,15 @@ router.post('/nonce', (req, res) => {
 
     // Đủ 2 nonces — tổng hợp R, tính PKagg và challenge e
     const roles = Object.keys(session.nonces);
+    if (!rolesMatchAction(roles, action)) {
+      session.nonces = {};
+      session.zShares = {};
+      session.signingRoles = null;
+      session.signingAction = null;
+      session.round2Context = null;
+      sessions.set(escrowId, session);
+      return res.status(403).json({ error: `Signer roles do not match action '${action}' requirements` });
+    }
     session.signingRoles = roles;
 
     const pkAgg = getPkAggForRoles(session, roles);
@@ -176,6 +228,9 @@ router.post('/sign', (req, res) => {
     }
     if (!session.signingRoles.includes(role)) {
       return res.status(403).json({ error: `Role '${role}' is not part of current signing session` });
+    }
+    if (!roleIsAllowedForAction(role, session.signingAction)) {
+      return res.status(403).json({ error: `Role '${role}' is not allowed for action '${session.signingAction}'` });
     }
 
     session.zShares[role] = z;

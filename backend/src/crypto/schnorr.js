@@ -30,7 +30,16 @@ function normalize64(hex) {
 
 function normalizePubKey(hex) {
   const clean = hex.replace('0x', '');
-  return clean.startsWith('04') ? clean : '04' + clean;
+  if (clean.startsWith('04')) {
+    return clean;
+  }
+  if (clean.startsWith('02') || clean.startsWith('03')) {
+    throw new Error('Compressed public keys are not supported. Please provide an uncompressed key.');
+  }
+  if (clean.length === 128) {
+    return '04' + clean;
+  }
+  throw new Error('Invalid public key format');
 }
 
 // Chuyển EC point (x, y) → Ethereum address = keccak256(x||y)[12:]

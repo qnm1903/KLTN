@@ -64,6 +64,25 @@ describe('Escrow Routes Integration', () => {
     expect(res.body.error).toMatch(/buyerPubKey does not match buyerAddr/i);
   });
 
+  it('rejects /init when a compressed public key is provided', async () => {
+    const compressed = ethers.SigningKey.computePublicKey(buyer.priv, true);
+
+    const res = await request(app)
+      .post('/api/escrow/init')
+      .send({
+        escrowId,
+        buyerAddr: buyer.addr,
+        sellerAddr: seller.addr,
+        mediatorAddr: mediator.addr,
+        buyerPubKey: compressed,
+        sellerPubKey: seller.pub,
+        mediatorPubKey: mediator.pub
+      });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/Compressed public keys are not supported/i);
+  });
+
   it('rejects role-action mismatch on /nonce', async () => {
     await initSession();
 

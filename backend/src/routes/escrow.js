@@ -34,7 +34,16 @@ function buildMsgHash(escrowId, action) {
 
 function normalizePubKey(pubKeyHex) {
   const clean = pubKeyHex.replace('0x', '');
-  return clean.startsWith('04') ? clean : '04' + clean;
+  if (clean.startsWith('04')) {
+    return clean;
+  }
+  if (clean.startsWith('02') || clean.startsWith('03')) {
+    throw new Error('Compressed public keys are not supported. Please provide an uncompressed key.');
+  }
+  if (clean.length === 128) {
+    return '04' + clean;
+  }
+  throw new Error('Invalid public key format');
 }
 
 function roleIsAllowedForAction(role, action) {
@@ -97,6 +106,9 @@ router.post('/init', (req, res) => {
     res.json(result);
   } catch (error) {
     console.error('Error in /init:', error);
+    if (/public key/i.test(error.message)) {
+      return res.status(400).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message });
   }
 });

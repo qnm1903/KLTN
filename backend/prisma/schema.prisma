@@ -1,0 +1,68 @@
+// Prisma Schema — Escrow TSS DApp
+// SQLite cho dev/demo, dễ dàng chuyển sang Postgres cho production
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id            String   @id @default(uuid())
+  walletAddress String   @unique
+  name          String?
+  role          String   @default("USER") // USER | MEDIATOR | ADMIN
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  boughtEscrows   Escrow[]   @relation("BuyerEscrows")
+  soldEscrows     Escrow[]   @relation("SellerEscrows")
+  mediatedEscrows Escrow[]   @relation("MediatorEscrows")
+  evidences       Evidence[]
+}
+
+model Escrow {
+  id              String   @id @default(uuid())
+  chainEscrowId   String?  // bytes32 ID trên Smart Contract (set sau khi deploy on-chain)
+  contractAddress String?  // Địa chỉ EscrowVault contract đã deploy
+  title           String
+  description     String   @default("")
+  amount          Float    // Số ETH ký quỹ
+  status          String   @default("DRAFT") // DRAFT | INITIALIZED | LOCKED | DISPUTED | RELEASED | REFUNDED
+
+  // Các bên tham gia
+  buyerId    String
+  sellerId   String
+  mediatorId String
+
+  buyer    User @relation("BuyerEscrows", fields: [buyerId], references: [id])
+  seller   User @relation("SellerEscrows", fields: [sellerId], references: [id])
+  mediator User @relation("MediatorEscrows", fields: [mediatorId], references: [id])
+
+  // PKAgg data (lưu kết quả DKG để reference)
+  pkAggBsX String?
+  pkAggBsY String?
+  pkAggBmX String?
+  pkAggBmY String?
+  pkAggSmX String?
+  pkAggSmY String?
+
+  evidences Evidence[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model Evidence {
+  id          String   @id @default(uuid())
+  escrowId    String
+  uploaderId  String
+  fileUrl     String   // Đường dẫn file upload
+  description String   @default("")
+  createdAt   DateTime @default(now())
+
+  escrow   Escrow @relation(fields: [escrowId], references: [id])
+  uploader User   @relation(fields: [uploaderId], references: [id])
+}

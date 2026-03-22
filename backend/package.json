@@ -12,11 +12,17 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@libsql/client": "^0.17.2",
+    "@prisma/adapter-libsql": "^7.5.0",
+    "@prisma/client": "^7.5.0",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "elliptic": "^6.6.1",
     "ethers": "^6.16.0",
     "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
+    "prisma": "^7.5.0",
     "secrets.js-grempe": "^2.0.0",
     "socket.io": "^4.8.3"
   },

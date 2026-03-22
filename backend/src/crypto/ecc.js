@@ -22,5 +22,6 @@ export function getPublicKey(privKeyHex) {
 // Chuyển uncompressed pubkey → Ethereum address (20 bytes)
 // address = keccak256(pubkey_bytes[1:])[12:]
 export function pubKeyToAddress(pubKeyHex) {
-  return ethers.computeAddress('0x' + pubKeyHex);
+  const clean = pubKeyHex.replace(/^0x/i, '');
+  return ethers.computeAddress('0x' + clean);
 }

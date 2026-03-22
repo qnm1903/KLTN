@@ -105,7 +105,7 @@ router.post('/init', (req, res) => {
     // Trả về 3 PKagg pairs để đưa vào constructor EscrowVault
     res.json(result);
   } catch (error) {
-    console.error('Error in /init:', error);
+    console.error('Error in /init:', error.message);
     if (/public key/i.test(error.message)) {
       return res.status(400).json({ error: error.message });
     }
@@ -206,7 +206,7 @@ router.post('/nonce', (req, res) => {
 
     return res.json({ ok: true, R_addr, challenge, msgHash, pkAgg });
   } catch (error) {
-    console.error('Error in /nonce:', error);
+    console.error('Error in /nonce:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -275,7 +275,7 @@ router.post('/sign', (req, res) => {
 
     return res.json(sig);
   } catch (error) {
-    console.error('Error in /sign:', error);
+    console.error('Error in /sign:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

@@ -1,2 +1,2 @@
-// In-memory map: escrowId -> { pkAggAddress, pkAggHex, shares, partialShares[], status, parties }
+// In-memory map: escrowId -> { pubKeys, pkAgg, nonces, zShares, signingRoles, signingAction, round2Context, completedActions, createdAt, status, parties }
 export const sessions = new Map();

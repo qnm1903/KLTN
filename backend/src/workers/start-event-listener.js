@@ -29,6 +29,10 @@ async function main() {
 
 main().catch(async (error) => {
   console.error('[listener] Startup failed:', error.message);
-  await prisma.$disconnect();
+  try {
+    await prisma.$disconnect();
+  } catch (disconnectError) {
+    console.error('[listener] Prisma disconnect failed:', disconnectError?.message ?? disconnectError);
+  }
   process.exit(1);
 });

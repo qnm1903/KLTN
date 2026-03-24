@@ -20,36 +20,36 @@ const authNonceRateLimiter = createRouteRateLimiter({
  */
 router.get('/nonce', authNonceRateLimiter, async (req, res) => {
   try {
-  const { address } = req.query;
-  if (!address || !ethers.isAddress(address)) {
-    return res.status(400).json({ error: 'Valid Ethereum address required' });
-  }
-
-  const addr = address.toLowerCase();
-  const nonce = crypto.randomBytes(32).toString('hex');
-
-  await prisma.authNonce.upsert({
-    where: { address: addr },
-    update: {
-      nonce,
-      expiresAt: new Date(Date.now() + NONCE_TTL)
-    },
-    create: {
-      address: addr,
-      nonce,
-      expiresAt: new Date(Date.now() + NONCE_TTL)
+    const { address } = req.query;
+    if (!address || !ethers.isAddress(address)) {
+      return res.status(400).json({ error: 'Valid Ethereum address required' });
     }
-  });
 
-  // Cleanup expired nonces để giữ store gọn.
-  await prisma.authNonce.deleteMany({
-    where: { expiresAt: { lt: new Date() } }
-  });
+    const addr = address.toLowerCase();
+    const nonce = crypto.randomBytes(32).toString('hex');
 
-  res.json({ nonce });
+    await prisma.authNonce.upsert({
+      where: { address: addr },
+      update: {
+        nonce,
+        expiresAt: new Date(Date.now() + NONCE_TTL)
+      },
+      create: {
+        address: addr,
+        nonce,
+        expiresAt: new Date(Date.now() + NONCE_TTL)
+      }
+    });
+
+    // Cleanup expired nonces để giữ store gọn.
+    await prisma.authNonce.deleteMany({
+      where: { expiresAt: { lt: new Date() } }
+    });
+
+    res.json({ nonce });
   } catch (error) {
-    console.error('Error in /auth/nonce:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('Error in /auth/nonce:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

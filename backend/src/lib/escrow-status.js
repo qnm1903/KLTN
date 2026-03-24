@@ -17,7 +17,7 @@ export function canTransitionStatus(currentStatus, nextStatus) {
   const current = normalizeEscrowStatus(currentStatus);
   const next = normalizeEscrowStatus(nextStatus);
   if (!next) return false;
-  if (!current) return true;
+  if (!current) return false;
   if (current === next) return true;
   return ALLOWED_TRANSITIONS[current].has(next);
 }

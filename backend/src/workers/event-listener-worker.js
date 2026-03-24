@@ -14,8 +14,13 @@ const VAULT_ABI = [
 
 const SYNC_STATE_KEY = 'event-listener-v1';
 
-function getLogIndex(log) {
-  return Number(log.index ?? log.logIndex ?? 0);
+// Returns null when the chain log index is missing.
+export function getLogIndex(log) {
+  const rawIndex = log?.index ?? log?.logIndex;
+  if (rawIndex == null) return null;
+
+  const normalizedIndex = Number(rawIndex);
+  return Number.isFinite(normalizedIndex) ? normalizedIndex : null;
 }
 
 function getTxHash(log) {
@@ -74,14 +79,19 @@ async function updateEscrowStatus(prisma, escrow, nextStatus, data = {}) {
   if (!canTransitionStatus(escrow.status, nextStatus)) {
     return false;
   }
-  await prisma.escrow.update({
-    where: { id: escrow.id },
+
+  const updated = await prisma.escrow.updateMany({
+    where: {
+      id: escrow.id,
+      status: escrow.status
+    },
     data: {
       status: nextStatus,
       ...data
     }
   });
-  return true;
+
+  return updated.count === 1;
 }
 
 async function handleFactoryCreated({ prisma, args, contractAddress, logger }) {
@@ -200,26 +210,38 @@ export function startEventListenerWorker({ prisma, logger = console, config = {}
     for (const log of logs) {
       const txHash = getTxHash(log);
       const logIndex = getLogIndex(log);
-      if (!txHash || await isProcessed(prisma, txHash, logIndex)) continue;
+      if (!txHash || logIndex == null) {
+        logger.warn?.('[listener] Skipping factory log with missing txHash or logIndex');
+        continue;
+      }
 
       const parsed = factoryInterface.parseLog(log);
-      const { vaultAddress } = await handleFactoryCreated({
-        prisma,
-        args: parsed.args,
-        contractAddress: normalizeAddress(log.address),
-        logger
+      let vaultAddress;
+
+      await prisma.$transaction(async (tx) => {
+        if (await isProcessed(tx, txHash, logIndex)) {
+          return;
+        }
+
+        const result = await handleFactoryCreated({
+          prisma: tx,
+          args: parsed.args,
+          contractAddress: normalizeAddress(log.address),
+          logger
+        });
+        vaultAddress = result?.vaultAddress;
+
+        await markProcessed(tx, {
+          txHash,
+          logIndex,
+          contractAddress: normalizeAddress(log.address),
+          eventName: parsed.name,
+          escrowId: parsed.args.escrowId,
+          blockNumber: Number(log.blockNumber)
+        });
       });
 
       if (vaultAddress) knownVaults.add(vaultAddress);
-
-      await markProcessed(prisma, {
-        txHash,
-        logIndex,
-        contractAddress: normalizeAddress(log.address),
-        eventName: parsed.name,
-        escrowId: parsed.args.escrowId,
-        blockNumber: Number(log.blockNumber)
-      });
     }
   }
 
@@ -242,21 +264,30 @@ export function startEventListenerWorker({ prisma, logger = console, config = {}
 
       const txHash = getTxHash(log);
       const logIndex = getLogIndex(log);
-      if (!txHash || await isProcessed(prisma, txHash, logIndex)) continue;
+      if (!txHash || logIndex == null) {
+        logger.warn?.('[listener] Skipping vault log with missing txHash or logIndex');
+        continue;
+      }
 
-      await handleVaultEvent({
-        prisma,
-        parsedLog: parsed,
-        contractAddress: normalizeAddress(log.address)
-      });
+      await prisma.$transaction(async (tx) => {
+        if (await isProcessed(tx, txHash, logIndex)) {
+          return;
+        }
 
-      await markProcessed(prisma, {
-        txHash,
-        logIndex,
-        contractAddress: normalizeAddress(log.address),
-        eventName: parsed.name,
-        escrowId: parsed.args.escrowId,
-        blockNumber: Number(log.blockNumber)
+        await handleVaultEvent({
+          prisma: tx,
+          parsedLog: parsed,
+          contractAddress: normalizeAddress(log.address)
+        });
+
+        await markProcessed(tx, {
+          txHash,
+          logIndex,
+          contractAddress: normalizeAddress(log.address),
+          eventName: parsed.name,
+          escrowId: parsed.args.escrowId,
+          blockNumber: Number(log.blockNumber)
+        });
       });
     }
   }
@@ -279,7 +310,7 @@ export function startEventListenerWorker({ prisma, logger = console, config = {}
     while (running) {
       try {
         const latestBlock = await provider.getBlockNumber();
-        const safeBlock = latestBlock - confirmations;
+        const safeBlock = Math.max(0, latestBlock - confirmations);
 
         if (safeBlock <= syncState.lastProcessedBlock) {
           await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));

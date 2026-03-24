@@ -1,0 +1,34 @@
+import dotenv from 'dotenv';
+import prisma from '../lib/prisma.js';
+import { startEventListenerWorker } from './event-listener-worker.js';
+
+dotenv.config();
+
+async function main() {
+  const worker = startEventListenerWorker({ prisma, logger: console });
+
+  const shutdown = async (signal) => {
+    console.info(`[listener] Received ${signal}. Shutting down...`);
+    await worker.stop();
+    await prisma.$disconnect();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => { shutdown('SIGINT').catch((error) => {
+    console.error('[listener] Shutdown error:', error.message);
+    process.exit(1);
+  }); });
+
+  process.on('SIGTERM', () => { shutdown('SIGTERM').catch((error) => {
+    console.error('[listener] Shutdown error:', error.message);
+    process.exit(1);
+  }); });
+
+  console.info('[listener] Worker started.');
+}
+
+main().catch(async (error) => {
+  console.error('[listener] Startup failed:', error.message);
+  await prisma.$disconnect();
+  process.exit(1);
+});

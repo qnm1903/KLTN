@@ -3,8 +3,20 @@ import { sessions } from '../store/session.js';
 import { initDKG, getPkAggForRoles, SESSION_TTL_MS } from '../crypto/dkg.js';
 import { aggregateNonces, computeChallenge, aggregateZShares } from '../crypto/schnorr.js';
 import { ethers } from 'ethers';
+import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-limit.js';
 
 const router = express.Router();
+const { escrowInitMax, escrowSignMax } = getRateLimitConfig();
+
+const escrowInitRateLimiter = createRouteRateLimiter({
+  max: escrowInitMax,
+  message: 'Too many escrow init requests. Please try again later.'
+});
+
+const escrowSignRateLimiter = createRouteRateLimiter({
+  max: escrowSignMax,
+  message: 'Too many escrow sign requests. Please try again later.'
+});
 
 const VALID_ROLES = ['buyer', 'seller', 'mediator'];
 const VALID_ACTIONS = ['release', 'refund', 'timeout'];
@@ -64,7 +76,7 @@ function rolesMatchAction(roles, action) {
  * Backend chỉ tổng hợp PKagg pairs — không sinh hoặc biết private key nào.
  * Trả về 3 PKagg pairs để frontend đưa vào lúc tạo EscrowVault.
  */
-router.post('/init', (req, res) => {
+router.post('/init', escrowInitRateLimiter, (req, res) => {
   try {
     const { escrowId, buyerAddr, sellerAddr, mediatorAddr,
             buyerPubKey, sellerPubKey, mediatorPubKey } = req.body;
@@ -221,7 +233,7 @@ router.post('/nonce', (req, res) => {
  *
  * Body: { escrowId, role, z }
  */
-router.post('/sign', (req, res) => {
+router.post('/sign', escrowSignRateLimiter, (req, res) => {
   try {
     const { escrowId, role, z } = req.body;
 

@@ -66,3 +66,33 @@ model Evidence {
   escrow   Escrow @relation(fields: [escrowId], references: [id])
   uploader User   @relation(fields: [uploaderId], references: [id])
 }
+
+model EventSyncState {
+  key                String   @id
+  lastProcessedBlock Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model ProcessedChainEvent {
+  id              String   @id @default(uuid())
+  txHash          String
+  logIndex        Int
+  contractAddress String
+  eventName       String
+  escrowId        String?
+  blockNumber     Int
+  processedAt     DateTime @default(now())
+
+  @@unique([txHash, logIndex])
+  @@index([escrowId])
+}
+
+model AuthNonce {
+  address   String   @id
+  nonce     String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+}

@@ -1,6 +1,7 @@
 import express from 'express';
 import prisma from '../lib/prisma.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { canTransitionStatus, normalizeEscrowStatus } from '../lib/escrow-status.js';
 
 const router = express.Router();
 
@@ -150,6 +151,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
 router.patch('/:id/status', authMiddleware, async (req, res) => {
   try {
     const { status, chainEscrowId, contractAddress, pkAggBsX, pkAggBsY, pkAggBmX, pkAggBmY, pkAggSmX, pkAggSmY } = req.body;
+    const enforceStatusTransitions = String(process.env.ENFORCE_ESCROW_STATUS_TRANSITIONS || 'false').toLowerCase() === 'true';
 
     const escrow = await prisma.escrow.findUnique({ where: { id: req.params.id } });
     if (!escrow) return res.status(404).json({ error: 'Escrow not found' });
@@ -159,8 +161,20 @@ router.patch('/:id/status', authMiddleware, async (req, res) => {
       return res.status(403).json({ error: 'You are not a participant in this escrow' });
     }
 
+    if (status) {
+      const normalizedStatus = normalizeEscrowStatus(status);
+      if (!normalizedStatus) {
+        return res.status(400).json({ error: 'Invalid escrow status' });
+      }
+      if (enforceStatusTransitions && !canTransitionStatus(escrow.status, normalizedStatus)) {
+        return res.status(409).json({
+          error: `Invalid status transition from ${escrow.status} to ${normalizedStatus}`
+        });
+      }
+    }
+
     const updateData = {};
-    if (status) updateData.status = status;
+    if (status) updateData.status = normalizeEscrowStatus(status);
     if (chainEscrowId) updateData.chainEscrowId = chainEscrowId;
     if (contractAddress) updateData.contractAddress = contractAddress;
     if (pkAggBsX) updateData.pkAggBsX = pkAggBsX;

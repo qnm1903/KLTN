@@ -3,35 +3,54 @@ import { ethers } from 'ethers';
 import crypto from 'crypto';
 import prisma from '../lib/prisma.js';
 import { signToken } from '../middleware/auth.js';
+import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-limit.js';
 
 const router = express.Router();
 
-// In-memory nonce store (TTL 5 phút)
-const nonceStore = new Map();
 const NONCE_TTL = 5 * 60 * 1000;
+const { authNonceMax } = getRateLimitConfig();
+const authNonceRateLimiter = createRouteRateLimiter({
+  max: authNonceMax,
+  message: 'Too many nonce requests. Please try again in a moment.'
+});
 
 /**
  * GET /api/auth/nonce?address=0x...
  * Trả về nonce ngẫu nhiên để user ký bằng MetaMask.
  */
-router.get('/nonce', (req, res) => {
+router.get('/nonce', authNonceRateLimiter, async (req, res) => {
+  try {
   const { address } = req.query;
   if (!address || !ethers.isAddress(address)) {
     return res.status(400).json({ error: 'Valid Ethereum address required' });
   }
 
+  const addr = address.toLowerCase();
   const nonce = crypto.randomBytes(32).toString('hex');
-  nonceStore.set(address.toLowerCase(), {
-    nonce,
-    expiresAt: Date.now() + NONCE_TTL
+
+  await prisma.authNonce.upsert({
+    where: { address: addr },
+    update: {
+      nonce,
+      expiresAt: new Date(Date.now() + NONCE_TTL)
+    },
+    create: {
+      address: addr,
+      nonce,
+      expiresAt: new Date(Date.now() + NONCE_TTL)
+    }
   });
 
-  // Cleanup expired nonces mỗi lần gọi
-  for (const [key, val] of nonceStore) {
-    if (Date.now() > val.expiresAt) nonceStore.delete(key);
-  }
+  // Cleanup expired nonces để giữ store gọn.
+  await prisma.authNonce.deleteMany({
+    where: { expiresAt: { lt: new Date() } }
+  });
 
   res.json({ nonce });
+  } catch (error) {
+    console.error('Error in /auth/nonce:', error.message);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 /**
@@ -47,12 +66,13 @@ router.post('/verify', async (req, res) => {
     }
 
     const addr = address.toLowerCase();
-    const stored = nonceStore.get(addr);
+    const stored = await prisma.authNonce.findUnique({ where: { address: addr } });
     if (!stored) {
       return res.status(400).json({ error: 'No nonce found. Call GET /nonce first.' });
     }
-    if (Date.now() > stored.expiresAt) {
-      nonceStore.delete(addr);
+
+    if (Date.now() > new Date(stored.expiresAt).getTime()) {
+      await prisma.authNonce.delete({ where: { address: addr } }).catch(() => undefined);
       return res.status(400).json({ error: 'Nonce expired. Request a new one.' });
     }
 
@@ -65,8 +85,17 @@ router.post('/verify', async (req, res) => {
       return res.status(401).json({ error: 'Signature does not match address' });
     }
 
-    // Xóa nonce đã dùng
-    nonceStore.delete(addr);
+    // Xóa nonce theo address + nonce để tránh replay khi request song song.
+    const consumeNonce = await prisma.authNonce.deleteMany({
+      where: {
+        address: addr,
+        nonce: stored.nonce
+      }
+    });
+
+    if (consumeNonce.count !== 1) {
+      return res.status(400).json({ error: 'Nonce already consumed. Request a new one.' });
+    }
 
     // Upsert user trong DB
     let user = await prisma.user.findUnique({ where: { walletAddress: addr } });

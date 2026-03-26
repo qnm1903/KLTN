@@ -24,11 +24,13 @@
     "express-rate-limit": "^8.3.1",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.1.1",
+    "node-cron": "^4.2.1",
     "prisma": "^7.5.0",
     "secrets.js-grempe": "^2.0.0",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
+    "@types/node-cron": "^3.0.11",
     "jest": "^30.3.0",
     "supertest": "^7.2.2"
   }

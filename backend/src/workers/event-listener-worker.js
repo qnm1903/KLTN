@@ -13,6 +13,14 @@ const VAULT_ABI = [
 ];
 
 const SYNC_STATE_KEY = 'event-listener-v1';
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const CONFIRM_DEADLINE_DAYS = Number(process.env.CONFIRM_DEADLINE_DAYS ?? 7);
+const TIMEOUT_DEADLINE_DAYS = Number(process.env.TIMEOUT_DEADLINE_DAYS ?? 14);
+
+function buildDeadlineFromNow(days) {
+  if (!Number.isFinite(days) || days <= 0) return null;
+  return new Date(Date.now() + Math.floor(days) * MS_PER_DAY);
+}
 
 // Returns null when the chain log index is missing.
 export function getLogIndex(log) {
@@ -136,7 +144,8 @@ async function handleFactoryCreated({ prisma, args, contractAddress, logger }) {
 
   await updateEscrowStatus(prisma, escrow, 'INITIALIZED', {
     chainEscrowId: escrowId,
-    contractAddress: vaultAddress
+    contractAddress: vaultAddress,
+    confirmDeadline: buildDeadlineFromNow(CONFIRM_DEADLINE_DAYS)
   });
 
   return { vaultAddress };
@@ -155,13 +164,16 @@ async function handleVaultEvent({ prisma, parsedLog, contractAddress }) {
   if (eventName === 'EscrowCreated') {
     await updateEscrowStatus(prisma, escrow, 'INITIALIZED', {
       chainEscrowId: escrowId,
-      contractAddress
+      contractAddress,
+      confirmDeadline: buildDeadlineFromNow(CONFIRM_DEADLINE_DAYS)
     });
     return;
   }
 
   if (eventName === 'FundsLocked') {
-    await updateEscrowStatus(prisma, escrow, 'LOCKED');
+    await updateEscrowStatus(prisma, escrow, 'LOCKED', {
+      timeoutDeadline: buildDeadlineFromNow(TIMEOUT_DEADLINE_DAYS)
+    });
     return;
   }
 

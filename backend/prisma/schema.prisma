@@ -30,8 +30,12 @@ model Escrow {
   contractAddress String?  // Địa chỉ EscrowVault contract đã deploy
   title           String
   description     String   @default("")
-  amount          Float    // Số ETH ký quỹ
+  amount          Decimal   // Số ETH ký quỹ (wei precision: 10^18 decimals)
   status          String   @default("DRAFT") // DRAFT | INITIALIZED | LOCKED | DISPUTED | RELEASED | REFUNDED
+  
+  // Deadlines cho timeout check
+  confirmDeadline   DateTime?  // Hạn cuối user phải confirm giao dịch (optional)
+  timeoutDeadline   DateTime?  // Hạn cuối trước khi tự động dispute (optional)
 
   // Các bên tham gia
   buyerId    String
@@ -53,6 +57,10 @@ model Escrow {
   evidences Evidence[]
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
+
+  // Indices for cron job queries
+  @@index([status, timeoutDeadline])
+  @@index([status, confirmDeadline])
 }
 
 model Evidence {
@@ -63,8 +71,10 @@ model Evidence {
   description String   @default("")
   createdAt   DateTime @default(now())
 
-  escrow   Escrow @relation(fields: [escrowId], references: [id])
+  escrow   Escrow @relation(fields: [escrowId], references: [id], onDelete: Cascade)
   uploader User   @relation(fields: [uploaderId], references: [id])
+
+  @@index([escrowId])
 }
 
 model EventSyncState {

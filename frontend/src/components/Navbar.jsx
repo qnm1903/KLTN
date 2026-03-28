@@ -1,10 +1,10 @@
-import { useConnect, useAccount } from 'wagmi';
+import { useConnect, useConnection } from 'wagmi';
 import { injected } from 'wagmi/connectors';
 import { useSIWE } from '../hooks/useSIWE';
 
 export default function Navbar() {
-  const { connect } = useConnect();
-  const { address, isConnected } = useAccount();
+  const connect = useConnect();
+  const { address, isConnected } = useConnection();
   const { login, logout, auth } = useSIWE();
 
   const handleConnect = () => {
@@ -12,7 +12,7 @@ export default function Navbar() {
       alert("⚠️ Không tìm thấy MetaMask! \n\nVui lòng đảm bảo bạn đang mở link này trên trình duyệt ĐÃ CÀI ĐẶT tiện ích MetaMask.");
       return;
     }
-    connect({ connector: injected() });
+    connect.mutateAsync({ connector: injected() });
   };
 
   const truncateAddress = (addr) => `${addr.slice(0, 6)}...${addr.slice(-4)}`;

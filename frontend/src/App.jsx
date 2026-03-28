@@ -1,45 +1,23 @@
 import { useState } from 'react';
-import { useAccount, useConnect, useDisconnect, useSignMessage } from 'wagmi';
+import { useConnection, useConnect } from 'wagmi';
 import { injected } from 'wagmi/connectors';
-import api from './lib/api';
+import { useSIWE } from './hooks/useSIWE';
 
 function App() {
-  const { address, isConnected } = useAccount();
-  const { connect } = useConnect();
-  const { disconnect } = useDisconnect();
-  const { signMessageAsync } = useSignMessage(); 
+  const { address, isConnected } = useConnection();
+  const connect = useConnect();
+  const { login, logout, auth } = useSIWE();
   
   const [isSigningIn, setIsSigningIn] = useState(false);
 
-  // Sign-In with Ethereum (SIWE) Flow
   const handleSignIn = async () => {
     try {
       setIsSigningIn(true);
-      
-      // STEP 1: Request Nonce from Backend
-      console.log("1. Requesting Nonce from Backend...");
-      const nonceRes = await api.get(`/auth/nonce?address=${address}`);
-      const nonce = nonceRes.data.nonce || nonceRes.data; 
-      
-      // STEP 2: Create the message to be signed (must match backend verification)
-      const message = `Sign this message to authenticate with Escrow TSS DApp.\n\nNonce: ${nonce}`;
-      
-      // STEP 3: Prompt MetaMask for user signature
-      console.log("2. Waiting for user signature via MetaMask...");
-      const signature = await signMessageAsync({ message });
-      
-      // STEP 4: Send signature to Backend for verification
-      console.log("3. Sending signature to Backend for verification...");
-      const verifyRes = await api.post('/auth/verify', {
-        address,
-        signature,
-      });
-
-      console.log("Sign-in successful!", verifyRes.data);
-      alert("Backend authentication successful! You can check the browser console.");
+      await login();
+      alert('Backend authentication successful!');
 
     } catch (error) {
-      console.error("Sign-in process failed:", error);
+      console.error('Sign-in process failed:', error);
       
       if (error.response) {
         alert(`Backend Error: ${error.response.status} - ${JSON.stringify(error.response.data)}`);
@@ -64,31 +42,37 @@ function App() {
         <div>
           {!isConnected ? (
             <button 
-              onClick={() => connect({ connector: injected() })}
-              className="px-6 py-2.5 rounded-lg border border-primary text-blue-400 hover:bg-primary hover:text-white transition-all duration-300 font-semibold shadow-[0_0_15px_rgba(30,58,138,0.3)] hover:shadow-[0_0_20px_rgba(30,58,138,0.6)]"
+              onClick={() => connect.mutate({ connector: injected() })}
+              disabled={connect.isPending}
+              className="px-6 py-2.5 rounded-lg border border-primary text-blue-400 hover:bg-primary hover:text-white transition-all duration-300 font-semibold shadow-[0_0_15px_rgba(30,58,138,0.3)] hover:shadow-[0_0_20px_rgba(30,58,138,0.6)] disabled:opacity-50"
             >
-              Connect Wallet
+              {connect.isPending ? 'Connecting' : 'Connect Wallet'}
             </button>
           ) : (
             <div className="flex items-center gap-4">
-              {/* SIGN IN BUTTON */}
-              <button 
-                onClick={handleSignIn}
-                disabled={isSigningIn}
-                className="px-4 py-2 rounded-lg bg-primary text-white font-semibold hover:bg-blue-600 transition-colors disabled:opacity-50"
-              >
-                {isSigningIn ? "Signing in..." : "Sign In to Backend"}
-              </button>
+              {!auth?.isAuthenticated ? (
+                <button 
+                  onClick={handleSignIn}
+                  disabled={isSigningIn}
+                  className="px-4 py-2 rounded-lg bg-primary text-white font-semibold hover:bg-blue-600 transition-colors disabled:opacity-50"
+                >
+                  {isSigningIn ? 'Signing in...' : 'Sign In to Backend'}
+                </button>
+              ) : (
+                <span className="px-4 py-2 rounded-lg bg-green-900/30 border border-green-700 text-green-300 text-sm font-semibold">
+                  Authenticated
+                </span>
+              )}
 
               <span className="text-sm bg-white/5 px-4 py-2 rounded-lg border border-white/10 font-mono text-gray-300">
                 {address.substring(0, 6)}...{address.substring(address.length - 4)}
               </span>
               
               <button 
-                onClick={() => disconnect()}
+                onClick={logout}
                 className="px-4 py-2 rounded-lg text-sm text-red-400 hover:bg-red-500/10 transition-colors"
               >
-                Disconnect
+                Logout
               </button>
             </div>
           )}
@@ -97,7 +81,7 @@ function App() {
 
       {/* HERO SECTION */}
       <main className="flex flex-col items-center justify-center min-h-screen px-4 pt-20 text-center relative overflow-hidden">
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[37.5rem] h-[25rem] bg-primary/20 blur-[120px] rounded-full pointer-events-none"></div>
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-150 h-100 bg-primary/20 blur-[120px] rounded-full pointer-events-none"></div>
 
         <div className="z-10 max-w-3xl">
           <h1 className="font-orbitron text-5xl md:text-6xl font-extrabold mb-6 leading-tight">

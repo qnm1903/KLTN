@@ -1,12 +1,12 @@
-import { useAccount, useSignMessage, useDisconnect } from 'wagmi';
+import { useConnection, useSignMessage, useDisconnect } from 'wagmi';
 import { useAtom } from 'jotai';
 import { authAtom } from '../store/authStore';
 import api from '../lib/api';
 
 export function useSIWE() {
-  const { address } = useAccount();
-  const { signMessageAsync } = useSignMessage();
-  const { disconnect } = useDisconnect();
+  const { address } = useConnection();
+  const signMessage = useSignMessage();
+  const disconnect = useDisconnect();
   const [auth, setAuth] = useAtom(authAtom);
 
   const login = async () => {
@@ -18,7 +18,7 @@ export function useSIWE() {
 
       // 2. Yêu cầu MetaMask ký thông điệp (Khớp 100% với Backend)
       const message = `Sign this message to authenticate with Escrow TSS DApp.\n\nNonce: ${nonce}`;
-      const signature = await signMessageAsync({ message });
+      const signature = await signMessage.mutateAsync({ message });
 
       // 3. Gửi chữ ký lên Backend để Verify
       const { data } = await api.post('/auth/verify', { address, signature });
@@ -26,18 +26,19 @@ export function useSIWE() {
       // 4. Lưu JWT và cập nhật State
       localStorage.setItem('jwt_token', data.token);
       setAuth({ isAuthenticated: true, user: data.user });
-      
-      console.log("Đăng nhập thành công!", data.user);
+
+      return data;
     } catch (error) {
-      console.error("Lỗi đăng nhập:", error);
-      disconnect(); // Ngắt kết nối ví nếu xác thực thất bại
+      console.error('Lỗi đăng nhập:', error);
+      disconnect.mutate(); // Ngắt kết nối ví nếu xác thực thất bại
+      throw error;
     }
   };
 
   const logout = () => {
     localStorage.removeItem('jwt_token');
     setAuth({ isAuthenticated: false, user: null });
-    disconnect();
+    disconnect.mutate();
   };
 
   return { login, logout, auth };

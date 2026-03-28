@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useAccount, useConnect, useDisconnect, useSignMessage } from 'wagmi';
 import { injected } from 'wagmi/connectors';
-import axios from 'axios';
+import api from './lib/api';
 
 function App() {
   const { address, isConnected } = useAccount();
@@ -16,13 +16,13 @@ function App() {
     try {
       setIsSigningIn(true);
       
-      // STEP 1: Request Nonce from Backend (Port 3001)
+      // STEP 1: Request Nonce from Backend
       console.log("1. Requesting Nonce from Backend...");
-      const nonceRes = await axios.get(`http://localhost:3001/api/auth/nonce?address=${address}`);
+      const nonceRes = await api.get(`/auth/nonce?address=${address}`);
       const nonce = nonceRes.data.nonce || nonceRes.data; 
       
-      // STEP 2: Create the message to be signed
-      const message = `Welcome to Decentralized Escrow System!\n\nPlease sign this message to verify your identity.\nNonce: ${nonce}`;
+      // STEP 2: Create the message to be signed (must match backend verification)
+      const message = `Sign this message to authenticate with Escrow TSS DApp.\n\nNonce: ${nonce}`;
       
       // STEP 3: Prompt MetaMask for user signature
       console.log("2. Waiting for user signature via MetaMask...");
@@ -30,10 +30,9 @@ function App() {
       
       // STEP 4: Send signature to Backend for verification
       console.log("3. Sending signature to Backend for verification...");
-      const verifyRes = await axios.post('http://localhost:3001/api/auth/verify', {
-        address: address,
-        signature: signature,
-        message: message 
+      const verifyRes = await api.post('/auth/verify', {
+        address,
+        signature,
       });
 
       console.log("Sign-in successful!", verifyRes.data);
@@ -98,7 +97,7 @@ function App() {
 
       {/* HERO SECTION */}
       <main className="flex flex-col items-center justify-center min-h-screen px-4 pt-20 text-center relative overflow-hidden">
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-150 h-100 bg-primary/20 blur-[120px] rounded-full pointer-events-none"></div>
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[37.5rem] h-[25rem] bg-primary/20 blur-[120px] rounded-full pointer-events-none"></div>
 
         <div className="z-10 max-w-3xl">
           <h1 className="font-orbitron text-5xl md:text-6xl font-extrabold mb-6 leading-tight">

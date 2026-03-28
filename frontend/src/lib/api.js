@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const api = axios.create({
-  baseURL: 'http://localhost:3001/api', // Đã sửa thành 3001
+  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api',
   headers: {
     'Content-Type': 'application/json',
   },
@@ -9,9 +9,14 @@ const api = axios.create({
 
 // Interceptor: Tự động gắn token vào header nếu có
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('jwt_token');
+  const token = typeof window !== 'undefined' ? localStorage.getItem('jwt_token') : null;
   if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+    if (config.headers && typeof config.headers.set === 'function') {
+      config.headers.set('Authorization', `Bearer ${token}`);
+    } else {
+      config.headers = config.headers || {};
+      config.headers.Authorization = `Bearer ${token}`;
+    }
   }
   return config;
 }, (error) => {

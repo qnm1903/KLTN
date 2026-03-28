@@ -1,0 +1,17 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;700&family=Orbitron:wght@400;700;900&display=swap');
+
+/* Định nghĩa Theme cho Khóa luận */
+@theme {
+  --color-darkBg: #0F172A;
+  --color-primary: #1E3A8A;
+  --color-accent: #CA8A04;
+  
+  --font-orbitron: "Orbitron", sans-serif;
+  --font-exo: "Exo 2", sans-serif;
+}
+
+body {
+  background-color: var(--color-darkBg);
+  color: white;
+}

@@ -292,7 +292,7 @@ router.post('/sign', escrowSignRateLimiter, (req, res) => {
   }
 });
 
-// ─── Status & Dispute ─────────────────────────────────────────────────────────
+// ─── Status ───────────────────────────────────────────────────────────────────
 
 router.get('/:id/status', (req, res) => {
   const session = sessions.get(req.params.id);
@@ -305,15 +305,6 @@ router.get('/:id/status', (req, res) => {
     parties: session.parties,
     completedActions: session.completedActions
   });
-});
-
-router.post('/dispute', (req, res) => {
-  const { escrowId } = req.body;
-  const session = sessions.get(escrowId);
-  if (!session) return res.status(404).json({ error: 'Session not found' });
-  session.status = 'DISPUTED';
-  sessions.set(escrowId, session);
-  res.json({ ok: true });
 });
 
 export default router;

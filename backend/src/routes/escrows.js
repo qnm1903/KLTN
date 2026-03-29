@@ -5,6 +5,35 @@ import { canTransitionStatus, normalizeEscrowStatus } from '../lib/escrow-status
 
 const router = express.Router();
 
+function getParticipantRole(escrow, userId) {
+  if (escrow.buyerId === userId) return 'buyer';
+  if (escrow.sellerId === userId) return 'seller';
+  if (escrow.mediatorId === userId) return 'mediator';
+  return null;
+}
+
+function canParticipantPatchStatus(role, nextStatus, allowTerminalPatch) {
+  if (!role || !nextStatus) return false;
+
+  if ((nextStatus === 'RELEASED' || nextStatus === 'REFUNDED') && !allowTerminalPatch) {
+    return false;
+  }
+
+  if (nextStatus === 'INITIALIZED' || nextStatus === 'LOCKED') {
+    return role === 'buyer';
+  }
+
+  if (nextStatus === 'DISPUTED') {
+    return role === 'buyer' || role === 'seller';
+  }
+
+  if (nextStatus === 'RELEASED' || nextStatus === 'REFUNDED') {
+    return role === 'buyer' || role === 'seller' || role === 'mediator';
+  }
+
+  return false;
+}
+
 /**
  * POST /api/escrows/draft
  * Tạo một giao dịch escrow mới ở trạng thái DRAFT (chưa deploy on-chain).
@@ -151,7 +180,8 @@ router.get('/:id', authMiddleware, async (req, res) => {
 router.patch('/:id/status', authMiddleware, async (req, res) => {
   try {
     const { status, chainEscrowId, contractAddress, pkAggBsX, pkAggBsY, pkAggBmX, pkAggBmY, pkAggSmX, pkAggSmY } = req.body;
-    const enforceStatusTransitions = String(process.env.ENFORCE_ESCROW_STATUS_TRANSITIONS || 'false').toLowerCase() === 'true';
+    const enforceStatusTransitions = String(process.env.ENFORCE_ESCROW_STATUS_TRANSITIONS || 'true').toLowerCase() === 'true';
+    const allowParticipantTerminalPatch = String(process.env.ALLOW_PARTICIPANT_TERMINAL_STATUS_PATCH || 'false').toLowerCase() === 'true';
 
     const escrow = await prisma.escrow.findUnique({ where: { id: req.params.id } });
     if (!escrow) return res.status(404).json({ error: 'Escrow not found' });
@@ -161,10 +191,17 @@ router.patch('/:id/status', authMiddleware, async (req, res) => {
       return res.status(403).json({ error: 'You are not a participant in this escrow' });
     }
 
+    const participantRole = getParticipantRole(escrow, userId);
+
     if (status) {
       const normalizedStatus = normalizeEscrowStatus(status);
       if (!normalizedStatus) {
         return res.status(400).json({ error: 'Invalid escrow status' });
+      }
+      if (!canParticipantPatchStatus(participantRole, normalizedStatus, allowParticipantTerminalPatch)) {
+        return res.status(403).json({
+          error: `Role '${participantRole}' cannot set escrow status to '${normalizedStatus}'`
+        });
       }
       if (enforceStatusTransitions && !canTransitionStatus(escrow.status, normalizedStatus)) {
         return res.status(409).json({

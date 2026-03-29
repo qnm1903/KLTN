@@ -20,6 +20,7 @@ export function createRouteRateLimiter({ max, message }) {
 export function getRateLimitConfig() {
   return {
     authNonceMax: parsePositiveInt(process.env.RATE_LIMIT_AUTH_NONCE_MAX, 20),
+    authVerifyMax: parsePositiveInt(process.env.RATE_LIMIT_AUTH_VERIFY_MAX, 15),
     escrowInitMax: parsePositiveInt(process.env.RATE_LIMIT_ESCROW_INIT_MAX, 10),
     escrowSignMax: parsePositiveInt(process.env.RATE_LIMIT_ESCROW_SIGN_MAX, 20)
   };

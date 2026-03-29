@@ -24,15 +24,36 @@ const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
   fileFilter: (req, file, cb) => {
-    const allowed = ['.jpg', '.jpeg', '.png', '.gif', '.pdf', '.mp4', '.webm'];
+    const allowed = {
+      '.jpg': ['image/jpeg', 'image/jpg'],
+      '.jpeg': ['image/jpeg', 'image/jpg'],
+      '.png': ['image/png'],
+      '.gif': ['image/gif'],
+      '.pdf': ['application/pdf'],
+      '.mp4': ['video/mp4'],
+      '.webm': ['video/webm']
+    };
     const ext = path.extname(file.originalname).toLowerCase();
-    if (allowed.includes(ext)) {
+    const mime = String(file.mimetype || '').toLowerCase();
+    if (allowed[ext] && allowed[ext].includes(mime)) {
       cb(null, true);
     } else {
-      cb(new Error(`File type ${ext} not allowed`));
+      cb(new Error(`File type ${ext} (${mime || 'unknown'}) not allowed`));
     }
   }
 });
+
+function handleEvidenceUpload(req, res, next) {
+  upload.single('file')(req, res, (error) => {
+    if (!error) return next();
+
+    if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: 'File exceeds 10MB limit' });
+    }
+
+    return res.status(400).json({ error: error.message || 'Invalid file upload' });
+  });
+}
 
 const router = express.Router();
 
@@ -41,7 +62,7 @@ const router = express.Router();
  * Upload bằng chứng cho giao dịch (trong tranh chấp).
  * Form-data: file + description
  */
-router.post('/:id/evidence', authMiddleware, upload.single('file'), async (req, res) => {
+router.post('/:id/evidence', authMiddleware, handleEvidenceUpload, async (req, res) => {
   try {
     const escrowId = req.params.id;
     const escrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
@@ -51,6 +72,10 @@ router.post('/:id/evidence', authMiddleware, upload.single('file'), async (req, 
     const userId = req.user.id;
     if (escrow.buyerId !== userId && escrow.sellerId !== userId && escrow.mediatorId !== userId) {
       return res.status(403).json({ error: 'You are not a participant in this escrow' });
+    }
+
+    if (escrow.status !== 'DISPUTED') {
+      return res.status(409).json({ error: 'Evidence upload is only allowed when escrow is DISPUTED' });
     }
 
     if (!req.file) {

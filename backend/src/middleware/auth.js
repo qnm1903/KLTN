@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'escrow-tss-dev-secret-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET;
+const ACCESS_TOKEN_TTL = process.env.ACCESS_TOKEN_TTL || '15m';
 
 /**
  * Middleware xác thực JWT token.
@@ -38,7 +39,7 @@ export function requireRole(...roles) {
 }
 
 export function signToken(payload) {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_TTL });
 }
 
 export { JWT_SECRET };

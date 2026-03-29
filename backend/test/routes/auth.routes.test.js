@@ -13,6 +13,13 @@ const mockPrisma = {
   user: {
     findUnique: jest.fn(),
     create: jest.fn()
+  },
+  refreshToken: {
+    create: jest.fn(),
+    deleteMany: jest.fn(),
+    findUnique: jest.fn(),
+    update: jest.fn(),
+    updateMany: jest.fn()
   }
 };
 
@@ -37,6 +44,10 @@ describe('Auth Routes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockPrisma.authNonce.deleteMany.mockResolvedValue({ count: 1 });
+    mockPrisma.refreshToken.create.mockResolvedValue({ id: 'rt-1' });
+    mockPrisma.refreshToken.deleteMany.mockResolvedValue({ count: 0 });
+    mockPrisma.refreshToken.update.mockResolvedValue({ id: 'rt-1' });
+    mockPrisma.refreshToken.updateMany.mockResolvedValue({ count: 1 });
   });
 
   it('rejects nonce request with invalid address', async () => {
@@ -78,6 +89,8 @@ describe('Auth Routes', () => {
 
     expect(verifyRes.statusCode).toBe(200);
     expect(verifyRes.body).toHaveProperty('token');
+    expect(verifyRes.body).toHaveProperty('accessToken');
+    expect(verifyRes.body).toHaveProperty('refreshToken');
     expect(verifyRes.body.user.walletAddress).toBe(address);
     expect(mockPrisma.authNonce.deleteMany).toHaveBeenCalledWith({
       where: {
@@ -141,5 +154,70 @@ describe('Auth Routes', () => {
     expect(verifyRes.statusCode).toBe(400);
     expect(verifyRes.body.error).toMatch(/nonce expired/i);
     expect(mockPrisma.authNonce.delete).toHaveBeenCalledWith({ where: { address } });
+  });
+
+  it('refreshes token pair when refresh token is valid', async () => {
+    const app = buildApp();
+
+    mockPrisma.refreshToken.findUnique.mockResolvedValue({
+      id: 'rt-1',
+      userId: 'user-1',
+      expiresAt: new Date(Date.now() + 60_000),
+      revokedAt: null,
+      user: {
+        id: 'user-1',
+        walletAddress: '0x1111111111111111111111111111111111111111',
+        name: null,
+        role: 'USER'
+      }
+    });
+
+    const res = await request(app)
+      .post('/api/auth/refresh')
+      .send({ refreshToken: 'valid-refresh-token' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toHaveProperty('token');
+    expect(res.body).toHaveProperty('accessToken');
+    expect(res.body).toHaveProperty('refreshToken');
+    expect(mockPrisma.refreshToken.update).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.refreshToken.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects refresh when token is expired or revoked', async () => {
+    const app = buildApp();
+
+    mockPrisma.refreshToken.findUnique.mockResolvedValue({
+      id: 'rt-2',
+      userId: 'user-1',
+      expiresAt: new Date(Date.now() - 60_000),
+      revokedAt: null,
+      user: {
+        id: 'user-1',
+        walletAddress: '0x1111111111111111111111111111111111111111',
+        name: null,
+        role: 'USER'
+      }
+    });
+
+    const res = await request(app)
+      .post('/api/auth/refresh')
+      .send({ refreshToken: 'expired-refresh-token' });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.body.error).toMatch(/invalid or expired refresh token/i);
+    expect(mockPrisma.refreshToken.update).not.toHaveBeenCalled();
+  });
+
+  it('revokes refresh token on logout', async () => {
+    const app = buildApp();
+
+    const res = await request(app)
+      .post('/api/auth/logout')
+      .send({ refreshToken: 'refresh-token-to-revoke' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(mockPrisma.refreshToken.updateMany).toHaveBeenCalledTimes(1);
   });
 });

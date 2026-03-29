@@ -22,6 +22,7 @@ model User {
   soldEscrows     Escrow[]   @relation("SellerEscrows")
   mediatedEscrows Escrow[]   @relation("MediatorEscrows")
   evidences       Evidence[]
+  refreshTokens   RefreshToken[]
 }
 
 model Escrow {
@@ -104,5 +105,19 @@ model AuthNonce {
   expiresAt DateTime
   createdAt DateTime @default(now())
 
+  @@index([expiresAt])
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+  userId    String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
   @@index([expiresAt])
 }

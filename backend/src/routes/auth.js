@@ -8,11 +8,60 @@ import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-l
 const router = express.Router();
 
 const NONCE_TTL = 5 * 60 * 1000;
-const { authNonceMax } = getRateLimitConfig();
+const REFRESH_TOKEN_TTL_MS = Number.parseInt(process.env.REFRESH_TOKEN_TTL_MS || '', 10) || 7 * 24 * 60 * 60 * 1000;
+const { authNonceMax, authVerifyMax } = getRateLimitConfig();
 const authNonceRateLimiter = createRouteRateLimiter({
   max: authNonceMax,
   message: 'Too many nonce requests. Please try again in a moment.'
 });
+const authVerifyRateLimiter = createRouteRateLimiter({
+  max: authVerifyMax,
+  message: 'Too many authentication attempts. Please try again in a moment.'
+});
+
+function buildAuthMessage(nonce) {
+  return `Sign this message to authenticate with Escrow TSS DApp.\n\nNonce: ${nonce}`;
+}
+
+function hashRefreshToken(rawToken) {
+  return crypto.createHash('sha256').update(rawToken).digest('hex');
+}
+
+async function issueSessionTokens(user) {
+  const accessToken = signToken({
+    id: user.id,
+    walletAddress: user.walletAddress,
+    role: user.role
+  });
+
+  const refreshToken = crypto.randomBytes(48).toString('hex');
+  const refreshTokenExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+
+  await prisma.refreshToken.create({
+    data: {
+      tokenHash: hashRefreshToken(refreshToken),
+      userId: user.id,
+      expiresAt: refreshTokenExpiresAt
+    }
+  });
+
+  await prisma.refreshToken.deleteMany({
+    where: {
+      userId: user.id,
+      OR: [
+        { expiresAt: { lt: new Date() } },
+        { revokedAt: { not: null } }
+      ]
+    }
+  });
+
+  return {
+    token: accessToken,
+    accessToken,
+    refreshToken,
+    refreshTokenExpiresAt: refreshTokenExpiresAt.toISOString()
+  };
+}
 
 /**
  * GET /api/auth/nonce?address=0x...
@@ -58,11 +107,20 @@ router.get('/nonce', authNonceRateLimiter, async (req, res) => {
  * Body: { address, signature }
  * Verify chữ ký MetaMask (Personal Sign) → cấp JWT.
  */
-router.post('/verify', async (req, res) => {
+router.post('/verify', authVerifyRateLimiter, async (req, res) => {
   try {
     const { address, signature } = req.body;
     if (!address || !signature) {
       return res.status(400).json({ error: 'address and signature are required' });
+    }
+    if (!ethers.isAddress(address)) {
+      return res.status(400).json({ error: 'Valid Ethereum address required' });
+    }
+
+    try {
+      ethers.Signature.from(signature);
+    } catch {
+      return res.status(400).json({ error: 'Invalid signature format' });
     }
 
     const addr = address.toLowerCase();
@@ -77,7 +135,7 @@ router.post('/verify', async (req, res) => {
     }
 
     // Message giống hệt cái mà MetaMask ký ở Frontend
-    const message = `Sign this message to authenticate with Escrow TSS DApp.\n\nNonce: ${stored.nonce}`;
+    const message = buildAuthMessage(stored.nonce);
 
     // Recover address từ chữ ký
     const recoveredAddress = ethers.verifyMessage(message, signature);
@@ -105,15 +163,10 @@ router.post('/verify', async (req, res) => {
       });
     }
 
-    // Cấp JWT
-    const token = signToken({
-      id: user.id,
-      walletAddress: user.walletAddress,
-      role: user.role
-    });
+    const sessionTokens = await issueSessionTokens(user);
 
     res.json({
-      token,
+      ...sessionTokens,
       user: {
         id: user.id,
         walletAddress: user.walletAddress,
@@ -122,8 +175,93 @@ router.post('/verify', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error in /auth/verify:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('Error in /auth/verify:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/refresh', authVerifyRateLimiter, async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      return res.status(400).json({ error: 'refreshToken is required' });
+    }
+
+    const tokenHash = hashRefreshToken(refreshToken);
+    const stored = await prisma.refreshToken.findUnique({
+      where: { tokenHash },
+      include: {
+        user: {
+          select: {
+            id: true,
+            walletAddress: true,
+            name: true,
+            role: true
+          }
+        }
+      }
+    });
+
+    if (!stored || stored.revokedAt || stored.expiresAt.getTime() <= Date.now() || !stored.user) {
+      return res.status(401).json({ error: 'Invalid or expired refresh token' });
+    }
+
+    const nextRefreshToken = crypto.randomBytes(48).toString('hex');
+    const nextRefreshTokenExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+
+    await prisma.refreshToken.update({
+      where: { id: stored.id },
+      data: { revokedAt: new Date() }
+    });
+
+    await prisma.refreshToken.create({
+      data: {
+        tokenHash: hashRefreshToken(nextRefreshToken),
+        userId: stored.user.id,
+        expiresAt: nextRefreshTokenExpiresAt
+      }
+    });
+
+    const accessToken = signToken({
+      id: stored.user.id,
+      walletAddress: stored.user.walletAddress,
+      role: stored.user.role
+    });
+
+    return res.json({
+      token: accessToken,
+      accessToken,
+      refreshToken: nextRefreshToken,
+      refreshTokenExpiresAt: nextRefreshTokenExpiresAt.toISOString(),
+      user: stored.user
+    });
+  } catch (error) {
+    console.error('Error in /auth/refresh:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/logout', authVerifyRateLimiter, async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      return res.status(400).json({ error: 'refreshToken is required' });
+    }
+
+    await prisma.refreshToken.updateMany({
+      where: {
+        tokenHash: hashRefreshToken(refreshToken),
+        revokedAt: null
+      },
+      data: {
+        revokedAt: new Date()
+      }
+    });
+
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Error in /auth/logout:', error);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 

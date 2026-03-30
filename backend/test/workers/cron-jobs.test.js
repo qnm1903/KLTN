@@ -116,7 +116,7 @@ describe('cron-jobs', () => {
   });
 
   it('progresses dispute phases by deadlines and records CRON_PHASE history', async () => {
-    const now = new Date('2026-03-26T10:00:00.000Z');
+    const now = new Date('2026-03-30T10:00:00.000Z');
 
     const txEscrowUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
     const txHistoryCreate = jest.fn().mockResolvedValue({ id: 'history-1' });
@@ -128,19 +128,19 @@ describe('cron-jobs', () => {
             id: 'escrow-opened',
             status: 'DISPUTED',
             disputePhase: 'OPENED',
-            disputeOpenedAt: new Date('2026-03-25T00:00:00.000Z'),
-            evidenceDeadlineAt: new Date('2026-03-27T00:00:00.000Z'),
-            reviewDeadlineAt: new Date('2026-03-28T00:00:00.000Z'),
-            decisionDeadlineAt: new Date('2026-03-29T00:00:00.000Z')
+            disputeOpenedAt: new Date('2026-03-29T00:00:00.000Z'),
+            evidenceDeadlineAt: new Date('2026-04-02T00:00:00.000Z'),
+            reviewDeadlineAt: new Date('2026-04-04T00:00:00.000Z'),
+            decisionDeadlineAt: new Date('2026-04-05T00:00:00.000Z')
           },
           {
             id: 'escrow-evidence',
             status: 'DISPUTED',
             disputePhase: 'EVIDENCE_WINDOW',
-            disputeOpenedAt: new Date('2026-03-22T00:00:00.000Z'),
-            evidenceDeadlineAt: new Date('2026-03-24T00:00:00.000Z'),
-            reviewDeadlineAt: new Date('2026-03-27T00:00:00.000Z'),
-            decisionDeadlineAt: new Date('2026-03-29T00:00:00.000Z')
+            disputeOpenedAt: new Date('2026-03-24T00:00:00.000Z'),
+            evidenceDeadlineAt: new Date('2026-03-30T09:00:00.000Z'),
+            reviewDeadlineAt: new Date('2026-03-31T10:00:00.000Z'),
+            decisionDeadlineAt: new Date('2026-04-01T10:00:00.000Z')
           },
           {
             id: 'escrow-review',
@@ -148,8 +148,8 @@ describe('cron-jobs', () => {
             disputePhase: 'REVIEW_WINDOW',
             disputeOpenedAt: new Date('2026-03-22T00:00:00.000Z'),
             evidenceDeadlineAt: new Date('2026-03-23T00:00:00.000Z'),
-            reviewDeadlineAt: new Date('2026-03-24T00:00:00.000Z'),
-            decisionDeadlineAt: new Date('2026-03-29T00:00:00.000Z')
+            reviewDeadlineAt: new Date('2026-03-30T09:00:00.000Z'),
+            decisionDeadlineAt: new Date('2026-04-01T00:00:00.000Z')
           },
           {
             id: 'escrow-decision',
@@ -158,7 +158,7 @@ describe('cron-jobs', () => {
             disputeOpenedAt: new Date('2026-03-20T00:00:00.000Z'),
             evidenceDeadlineAt: new Date('2026-03-21T00:00:00.000Z'),
             reviewDeadlineAt: new Date('2026-03-22T00:00:00.000Z'),
-            decisionDeadlineAt: new Date('2026-03-24T00:00:00.000Z')
+            decisionDeadlineAt: new Date('2026-03-30T09:00:00.000Z')
           }
         ])
       },
@@ -180,14 +180,102 @@ describe('cron-jobs', () => {
     expect(prisma.escrow.findMany).toHaveBeenCalledTimes(1);
     expect(prisma.$transaction).toHaveBeenCalledTimes(4);
     expect(txEscrowUpdateMany).toHaveBeenCalledTimes(4);
-    expect(txEscrowUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ disputePhase: 'RESOLVED' })
-    }));
-    expect(txHistoryCreate).toHaveBeenCalledWith(expect.objectContaining({
+    expect(txEscrowUpdateMany).toHaveBeenNthCalledWith(1, {
+      where: {
+        id: 'escrow-opened',
+        status: 'DISPUTED',
+        disputePhase: 'OPENED'
+      },
+      data: {
+        disputePhase: 'EVIDENCE_WINDOW'
+      }
+    });
+    expect(txEscrowUpdateMany).toHaveBeenNthCalledWith(2, {
+      where: {
+        id: 'escrow-evidence',
+        status: 'DISPUTED',
+        disputePhase: 'EVIDENCE_WINDOW'
+      },
+      data: {
+        disputePhase: 'REVIEW_WINDOW'
+      }
+    });
+    expect(txEscrowUpdateMany).toHaveBeenNthCalledWith(3, {
+      where: {
+        id: 'escrow-review',
+        status: 'DISPUTED',
+        disputePhase: 'REVIEW_WINDOW'
+      },
+      data: {
+        disputePhase: 'DECISION_PENDING'
+      }
+    });
+    expect(txEscrowUpdateMany).toHaveBeenNthCalledWith(4, {
+      where: {
+        id: 'escrow-decision',
+        status: 'DISPUTED',
+        disputePhase: 'DECISION_PENDING'
+      },
+      data: {
+        disputePhase: 'RESOLVED'
+      }
+    });
+
+    expect(txHistoryCreate).toHaveBeenCalledTimes(4);
+    expect(txHistoryCreate).toHaveBeenNthCalledWith(1, expect.objectContaining({
       data: expect.objectContaining({
+        escrowId: 'escrow-opened',
         source: 'CRON_PHASE',
         fromStatus: 'DISPUTED',
-        toStatus: 'DISPUTED'
+        toStatus: 'DISPUTED',
+        reason: 'opened acknowledgment elapsed',
+        metadata: expect.objectContaining({
+          fromPhase: 'OPENED',
+          toPhase: 'EVIDENCE_WINDOW',
+          triggeredAt: now.toISOString()
+        })
+      })
+    }));
+    expect(txHistoryCreate).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      data: expect.objectContaining({
+        escrowId: 'escrow-evidence',
+        source: 'CRON_PHASE',
+        fromStatus: 'DISPUTED',
+        toStatus: 'DISPUTED',
+        reason: 'evidence window elapsed',
+        metadata: expect.objectContaining({
+          fromPhase: 'EVIDENCE_WINDOW',
+          toPhase: 'REVIEW_WINDOW',
+          triggeredAt: now.toISOString()
+        })
+      })
+    }));
+    expect(txHistoryCreate).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      data: expect.objectContaining({
+        escrowId: 'escrow-review',
+        source: 'CRON_PHASE',
+        fromStatus: 'DISPUTED',
+        toStatus: 'DISPUTED',
+        reason: 'review window elapsed',
+        metadata: expect.objectContaining({
+          fromPhase: 'REVIEW_WINDOW',
+          toPhase: 'DECISION_PENDING',
+          triggeredAt: now.toISOString()
+        })
+      })
+    }));
+    expect(txHistoryCreate).toHaveBeenNthCalledWith(4, expect.objectContaining({
+      data: expect.objectContaining({
+        escrowId: 'escrow-decision',
+        source: 'CRON_PHASE',
+        fromStatus: 'DISPUTED',
+        toStatus: 'DISPUTED',
+        reason: 'decision grace elapsed',
+        metadata: expect.objectContaining({
+          fromPhase: 'DECISION_PENDING',
+          toPhase: 'RESOLVED',
+          triggeredAt: now.toISOString()
+        })
       })
     }));
     expect(result).toEqual({ progressedEscrows: 4 });

@@ -98,9 +98,31 @@ export function resolveNextDisputePhase(escrow, now = new Date()) {
 
   if (phase === DISPUTE_PHASES.OPENED) {
     const openedAt = toDate(escrow.disputeOpenedAt);
-    const openAckDeadline = addHours(openedAt, DISPUTE_OPEN_ACK_HOURS);
+    if (!openedAt) {
+      console.error('[dispute-lifecycle] Invalid OPENED phase data: missing disputeOpenedAt', {
+        escrowId: escrow.id || null,
+        disputeOpenedAt: escrow.disputeOpenedAt || null
+      });
+      return {
+        nextPhase: null,
+        error: 'missing_disputeOpenedAt'
+      };
+    }
 
-    if (openAckDeadline && openAckDeadline <= currentTime) {
+    const openAckDeadline = addHours(openedAt, DISPUTE_OPEN_ACK_HOURS);
+    if (!openAckDeadline) {
+      console.error('[dispute-lifecycle] Invalid OPENED phase data: failed to compute openAckDeadline', {
+        escrowId: escrow.id || null,
+        disputeOpenedAt: openedAt.toISOString(),
+        openAckHours: DISPUTE_OPEN_ACK_HOURS
+      });
+      return {
+        nextPhase: null,
+        error: 'invalid_open_ack_deadline'
+      };
+    }
+
+    if (openAckDeadline <= currentTime) {
       return {
         nextPhase: DISPUTE_PHASES.EVIDENCE_WINDOW,
         reason: 'opened acknowledgment elapsed'

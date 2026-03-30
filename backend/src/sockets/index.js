@@ -127,9 +127,16 @@ export function setupSockets(server) {
         console.log(`Socket ${socket.id} joined room: ${escrowId}`);
         respond({ ok: true, escrowId });
       } catch (error) {
+        const escrowId = typeof payload === 'string' ? payload : payload?.escrowId;
+        console.error('Failed to join escrow room', {
+          socketId: socket.id,
+          escrowId,
+          payload,
+          error
+        });
         respond({ ok: false, error: 'Failed to join escrow room' });
         socket.emit('dispute-room-join-denied', {
-          escrowId: typeof payload === 'string' ? payload : payload?.escrowId,
+          escrowId,
           error: 'Failed to join escrow room'
         });
       }

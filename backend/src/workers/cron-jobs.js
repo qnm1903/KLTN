@@ -81,36 +81,44 @@ async function checkTimeoutEscrows(prisma, options = {}) {
   let updatedCount = 0;
 
   for (const escrow of timedOutEscrows) {
-    await prisma.$transaction(async (tx) => {
-      const guarded = await tx.escrow.updateMany({
-        where: {
-          id: escrow.id,
-          status: 'LOCKED'
-        },
-        data: {
-          status: 'DISPUTED',
-          ...buildDisputeLifecycleData('LOCKED', 'DISPUTED', now)
-        }
-      });
-
-      if (guarded.count !== 1) return;
-
-      await tx.escrowStatusHistory.create({
-        data: {
-          escrowId: escrow.id,
-          actorUserId: null,
-          source: 'CRON_TIMEOUT',
-          fromStatus: 'LOCKED',
-          toStatus: 'DISPUTED',
-          reason: 'timeout reached',
-          metadata: {
-            triggeredAt: now.toISOString()
+    try {
+      await prisma.$transaction(async (tx) => {
+        const guarded = await tx.escrow.updateMany({
+          where: {
+            id: escrow.id,
+            status: 'LOCKED'
+          },
+          data: {
+            status: 'DISPUTED',
+            ...buildDisputeLifecycleData('LOCKED', 'DISPUTED', now)
           }
-        }
-      });
+        });
 
-      updatedCount += 1;
-    });
+        if (guarded.count !== 1) return;
+
+        await tx.escrowStatusHistory.create({
+          data: {
+            escrowId: escrow.id,
+            actorUserId: null,
+            source: 'CRON_TIMEOUT',
+            fromStatus: 'LOCKED',
+            toStatus: 'DISPUTED',
+            reason: 'timeout reached',
+            metadata: {
+              triggeredAt: now.toISOString()
+            }
+          }
+        });
+
+        updatedCount += 1;
+      });
+    } catch (error) {
+      logger.error?.('[cron] Failed to process timeout escrow transition', {
+        escrowId: escrow.id,
+        error
+      });
+      continue;
+    }
   }
 
   const duration = Date.now() - startTime;
@@ -161,43 +169,62 @@ async function checkDisputePhaseTransitions(prisma, options = {}) {
   for (const escrow of disputedEscrows) {
     const transition = resolveNextDisputePhase(escrow, now);
     if (!transition) continue;
-
-    await prisma.$transaction(async (tx) => {
-      const where = {
-        id: escrow.id,
-        status: 'DISPUTED',
-        disputePhase: escrow.disputePhase ?? null
-      };
-
-      const updateData = {
-        disputePhase: transition.nextPhase
-      };
-
-      if (transition.nextPhase === DISPUTE_PHASES.OPENED && !escrow.disputeOpenedAt) {
-        Object.assign(updateData, buildDisputeLifecycleData('LOCKED', 'DISPUTED', now));
-      }
-
-      const guarded = await tx.escrow.updateMany({ where, data: updateData });
-      if (guarded.count !== 1) return;
-
-      await tx.escrowStatusHistory.create({
-        data: {
-          escrowId: escrow.id,
-          actorUserId: null,
-          source: 'CRON_PHASE',
-          fromStatus: 'DISPUTED',
-          toStatus: 'DISPUTED',
-          reason: transition.reason,
-          metadata: {
-            fromPhase: escrow.disputePhase || null,
-            toPhase: transition.nextPhase,
-            triggeredAt: now.toISOString()
-          }
-        }
+    if (!transition.nextPhase) {
+      logger.error?.('[cron] Skipping dispute phase transition because lifecycle data is invalid', {
+        escrowId: escrow.id,
+        disputePhase: escrow.disputePhase || null,
+        transition
       });
+      continue;
+    }
 
-      progressedCount += 1;
-    });
+    try {
+      await prisma.$transaction(async (tx) => {
+        const where = {
+          id: escrow.id,
+          status: 'DISPUTED',
+          disputePhase: escrow.disputePhase ?? null
+        };
+
+        const updateData = {
+          disputePhase: transition.nextPhase
+        };
+
+        if (transition.nextPhase === DISPUTE_PHASES.OPENED && !escrow.disputeOpenedAt) {
+          Object.assign(updateData, buildDisputeLifecycleData('LOCKED', 'DISPUTED', now));
+        }
+
+        const guarded = await tx.escrow.updateMany({ where, data: updateData });
+        if (guarded.count !== 1) return;
+
+        await tx.escrowStatusHistory.create({
+          data: {
+            escrowId: escrow.id,
+            actorUserId: null,
+            source: 'CRON_PHASE',
+            fromStatus: 'DISPUTED',
+            toStatus: 'DISPUTED',
+            reason: transition.reason,
+            metadata: {
+              fromPhase: escrow.disputePhase || null,
+              toPhase: transition.nextPhase,
+              triggeredAt: now.toISOString()
+            }
+          }
+        });
+
+        progressedCount += 1;
+      });
+    } catch (error) {
+      logger.error?.('[cron] Failed to process dispute phase transition', {
+        escrowId: escrow.id,
+        fromPhase: escrow.disputePhase || null,
+        toPhase: transition.nextPhase,
+        reason: transition.reason || null,
+        error
+      });
+      continue;
+    }
   }
 
   const duration = Date.now() - startTime;

@@ -243,6 +243,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
 router.patch('/:id/status', authMiddleware, async (req, res) => {
   try {
     const { status, chainEscrowId, contractAddress, pkAggBsX, pkAggBsY, pkAggBmX, pkAggBmY, pkAggSmX, pkAggSmY, reason } = req.body;
+    const isProvided = (value) => value !== undefined && value !== null;
     const enforceStatusTransitions = String(process.env.ENFORCE_ESCROW_STATUS_TRANSITIONS || 'true').toLowerCase() === 'true';
     const allowParticipantTerminalPatch = String(process.env.ALLOW_PARTICIPANT_TERMINAL_STATUS_PATCH || 'false').toLowerCase() === 'true';
     const nextStatus = status ? normalizeEscrowStatus(status) : null;
@@ -283,14 +284,14 @@ router.patch('/:id/status', authMiddleware, async (req, res) => {
 
       const updateData = {};
       if (nextStatus) updateData.status = nextStatus;
-      if (chainEscrowId) updateData.chainEscrowId = chainEscrowId;
-      if (contractAddress) updateData.contractAddress = contractAddress;
-      if (pkAggBsX) updateData.pkAggBsX = pkAggBsX;
-      if (pkAggBsY) updateData.pkAggBsY = pkAggBsY;
-      if (pkAggBmX) updateData.pkAggBmX = pkAggBmX;
-      if (pkAggBmY) updateData.pkAggBmY = pkAggBmY;
-      if (pkAggSmX) updateData.pkAggSmX = pkAggSmX;
-      if (pkAggSmY) updateData.pkAggSmY = pkAggSmY;
+      if (isProvided(chainEscrowId)) updateData.chainEscrowId = chainEscrowId;
+      if (isProvided(contractAddress)) updateData.contractAddress = contractAddress;
+      if (isProvided(pkAggBsX)) updateData.pkAggBsX = pkAggBsX;
+      if (isProvided(pkAggBsY)) updateData.pkAggBsY = pkAggBsY;
+      if (isProvided(pkAggBmX)) updateData.pkAggBmX = pkAggBmX;
+      if (isProvided(pkAggBmY)) updateData.pkAggBmY = pkAggBmY;
+      if (isProvided(pkAggSmX)) updateData.pkAggSmX = pkAggSmX;
+      if (isProvided(pkAggSmY)) updateData.pkAggSmY = pkAggSmY;
 
       if (nextStatus) {
         Object.assign(updateData, buildDisputeLifecycleData(escrow.status, nextStatus, new Date()));
@@ -324,7 +325,13 @@ router.patch('/:id/status', authMiddleware, async (req, res) => {
         });
       }
 
-      if (nextStatus && nextStatus !== escrow.status && tx.escrowStatusHistory) {
+      if (nextStatus && nextStatus !== escrow.status) {
+        if (!tx.escrowStatusHistory?.create) {
+          const historyUnavailableError = new Error('escrowStatusHistory model not available');
+          historyUnavailableError.statusCode = 501;
+          throw historyUnavailableError;
+        }
+
         await tx.escrowStatusHistory.create({
           data: {
             escrowId: escrow.id,
@@ -335,8 +342,8 @@ router.patch('/:id/status', authMiddleware, async (req, res) => {
             reason: reason || null,
             metadata: {
               participantRole,
-              chainEscrowId: chainEscrowId || null,
-              contractAddress: contractAddress || null
+              chainEscrowId: isProvided(chainEscrowId) ? chainEscrowId : null,
+              contractAddress: isProvided(contractAddress) ? contractAddress : null
             }
           }
         });

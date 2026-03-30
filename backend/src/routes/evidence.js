@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import prisma from '../lib/prisma.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { DISPUTE_EVIDENCE_UPLOAD_PHASES } from '../lib/dispute-lifecycle.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,6 +58,34 @@ function handleEvidenceUpload(req, res, next) {
 
 const router = express.Router();
 
+function isEvidenceUploadAllowed(escrow, now = new Date()) {
+  if (escrow.status !== 'DISPUTED') {
+    return {
+      ok: false,
+      error: 'Evidence upload is only allowed when escrow is DISPUTED'
+    };
+  }
+
+  if (escrow.disputePhase && !DISPUTE_EVIDENCE_UPLOAD_PHASES.has(escrow.disputePhase)) {
+    return {
+      ok: false,
+      error: `Evidence upload is closed in dispute phase '${escrow.disputePhase}'`
+    };
+  }
+
+  if (escrow.evidenceDeadlineAt) {
+    const evidenceDeadlineAt = new Date(escrow.evidenceDeadlineAt);
+    if (!Number.isNaN(evidenceDeadlineAt.getTime()) && evidenceDeadlineAt <= now) {
+      return {
+        ok: false,
+        error: 'Evidence window has ended'
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
 /**
  * POST /api/escrows/:id/evidence
  * Upload bằng chứng cho giao dịch (trong tranh chấp).
@@ -74,8 +103,9 @@ router.post('/:id/evidence', authMiddleware, handleEvidenceUpload, async (req, r
       return res.status(403).json({ error: 'You are not a participant in this escrow' });
     }
 
-    if (escrow.status !== 'DISPUTED') {
-      return res.status(409).json({ error: 'Evidence upload is only allowed when escrow is DISPUTED' });
+    const uploadValidation = isEvidenceUploadAllowed(escrow);
+    if (!uploadValidation.ok) {
+      return res.status(409).json({ error: uploadValidation.error });
     }
 
     if (!req.file) {
@@ -93,6 +123,22 @@ router.post('/:id/evidence', authMiddleware, handleEvidenceUpload, async (req, r
         uploader: { select: { id: true, walletAddress: true, name: true } }
       }
     });
+
+    const io = req.app.get('io');
+    if (io) {
+      const payload = {
+        escrowId,
+        evidenceId: evidence.id,
+        uploaderId: userId,
+        fileUrl: evidence.fileUrl,
+        description: evidence.description,
+        createdAt: evidence.createdAt
+      };
+      io.to(escrowId).emit('dispute-evidence-added', payload);
+      if (escrow.chainEscrowId) {
+        io.to(escrow.chainEscrowId).emit('dispute-evidence-added', payload);
+      }
+    }
 
     res.status(201).json(evidence);
   } catch (error) {

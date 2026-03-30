@@ -22,6 +22,7 @@ model User {
   soldEscrows     Escrow[]   @relation("SellerEscrows")
   mediatedEscrows Escrow[]   @relation("MediatorEscrows")
   evidences       Evidence[]
+  statusHistoryActions EscrowStatusHistory[]
   refreshTokens   RefreshToken[]
 }
 
@@ -33,10 +34,15 @@ model Escrow {
   description     String   @default("")
   amount          Decimal   // Số ETH ký quỹ (wei precision: 10^18 decimals)
   status          String   @default("DRAFT") // DRAFT | INITIALIZED | LOCKED | DISPUTED | RELEASED | REFUNDED
+  disputePhase    String?  // OPENED | EVIDENCE_WINDOW | REVIEW_WINDOW | DECISION_PENDING | RESOLVED
   
   // Deadlines cho timeout check
   confirmDeadline   DateTime?  // Hạn cuối user phải confirm giao dịch (optional)
   timeoutDeadline   DateTime?  // Hạn cuối trước khi tự động dispute (optional)
+  disputeOpenedAt   DateTime?
+  evidenceDeadlineAt DateTime?
+  reviewDeadlineAt   DateTime?
+  decisionDeadlineAt DateTime?
 
   // Các bên tham gia
   buyerId    String
@@ -55,13 +61,18 @@ model Escrow {
   pkAggSmX String?
   pkAggSmY String?
 
-  evidences Evidence[]
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  evidences      Evidence[]
+  statusHistory  EscrowStatusHistory[]
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
 
   // Indices for cron job queries
   @@index([status, timeoutDeadline])
   @@index([status, confirmDeadline])
+  @@index([status, disputePhase])
+  @@index([disputePhase, evidenceDeadlineAt])
+  @@index([disputePhase, reviewDeadlineAt])
+  @@index([disputePhase, decisionDeadlineAt])
 }
 
 model Evidence {
@@ -120,4 +131,22 @@ model RefreshToken {
 
   @@index([userId, expiresAt])
   @@index([expiresAt])
+}
+
+model EscrowStatusHistory {
+  id          String   @id @default(uuid())
+  escrowId    String
+  actorUserId String?
+  source      String   // API | CRON_TIMEOUT | EVENT_LISTENER
+  fromStatus  String
+  toStatus    String
+  reason      String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  escrow Escrow @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+  actor  User?  @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([escrowId, createdAt])
+  @@index([source, createdAt])
 }

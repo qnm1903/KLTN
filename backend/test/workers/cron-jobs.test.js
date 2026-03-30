@@ -2,7 +2,13 @@ import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
 import { jest } from '@jest/globals';
-import { checkTimeoutEscrows, cleanupExpiredFiles, startCronJobs, stopCronJobs } from '../../src/workers/cron-jobs.js';
+import {
+  checkDisputePhaseTransitions,
+  checkTimeoutEscrows,
+  cleanupExpiredFiles,
+  startCronJobs,
+  stopCronJobs
+} from '../../src/workers/cron-jobs.js';
 
 function deferred() {
   let resolve;
@@ -30,7 +36,7 @@ describe('cron-jobs', () => {
     const now = new Date('2026-03-26T10:00:00.000Z');
     const result = await checkTimeoutEscrows(prisma, { now, logger: console });
 
-    expect(updateMany).toHaveBeenCalledWith({
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         status: 'LOCKED',
         timeoutDeadline: {
@@ -38,10 +44,15 @@ describe('cron-jobs', () => {
           lt: now
         }
       },
-      data: {
-        status: 'DISPUTED'
-      }
-    });
+      data: expect.objectContaining({
+        status: 'DISPUTED',
+        disputePhase: 'OPENED',
+        disputeOpenedAt: now,
+        evidenceDeadlineAt: expect.any(Date),
+        reviewDeadlineAt: expect.any(Date),
+        decisionDeadlineAt: expect.any(Date)
+      })
+    }));
     expect(result).toEqual({ updatedEscrows: 2 });
   });
 
@@ -57,6 +68,129 @@ describe('cron-jobs', () => {
 
     expect(updateMany).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ updatedEscrows: 0 });
+  });
+
+  it('writes status history per escrow when transaction-capable prisma is available', async () => {
+    const now = new Date('2026-03-26T10:00:00.000Z');
+
+    const txEscrowUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const txHistoryCreate = jest.fn().mockResolvedValue({ id: 'history-1' });
+
+    const prisma = {
+      escrow: {
+        updateMany: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([
+          { id: 'escrow-1', status: 'LOCKED' },
+          { id: 'escrow-2', status: 'LOCKED' }
+        ])
+      },
+      escrowStatusHistory: {
+        create: jest.fn()
+      },
+      $transaction: jest.fn(async (callback) => callback({
+        escrow: {
+          updateMany: txEscrowUpdateMany
+        },
+        escrowStatusHistory: {
+          create: txHistoryCreate
+        }
+      })),
+      authNonce: { deleteMany: jest.fn() },
+      evidence: { findMany: jest.fn() }
+    };
+
+    const result = await checkTimeoutEscrows(prisma, { now, logger: console });
+
+    expect(prisma.escrow.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(txEscrowUpdateMany).toHaveBeenCalledTimes(2);
+    expect(txHistoryCreate).toHaveBeenCalledTimes(2);
+    expect(txHistoryCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        source: 'CRON_TIMEOUT',
+        fromStatus: 'LOCKED',
+        toStatus: 'DISPUTED'
+      })
+    }));
+    expect(result).toEqual({ updatedEscrows: 2 });
+  });
+
+  it('progresses dispute phases by deadlines and records CRON_PHASE history', async () => {
+    const now = new Date('2026-03-26T10:00:00.000Z');
+
+    const txEscrowUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const txHistoryCreate = jest.fn().mockResolvedValue({ id: 'history-1' });
+
+    const prisma = {
+      escrow: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'escrow-opened',
+            status: 'DISPUTED',
+            disputePhase: 'OPENED',
+            disputeOpenedAt: new Date('2026-03-25T00:00:00.000Z'),
+            evidenceDeadlineAt: new Date('2026-03-27T00:00:00.000Z'),
+            reviewDeadlineAt: new Date('2026-03-28T00:00:00.000Z'),
+            decisionDeadlineAt: new Date('2026-03-29T00:00:00.000Z')
+          },
+          {
+            id: 'escrow-evidence',
+            status: 'DISPUTED',
+            disputePhase: 'EVIDENCE_WINDOW',
+            disputeOpenedAt: new Date('2026-03-22T00:00:00.000Z'),
+            evidenceDeadlineAt: new Date('2026-03-24T00:00:00.000Z'),
+            reviewDeadlineAt: new Date('2026-03-27T00:00:00.000Z'),
+            decisionDeadlineAt: new Date('2026-03-29T00:00:00.000Z')
+          },
+          {
+            id: 'escrow-review',
+            status: 'DISPUTED',
+            disputePhase: 'REVIEW_WINDOW',
+            disputeOpenedAt: new Date('2026-03-22T00:00:00.000Z'),
+            evidenceDeadlineAt: new Date('2026-03-23T00:00:00.000Z'),
+            reviewDeadlineAt: new Date('2026-03-24T00:00:00.000Z'),
+            decisionDeadlineAt: new Date('2026-03-29T00:00:00.000Z')
+          },
+          {
+            id: 'escrow-decision',
+            status: 'DISPUTED',
+            disputePhase: 'DECISION_PENDING',
+            disputeOpenedAt: new Date('2026-03-20T00:00:00.000Z'),
+            evidenceDeadlineAt: new Date('2026-03-21T00:00:00.000Z'),
+            reviewDeadlineAt: new Date('2026-03-22T00:00:00.000Z'),
+            decisionDeadlineAt: new Date('2026-03-24T00:00:00.000Z')
+          }
+        ])
+      },
+      escrowStatusHistory: {
+        create: jest.fn()
+      },
+      $transaction: jest.fn(async (callback) => callback({
+        escrow: {
+          updateMany: txEscrowUpdateMany
+        },
+        escrowStatusHistory: {
+          create: txHistoryCreate
+        }
+      }))
+    };
+
+    const result = await checkDisputePhaseTransitions(prisma, { now, logger: console });
+
+    expect(prisma.escrow.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(4);
+    expect(txEscrowUpdateMany).toHaveBeenCalledTimes(4);
+    expect(txEscrowUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ disputePhase: 'RESOLVED' })
+    }));
+    expect(txHistoryCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        source: 'CRON_PHASE',
+        fromStatus: 'DISPUTED',
+        toStatus: 'DISPUTED'
+      })
+    }));
+    expect(result).toEqual({ progressedEscrows: 4 });
   });
 
   it('deletes expired nonces and keeps referenced files', async () => {

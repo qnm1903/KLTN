@@ -460,21 +460,33 @@ async function runSmokeTest(action) {
     );
 
     const createReceipt = await createTx.wait();
-    const parsedEvent = createReceipt.logs
-      .filter((log) => log.address.toLowerCase() === factoryAddress.toLowerCase())
-      .map((log) => {
-        try {
-          return factory.interface.parseLog(log);
-        } catch {
-          return null;
-        }
-      })
-      .find((e) => e?.name === 'EscrowCreatedEvent');
-
-    if (!parsedEvent) {
-      throw new Error('EscrowCreatedEvent not found in tx receipt logs');
+    
+    // Check if transaction succeeded
+    if (!createReceipt || createReceipt.status === 0) {
+      console.error('Transaction failed or reverted');
+      console.error('Receipt:', createReceipt);
+      throw new Error('createEscrow transaction failed');
     }
-
+    
+    console.log(`✓ Transaction succeeded at block ${createReceipt.blockNumber}`);
+    console.log(`  Tx hash: ${createReceipt.hash}`);
+    console.log(`  Gas used: ${createReceipt.gasUsed}`);
+    console.log(`  Total logs: ${createReceipt.logs.length}\n`);
+    
+    // Parse EscrowCreatedEvent from receipt logs using queryFilter
+    const events = await factory.queryFilter(
+      factory.filters.EscrowCreatedEvent(),
+      createReceipt.blockNumber,
+      createReceipt.blockNumber
+    );
+    
+    if (events.length === 0) {
+      console.error(`No EscrowCreatedEvent found in block ${createReceipt.blockNumber}`);
+      console.error(`Total logs in receipt: ${createReceipt.logs.length}`);
+      throw new Error('EscrowCreatedEvent not found in tx receipt');
+    }
+    
+    const parsedEvent = events[0]; // Get first event (should be ours)
     const vaultAddr = parsedEvent.args.escrowAddress || parsedEvent.args[0];
     const emittedEscrowId = parsedEvent.args.escrowId || parsedEvent.args[1];
     ctx.escrowId = emittedEscrowId;

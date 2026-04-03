@@ -1,5 +1,5 @@
 import express from 'express';
-import { sessions } from '../store/session.js';
+import { deleteSession, getSession, hasSession, saveSession } from '../store/session.js';
 import { initDKG, getPkAggForRoles, SESSION_TTL_MS } from '../crypto/dkg.js';
 import { aggregateNonces, computeChallenge, aggregateZShares } from '../crypto/schnorr.js';
 import { ethers } from 'ethers';
@@ -28,11 +28,11 @@ const ACTION_ROLE_PAIRS = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function checkSession(escrowId, res) {
-  const session = sessions.get(escrowId);
+async function checkSession(escrowId, res) {
+  const session = await getSession(escrowId, { allowExpired: true });
   if (!session) { res.status(404).json({ error: 'Escrow session not found' }); return null; }
   if (Date.now() - session.createdAt > SESSION_TTL_MS) {
-    sessions.delete(escrowId);
+    await deleteSession(escrowId, { markExpired: true });
     res.status(410).json({ error: 'Session expired' });
     return null;
   }
@@ -76,7 +76,7 @@ function rolesMatchAction(roles, action) {
  * Backend chỉ tổng hợp PKagg pairs — không sinh hoặc biết private key nào.
  * Trả về 3 PKagg pairs để frontend đưa vào lúc tạo EscrowVault.
  */
-router.post('/init', escrowInitRateLimiter, (req, res) => {
+router.post('/init', escrowInitRateLimiter, async (req, res) => {
   try {
     const { escrowId, buyerAddr, sellerAddr, mediatorAddr,
             buyerPubKey, sellerPubKey, mediatorPubKey } = req.body;
@@ -100,19 +100,18 @@ router.post('/init', escrowInitRateLimiter, (req, res) => {
       return res.status(400).json({ error: 'mediatorPubKey does not match mediatorAddr' });
     }
 
-    if (sessions.has(escrowId)) {
+    if (await hasSession(escrowId)) {
       return res.status(409).json({ error: 'Session already exists for this escrowId' });
     }
 
-    const result = initDKG(escrowId, { buyerPubKey, sellerPubKey, mediatorPubKey }, sessions);
+    const { session, ...result } = initDKG(escrowId, { buyerPubKey, sellerPubKey, mediatorPubKey });
 
-    const session = sessions.get(escrowId);
     session.parties = {
       buyer: buyerAddr.toLowerCase(),
       seller: sellerAddr.toLowerCase(),
       mediator: mediatorAddr.toLowerCase()
     };
-    sessions.set(escrowId, session);
+    await saveSession(escrowId, session);
 
     // Trả về 3 PKagg pairs để đưa vào constructor EscrowVault
     res.json(result);
@@ -134,7 +133,7 @@ router.post('/init', escrowInitRateLimiter, (req, res) => {
  *
  * Body: { escrowId, role, action, R_x, R_y }
  */
-router.post('/nonce', (req, res) => {
+router.post('/nonce', async (req, res) => {
   try {
     const { escrowId, role, action, R_x, R_y } = req.body;
 
@@ -151,7 +150,7 @@ router.post('/nonce', (req, res) => {
       return res.status(403).json({ error: `Role '${role}' is not allowed for action '${action}'` });
     }
 
-    const session = checkSession(escrowId, res);
+    const session = await checkSession(escrowId, res);
     if (!session) return;
 
     if (session.completedActions.includes(action)) {
@@ -178,7 +177,7 @@ router.post('/nonce', (req, res) => {
     }
 
     session.nonces[role] = { R_x, R_y };
-    sessions.set(escrowId, session);
+    await saveSession(escrowId, session);
 
     const io = req.app.get('io');
     const nonceCount = Object.keys(session.nonces).length;
@@ -196,7 +195,7 @@ router.post('/nonce', (req, res) => {
       session.signingRoles = null;
       session.signingAction = null;
       session.round2Context = null;
-      sessions.set(escrowId, session);
+      await saveSession(escrowId, session);
       return res.status(403).json({ error: `Signer roles do not match action '${action}' requirements` });
     }
     session.signingRoles = roles;
@@ -209,7 +208,7 @@ router.post('/nonce', (req, res) => {
 
     // Lưu context cho round 2
     session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge };
-    sessions.set(escrowId, session);
+    await saveSession(escrowId, session);
 
     // Broadcast challenge — mỗi bên dùng e để tính z_i = k_i + e * s_i
     if (io) {
@@ -233,7 +232,7 @@ router.post('/nonce', (req, res) => {
  *
  * Body: { escrowId, role, z }
  */
-router.post('/sign', escrowSignRateLimiter, (req, res) => {
+router.post('/sign', escrowSignRateLimiter, async (req, res) => {
   try {
     const { escrowId, role, z } = req.body;
 
@@ -244,7 +243,7 @@ router.post('/sign', escrowSignRateLimiter, (req, res) => {
       return res.status(400).json({ error: `Invalid role. Allowed: ${VALID_ROLES.join(', ')}` });
     }
 
-    const session = checkSession(escrowId, res);
+    const session = await checkSession(escrowId, res);
     if (!session) return;
 
     if (!session.round2Context) {
@@ -258,7 +257,7 @@ router.post('/sign', escrowSignRateLimiter, (req, res) => {
     }
 
     session.zShares[role] = z;
-    sessions.set(escrowId, session);
+    await saveSession(escrowId, session);
 
     const io = req.app.get('io');
     const zCount = Object.keys(session.zShares).length;
@@ -279,7 +278,7 @@ router.post('/sign', escrowSignRateLimiter, (req, res) => {
     session.signingRoles = null;
     session.signingAction = null;
     session.round2Context = null;
-    sessions.set(escrowId, session);
+    await saveSession(escrowId, session);
 
     const sig = { R_addr, z: z_agg, e, msgHash };
 
@@ -294,9 +293,9 @@ router.post('/sign', escrowSignRateLimiter, (req, res) => {
 
 // ─── Status ───────────────────────────────────────────────────────────────────
 
-router.get('/:id/status', (req, res) => {
-  const session = sessions.get(req.params.id);
-  if (!session) return res.status(404).json({ error: 'Escrow session not found' });
+router.get('/:id/status', async (req, res) => {
+  const session = await checkSession(req.params.id, res);
+  if (!session) return;
   res.json({
     status: session.status,
     signingAction: session.signingAction,

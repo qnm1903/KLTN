@@ -150,3 +150,15 @@ model EscrowStatusHistory {
   @@index([escrowId, createdAt])
   @@index([source, createdAt])
 }
+
+model SigningSession {
+  id        String   @id @default(uuid())
+  escrowId  String   @unique
+  payload   Json
+  status    String   @default("ACTIVE") // ACTIVE | EXPIRED | COMPLETED
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, expiresAt])
+}

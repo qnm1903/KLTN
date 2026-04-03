@@ -20,15 +20,14 @@ export const SESSION_TTL_MS = 30 * 60 * 1000; // 30 phút
  *
  * @param {string} escrowId
  * @param {{ buyerPubKey, sellerPubKey, mediatorPubKey }} pubKeys
- * @param {object} sessionStore
- * @returns {{ pkAgg_bs, pkAgg_bm, pkAgg_sm }}
+ * @returns {{ pkAgg_bs, pkAgg_bm, pkAgg_sm, session }}
  */
-export function initDKG(escrowId, { buyerPubKey, sellerPubKey, mediatorPubKey }, sessionStore) {
+export function initDKG(escrowId, { buyerPubKey, sellerPubKey, mediatorPubKey }) {
   const pkAgg_bs = aggregatePublicKeys([buyerPubKey, sellerPubKey]);
   const pkAgg_bm = aggregatePublicKeys([buyerPubKey, mediatorPubKey]);
   const pkAgg_sm = aggregatePublicKeys([sellerPubKey, mediatorPubKey]);
 
-  sessionStore.set(escrowId, {
+  const session = {
     pubKeys: { buyer: buyerPubKey, seller: sellerPubKey, mediator: mediatorPubKey },
     pkAgg: {
       buyerSeller: pkAgg_bs,
@@ -42,12 +41,13 @@ export function initDKG(escrowId, { buyerPubKey, sellerPubKey, mediatorPubKey },
     completedActions: [],
     createdAt: Date.now(),
     status: 'INITIALIZED'
-  });
+  };
 
   return {
     pkAgg_bs: { x: pkAgg_bs.x, y: pkAgg_bs.y },
     pkAgg_bm: { x: pkAgg_bm.x, y: pkAgg_bm.y },
-    pkAgg_sm: { x: pkAgg_sm.x, y: pkAgg_sm.y }
+    pkAgg_sm: { x: pkAgg_sm.x, y: pkAgg_sm.y },
+    session
   };
 }
 

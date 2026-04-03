@@ -9,6 +9,7 @@ cache/
 typechain/
 typechain-types/
 gas_results.json
+gas_benchmark_results.json
 gas-report.txt
 
 # Testing and Coverage

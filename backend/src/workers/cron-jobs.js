@@ -238,6 +238,17 @@ async function cleanupExpiredFiles(prisma, options = {}) {
   const uploadsDir = options.uploadsDir ?? DEFAULT_UPLOADS_DIR;
   const startTime = Date.now();
 
+  const deletedSessions = typeof prisma.signingSession?.deleteMany === 'function'
+    ? await prisma.signingSession.deleteMany({
+      where: {
+        OR: [
+          { status: 'EXPIRED' },
+          { expiresAt: { lt: now } }
+        ]
+      }
+    })
+    : { count: 0 };
+
   const deletedNonces = await prisma.authNonce.deleteMany({
     where: {
       expiresAt: { lt: now }
@@ -281,6 +292,7 @@ async function cleanupExpiredFiles(prisma, options = {}) {
 
   const duration = Date.now() - startTime;
   logMetric(logger, 'cron.file_cleanup.completed', {
+    deletedSessions: deletedSessions.count,
     deletedNonces: deletedNonces.count,
     deletedFiles,
     orphanCandidates

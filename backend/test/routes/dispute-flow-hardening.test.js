@@ -1,7 +1,7 @@
 import request from 'supertest';
 import express from 'express';
 import { jest } from '@jest/globals';
-import { sessions } from '../../src/store/session.js';
+import { clearSessions } from '../../src/store/session.js';
 import { signToken } from '../../src/middleware/auth.js';
 
 const mockPrisma = {
@@ -48,9 +48,9 @@ function buildApp() {
 }
 
 describe('Dispute flow hardening', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
-    sessions.clear();
+    await clearSessions();
     delete process.env.ENFORCE_ESCROW_STATUS_TRANSITIONS;
     delete process.env.ALLOW_PARTICIPANT_TERMINAL_STATUS_PATCH;
   });

@@ -10,13 +10,11 @@ import { generateKeyPair } from '../../src/crypto/ecc.js';
 import { ethers } from 'ethers';
 
 describe('Cross-layer: Schnorr signing flow', () => {
-  let sessions;
   let escrowId;
   let session;
   let keys;
 
   beforeAll(() => {
-    sessions = new Map();
     escrowId = '0x' + '1a2b3c'.padEnd(64, '0');
 
     keys = {
@@ -25,16 +23,12 @@ describe('Cross-layer: Schnorr signing flow', () => {
       mediator: generateKeyPair()
     };
 
-    initDKG(
-      escrowId,
-      {
-        buyerPubKey: keys.buyer.pubKey,
-        sellerPubKey: keys.seller.pubKey,
-        mediatorPubKey: keys.mediator.pubKey
-      },
-      sessions
-    );
-    session = sessions.get(escrowId);
+    const { session: dkgSession } = initDKG(escrowId, {
+      buyerPubKey: keys.buyer.pubKey,
+      sellerPubKey: keys.seller.pubKey,
+      mediatorPubKey: keys.mediator.pubKey
+    });
+    session = dkgSession;
   });
 
   function signForPair(action, roleA, roleB) {

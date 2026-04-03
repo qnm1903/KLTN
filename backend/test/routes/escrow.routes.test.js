@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { ethers } from 'ethers';
 import app from '../../src/app.js';
-import { sessions } from '../../src/store/session.js';
+import { clearSessions } from '../../src/store/session.js';
 import { computeSignatureShare } from '../../src/crypto/schnorr.js';
 
 function buildParty() {
@@ -19,15 +19,15 @@ describe('Escrow Routes Integration', () => {
   let seller;
   let mediator;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     buyer = buildParty();
     seller = buildParty();
     mediator = buildParty();
-    sessions.clear();
+    await clearSessions();
   });
 
-  afterEach(() => {
-    sessions.clear();
+  afterEach(async () => {
+    await clearSessions();
   });
 
   async function initSession() {

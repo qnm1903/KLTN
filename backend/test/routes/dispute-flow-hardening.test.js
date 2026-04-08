@@ -32,6 +32,12 @@ jest.unstable_mockModule('../../src/lib/prisma.js', () => ({
   default: mockPrisma
 }));
 
+const mockUploadEvidenceToIpfs = jest.fn();
+
+jest.unstable_mockModule('../../src/lib/ipfs-storage.js', () => ({
+  uploadEvidenceToIpfs: mockUploadEvidenceToIpfs
+}));
+
 const { default: escrowsRouter } = await import('../../src/routes/escrows.js');
 const { default: evidenceRouter } = await import('../../src/routes/evidence.js');
 
@@ -50,6 +56,11 @@ function buildApp() {
 describe('Dispute flow hardening', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockUploadEvidenceToIpfs.mockResolvedValue({
+      cid: 'bafy-test-cid',
+      fileUrl: 'https://gateway.pinata.cloud/ipfs/bafy-test-cid?filename=evidence.txt',
+      provider: 'pinata'
+    });
     await clearSessions();
     delete process.env.ENFORCE_ESCROW_STATUS_TRANSITIONS;
     delete process.env.ALLOW_PARTICIPANT_TERMINAL_STATUS_PATCH;
@@ -288,6 +299,48 @@ describe('Dispute flow hardening', () => {
     expect(res.statusCode).toBe(409);
     expect(res.body.error).toMatch(/evidence window has ended/i);
     expect(mockPrisma.evidence.create).not.toHaveBeenCalled();
+  });
+
+  it('uploads evidence to IPFS and stores the gateway URL', async () => {
+    const app = buildApp();
+    mockPrisma.escrow.findUnique.mockResolvedValue({
+      id: 'escrow-11',
+      status: 'DISPUTED',
+      disputePhase: 'EVIDENCE_WINDOW',
+      buyerId: 'user-1',
+      sellerId: 'user-2',
+      mediatorId: 'user-3',
+      chainEscrowId: '0xabc123'
+    });
+    mockPrisma.evidence.create.mockResolvedValue({
+      id: 'evidence-11',
+      escrowId: 'escrow-11',
+      uploaderId: 'user-1',
+      fileUrl: 'https://gateway.pinata.cloud/ipfs/bafy-test-cid?filename=evidence.txt',
+      description: 'ipfs evidence',
+      createdAt: new Date('2026-04-08T00:00:00.000Z'),
+      uploader: { id: 'user-1', walletAddress: '0x1', name: 'Buyer' }
+    });
+
+    const res = await request(app)
+      .post('/api/escrows/escrow-11/evidence')
+      .set('Authorization', authHeader({ id: 'user-1', walletAddress: '0x1', role: 'USER' }))
+      .field('description', 'ipfs evidence')
+      .attach('file', Buffer.from('proof'), 'evidence.png');
+
+    expect(res.statusCode).toBe(201);
+    expect(mockUploadEvidenceToIpfs).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.evidence.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          escrowId: 'escrow-11',
+          uploaderId: 'user-1',
+          fileUrl: 'https://gateway.pinata.cloud/ipfs/bafy-test-cid?filename=evidence.txt',
+          description: 'ipfs evidence'
+        })
+      })
+    );
+    expect(res.body.fileUrl).toBe('https://gateway.pinata.cloud/ipfs/bafy-test-cid?filename=evidence.txt');
   });
 
   it('returns status history for escrow participant', async () => {

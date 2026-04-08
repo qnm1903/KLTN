@@ -1,28 +1,13 @@
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import prisma from '../lib/prisma.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { DISPUTE_EVIDENCE_UPLOAD_PHASES } from '../lib/dispute-lifecycle.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Cấu hình lưu file upload
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, path.join(__dirname, '../../uploads'));
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    const ext = path.extname(file.originalname);
-    cb(null, `${uniqueSuffix}${ext}`);
-  }
-});
+import { uploadEvidenceToIpfs } from '../lib/ipfs-storage.js';
 
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
   fileFilter: (req, file, cb) => {
     const allowed = {
@@ -112,11 +97,26 @@ router.post('/:id/evidence', authMiddleware, handleEvidenceUpload, async (req, r
       return res.status(400).json({ error: 'File is required' });
     }
 
+    let uploadedFile;
+    try {
+      uploadedFile = await uploadEvidenceToIpfs(req.file, {
+        name: req.file.originalname,
+        publicName: req.file.originalname,
+        metadata: {
+          escrowId,
+          uploaderId: userId
+        }
+      });
+    } catch (uploadError) {
+      console.error('Error uploading evidence to IPFS:', uploadError.message);
+      return res.status(502).json({ error: uploadError.message });
+    }
+
     const evidence = await prisma.evidence.create({
       data: {
         escrowId,
         uploaderId: userId,
-        fileUrl: `/uploads/${req.file.filename}`,
+        fileUrl: uploadedFile.fileUrl,
         description: req.body.description || ''
       },
       include: {
@@ -130,6 +130,8 @@ router.post('/:id/evidence', authMiddleware, handleEvidenceUpload, async (req, r
         escrowId,
         evidenceId: evidence.id,
         uploaderId: userId,
+        cid: uploadedFile.cid,
+        storageProvider: uploadedFile.provider,
         fileUrl: evidence.fileUrl,
         description: evidence.description,
         createdAt: evidence.createdAt

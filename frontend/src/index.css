@@ -1,6 +1,8 @@
+/* 1. Đặt các lệnh @import ở vị trí trên cùng của file */
+@import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;700&family=Orbitron:wght@400;700;900&display=swap');
 @import "tailwindcss";
 
-/* Định nghĩa Theme cho Khóa luận */
+/* 2. Định nghĩa Theme Tailwind */
 @theme {
   --color-darkBg: #0F172A;
   --color-primary: #1E3A8A;
@@ -10,6 +12,7 @@
   --font-exo: "Exo 2", sans-serif;
 }
 
+/* 3. Các CSS tùy chỉnh khác */
 body {
   background-color: var(--color-darkBg);
   color: white;

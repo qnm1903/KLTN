@@ -5,20 +5,23 @@ import api from '../lib/api';
 
 export function useSIWE() {
   const { address } = useConnection();
-  const signMessage = useSignMessage();
-  const disconnect = useDisconnect();
+  
+  // Destructure chuẩn theo Wagmi v3
+  const { signMessageAsync } = useSignMessage();
+  const { disconnect } = useDisconnect();
+  
   const [auth, setAuth] = useAtom(authAtom);
 
   const login = async () => {
     try {
-      if (!address) throw new Error("Vui lòng kết nối ví MetaMask trước!");
+      if (!address) throw new Error("Please connect your MetaMask wallet first!");
 
       // 1. Lấy Nonce từ Backend
       const { data: { nonce } } = await api.get(`/auth/nonce?address=${address}`);
 
       // 2. Yêu cầu MetaMask ký thông điệp (Khớp 100% với Backend)
       const message = `Sign this message to authenticate with Escrow TSS DApp.\n\nNonce: ${nonce}`;
-      const signature = await signMessage.mutateAsync({ message });
+      const signature = await signMessageAsync({ message });
 
       // 3. Gửi chữ ký lên Backend để Verify
       const { data } = await api.post('/auth/verify', { address, signature });
@@ -29,8 +32,8 @@ export function useSIWE() {
 
       return data;
     } catch (error) {
-      console.error('Lỗi đăng nhập:', error);
-      disconnect.mutate(); // Ngắt kết nối ví nếu xác thực thất bại
+      console.error('Login error:', error);
+      disconnect(); // Ngắt kết nối ví nếu xác thực thất bại
       throw error;
     }
   };
@@ -38,7 +41,7 @@ export function useSIWE() {
   const logout = () => {
     localStorage.removeItem('jwt_token');
     setAuth({ isAuthenticated: false, user: null });
-    disconnect.mutate();
+    disconnect();
   };
 
   return { login, logout, auth };

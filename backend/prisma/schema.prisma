@@ -20,7 +20,7 @@ model User {
   // Relations
   boughtEscrows   Escrow[]   @relation("BuyerEscrows")
   soldEscrows     Escrow[]   @relation("SellerEscrows")
-  mediatedEscrows Escrow[]   @relation("MediatorEscrows")
+  mediatedEscrowLinks EscrowMediator[]
   evidences       Evidence[]
   statusHistoryActions EscrowStatusHistory[]
   refreshTokens   RefreshToken[]
@@ -47,11 +47,10 @@ model Escrow {
   // Các bên tham gia
   buyerId    String
   sellerId   String
-  mediatorId String
 
   buyer    User @relation("BuyerEscrows", fields: [buyerId], references: [id])
   seller   User @relation("SellerEscrows", fields: [sellerId], references: [id])
-  mediator User @relation("MediatorEscrows", fields: [mediatorId], references: [id])
+  escrowMediators EscrowMediator[]
 
   // PKAgg data (lưu kết quả DKG để reference)
   pkAggBsX String?
@@ -73,6 +72,20 @@ model Escrow {
   @@index([disputePhase, evidenceDeadlineAt])
   @@index([disputePhase, reviewDeadlineAt])
   @@index([disputePhase, decisionDeadlineAt])
+}
+
+model EscrowMediator {
+  escrowId   String
+  mediatorId String
+  slot       Int
+  createdAt  DateTime @default(now())
+
+  escrow   Escrow @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+  mediator User   @relation(fields: [mediatorId], references: [id], onDelete: Cascade)
+
+  @@id([escrowId, mediatorId])
+  @@unique([escrowId, slot])
+  @@index([mediatorId])
 }
 
 model Evidence {

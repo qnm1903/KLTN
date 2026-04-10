@@ -1,11 +1,11 @@
-## Phần 0: Escrow Lifecycle Overview
+﻿## Phần 0: Escrow Lifecycle Overview
 
 ```mermaid
 stateDiagram-v2
     [*] --> CREATED: UC1: Create Escrow
     CREATED --> LOCKED: UC2: Lock Funds\n(Buyer locks money)
     
-    LOCKED --> RELEASED: UC4: Release Funds\n(Buyer+Seller agree)\nor UC6: Timeout Release
+    LOCKED --> RELEASED: UC4: Release Funds\n(Selected 5-of-7 committee agree)\nor UC6: Timeout Release
     LOCKED --> DISPUTED: Buyer initiates\ndispute
     
     DISPUTED --> RELEASED: UC5A: Mediator+Seller\nrelease to seller
@@ -15,7 +15,7 @@ stateDiagram-v2
     RELEASED --> [*]: Funds transferred\nto Seller
     REFUNDED --> [*]: Funds transferred\nto Buyer
     
-    note right of CREATED\n        DKG initialized\n        3 public keys created\n        (BS, BM, SM lanes)\n    end note\n    \n    note right of LOCKED\n        Buyer funds locked\n        in smart contract\n        Timer starts\n    end note\n    \n    note right of DISPUTED\n        Evidence window open\n        Both parties can upload\n        documents to IPFS\n    end note\n```\n\n**Key States:**\n- **CREATED**: Escrow initialized, DKG session active, 3 lanes ready\n- **LOCKED**: Funds held in EscrowVault, awaiting action/completion\n- **DISPUTED**: Evidence period open, mediator reviews submissions\n- **RELEASED**: Funds transferred to Seller (happy path or timeout)\n- **REFUNDED**: Funds transferred to Buyer (mediator decision)\n\n---\n\n## Phần 1: Use Cases
+    note right of CREATED\n        DKG initialized\n        7 participant keys created\n        signerBitmap binds the 5-of-7 committee\n    end note\n    \n    note right of LOCKED\n        Buyer funds locked\n        in smart contract\n        Timer starts\n    end note\n    \n    note right of DISPUTED\n        Evidence window open\n        Both parties can upload\n        documents to IPFS\n    end note\n```\n\n**Key States:**\n- **CREATED**: Escrow initialized, DKG session active, 7 participant committee ready\n- **LOCKED**: Funds held in EscrowVault, awaiting action/completion\n- **DISPUTED**: Evidence period open, mediator reviews submissions\n- **RELEASED**: Funds transferred to Seller (happy path or timeout)\n- **REFUNDED**: Funds transferred to Buyer (mediator decision)\n\n---\n\n## Phần 1: Use Cases
 ```
 ## UC1: Tạo Giao Dịch Escrow Mới
 
@@ -31,7 +31,7 @@ stateDiagram-v2
 **Main Flow**:
 1. Người mua truy cập trang tạo escrow
 2. Nhập thông tin: seller address, mediator address, số tiền (amount), thời gian deadline
-3. Hệ thống backend khởi tạo DKG session và tạo public keys cho 3 lanes (BS, BM, SM)
+3. Hệ thống backend khởi tạo DKG session và tạo public keys cho 7 participants
 4. Hệ thống trả về escrow metadata (id, public keys, status)
 5. Frontend tạo transaction gọi `EscrowFactory.createEscrow()` on-chain
 6. Polygon/blockchain xác minh syntax và lưu escrow instance
@@ -60,7 +60,7 @@ sequenceDiagram
     Buyer->>Frontend: Input: seller, mediator, amount, deadline
     Frontend->>Backend: POST /escrows (create request)
     Backend->>Backend: Initialize DKG session
-    Backend->>Backend: Generate 3 lane public keys (BS, BM, SM)
+    Backend->>Backend: Generate 7 participant public keys and committee aggregate
     Backend->>DB: Save session + keys
     Backend-->>Frontend: Return escrow metadata
     Frontend->>Blockchain: TX: EscrowFactory.createEscrow()
@@ -73,21 +73,21 @@ sequenceDiagram
 
 ---
 
-## Phần 1.5: TSS Cryptographic Architecture (BS Lane + 5-of-7 Voting)
+## Phần 1.5: TSS Cryptographic Architecture (5-of-7 Signer Committee)
 
 ```mermaid
 graph TB
     subgraph DKGPhase["DKG Initialization (UC1)"]
         direction LR
-        DKG["🔐 DKG Session<br/>Generate BS Lane"]
-        BS["Lane: BS<br/>Buyer + Seller<br/>2-of-2"]
-        DKG --> BS
+        DKG["🔐 DKG Session<br/>Generate committee aggregate key"]
+        Committee["Committee: 7 participants<br/>SignerBitmap selects 5-of-7"]
+        DKG --> Committee
     end
     
     subgraph SigningPhase["Signing Phase"]
         direction LR
         subgraph ScenarioA["Happy Path<br/>UC4"]
-            S1["✓ Buyer approves<br/>✓ Seller approves<br/>BS Lane: 2-of-2<br/>(No mediator needed)"]
+            S1["✓ Selected committee approves<br/>✓ signerBitmap binds the action<br/>5-of-7 quorum<br/>(No legacy lane model)"]
         end
         
         subgraph ScenarioB["Dispute Resolution<br/>UC5"]
@@ -120,9 +120,9 @@ graph TB
 **Signing Strategy:**
 | Scenario | Signers | Threshold | Use Case |
 |----------|---------|-----------|----------|
-| **UC4: Happy Path** | Buyer + Seller | 2-of-2 | Both agree, no dispute |
-| **UC5: Dispute** | Buyer + Seller + 5 Mediators | 5-of-7 | Mediators vote, majority wins |
-| **UC6: Timeout** | Seller + 5 Mediators | 5-of-7 (formal) | Auto-release after deadline |
+| **UC4: Happy Path** | Selected 5 of 7 committee | 5-of-7 | Direct release with bitmap-bound quorum |
+| **UC5: Dispute** | Buyer + Seller + 5 Mediators | 5-of-7 | Majority resolves release/refund |
+| **UC6: Timeout** | Seller + 4 Mediators | 5-of-7 | Formal timeout release after deadline |
 
 ---
 
@@ -237,19 +237,17 @@ sequenceDiagram
 
 **Mô tả**: Người mua + người bán hợp tác ký để giải ngân (happy path).
 
-**Tác Nhân Chính**: Người mua & Người bán (2 lane BS)
+**Tác Nhân Chính**: Nhóm signer 5-of-7 (bao gồm buyer/seller + mediators)
 
 **Precondition**:
 - Escrow status: `LOCKED`
-- Cả 2 đều đó lên ý muốn release
+- Nhóm signer được chọn đạt quorum 5-of-7
 
 **Main Flow**:
 1. Người mua khởi tạo release request
-2. Người bán biểu thị đồng ý
-3. Cả 2 ký:
-   - Mỗi người gọi `POST /escrows/:id/partial-sign` với threshold
-   - Backend verify signature + gom lại
-4. Backend tạo chữ ký Schnorr tổng hợp từ BS lane
+2. Hệ thống chọn signer committee theo policy của action
+3. Các signer gửi nonce và z-share theo quy trình Schnorr
+4. Backend tạo chữ ký Schnorr tổng hợp từ 5-of-7 committee
 5. Gọi `EscrowVault.release()` on-chain
 6. Smart contract verify chữ ký -> transfer tiền cho seller
 7. Event Listener cập nhật DB -> status = RELEASED
@@ -259,7 +257,7 @@ sequenceDiagram
 - Escrow status: RELEASED
 - Giao dịch hoàn thành thành công
 
-**Diagram (BS Lane - 2-of-2):**
+**Diagram (5-of-7 Committee Signing):**
 ```mermaid
 sequenceDiagram
     actor Buyer
@@ -271,19 +269,18 @@ sequenceDiagram
     participant DB
 
     Buyer->>Frontend: Click "Approve Release"
-    Buyer->>Backend: POST /escrows/:id/partial-sign (signature_buyer)
-    Backend->>Backend: Verify signature with BS public key
-    Backend->>DB: Store partial sig from buyer
+    Buyer->>Backend: POST /api/escrow/nonce
+    Backend->>Backend: Validate signer role + bitmap
+    Backend->>DB: Store round-1 nonce
     
     Seller->>Frontend: View release request
-    Seller->>Backend: POST /escrows/:id/partial-sign (signature_seller)
-    Backend->>Backend: Verify signature with BS public key
-    Backend->>Backend: Check both signatures present
-    Backend->>Backend: Combine sigs -> Schnorr aggregate signature
-    Backend->>DB: Mark BS threshold = 2-of-2 reached
+    Seller->>Backend: POST /api/escrow/sign
+    Backend->>Backend: Verify committee quorum = 5-of-7
+    Backend->>Backend: Aggregate Schnorr signature
+    Backend->>DB: Mark 5-of-7 threshold reached
     
     Backend->>SmartContract: TX: release(escrow_id, aggregate_sig)
-    SmartContract->>SmartContract: Verify Schnorr signature (BS public key)
+    SmartContract->>SmartContract: Verify Schnorr signature (committee aggregate key)
     SmartContract->>SmartContract: Transfer funds to seller
     SmartContract->>SmartContract: Update status = RELEASED
     SmartContract-->>EventListener: Emit Released event

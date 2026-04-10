@@ -2,23 +2,33 @@ const { expect } = require("chai");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 const { ethers } = require("hardhat");
 
-describe("EscrowVault & EscrowFactory", function () {
-  let factory, vault;
-  let owner, buyer, seller, mediator, otherAccount;
-  let laneSigners;
-  let lanePk;
+describe("EscrowVault & EscrowFactory (5-of-7)", function () {
+  let factory;
+  let vault;
+  let owner;
+  let buyer;
+  let seller;
+  let mediator1;
+  let mediator2;
+  let mediator3;
+  let mediator4;
+  let mediator5;
+  let otherAccount;
+  let mediatorCommittee;
+  let aggSigner;
+  let aggPk;
 
   const AMOUNT = ethers.parseEther("1.0");
   const CONFIRM_DAYS = 14;
   const TIMEOUT_DAYS = 21;
   const ORDER = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
 
-  function mulmod(a, b, m) {
-    return (a * b) % m;
-  }
+  const BITMAP_RELEASE = 0x1f;
+  const BITMAP_REFUND = 0x3e;
+  const BITMAP_TIMEOUT = 0x3d;
 
   function toPublicXY(privateKey) {
-    const pub = ethers.SigningKey.computePublicKey(privateKey, false); // 0x04 + x + y
+    const pub = ethers.SigningKey.computePublicKey(privateKey, false);
     return {
       x: "0x" + pub.slice(4, 68),
       y: "0x" + pub.slice(68, 132)
@@ -28,13 +38,13 @@ describe("EscrowVault & EscrowFactory", function () {
   function buildSchnorrSignature(privateKey, pkX, pkY, msgHash) {
     const nonce = ethers.hexlify(ethers.randomBytes(32));
     const noncePub = ethers.SigningKey.computePublicKey(nonce, false);
-    const R_x = "0x" + noncePub.slice(4, 68);
-    const R_y = "0x" + noncePub.slice(68, 132);
-    const R_addr = ethers.computeAddress("0x04" + R_x.slice(2) + R_y.slice(2));
+    const rX = "0x" + noncePub.slice(4, 68);
+    const rY = "0x" + noncePub.slice(68, 132);
+    const rAddr = ethers.computeAddress("0x04" + rX.slice(2) + rY.slice(2));
 
     const e = ethers.solidityPackedKeccak256(
       ["address", "uint256", "uint256", "bytes32"],
-      [R_addr, pkX, pkY, msgHash]
+      [rAddr, pkX, pkY, msgHash]
     );
 
     const k = BigInt(nonce);
@@ -43,248 +53,406 @@ describe("EscrowVault & EscrowFactory", function () {
     const z = (k + (ev * s) % ORDER) % ORDER;
 
     return {
-      R_addr,
+      rAddr,
       z: ethers.toBeHex(z, 32),
       e
     };
   }
 
-  beforeEach(async function () {
-    [owner, buyer, seller, mediator, otherAccount] = await ethers.getSigners();
-
-    laneSigners = {
-      release: ethers.Wallet.createRandom(),
-      refund: ethers.Wallet.createRandom(),
-      timeout: ethers.Wallet.createRandom()
-    };
-    lanePk = {
-      release: toPublicXY(laneSigners.release.privateKey),
-      refund: toPublicXY(laneSigners.refund.privateKey),
-      timeout: toPublicXY(laneSigners.timeout.privateKey)
-    };
-
-    // Deploy Factory
-    const Factory = await ethers.getContractFactory("EscrowFactory");
-    factory = await Factory.deploy();
-
-    // Create Escrow
+  async function deployEscrow(committee = mediatorCommittee) {
     const tx = await factory.connect(buyer).createEscrow(
       seller.address,
-      mediator.address,
-      [
-        BigInt(lanePk.release.x),
-        BigInt(lanePk.release.y),
-        BigInt(lanePk.refund.x),
-        BigInt(lanePk.refund.y),
-        BigInt(lanePk.timeout.x),
-        BigInt(lanePk.timeout.y)
-      ],
+      committee,
+      [BigInt(aggPk.x), BigInt(aggPk.y)],
       AMOUNT,
       CONFIRM_DAYS,
       TIMEOUT_DAYS
     );
     const receipt = await tx.wait();
 
-    // Find EscrowCreatedEvent to get vault address
     const event = receipt.logs.find(
       (log) => log.fragment && log.fragment.name === "EscrowCreatedEvent"
     );
     const vaultAddress = event.args[0];
-
-    // Get vault instance
     vault = await ethers.getContractAt("EscrowVault", vaultAddress);
+  }
+
+  async function buildActionHashForDomain(action, signerBitmap, chainId, contractAddress) {
+    const escrowId = await vault.escrowId();
+    return ethers.solidityPackedKeccak256(
+      ["uint256", "address", "bytes32", "string", "uint8"],
+      [chainId, contractAddress, escrowId, action, signerBitmap]
+    );
+  }
+
+  async function buildActionHash(action, signerBitmap) {
+    const chainId = (await ethers.provider.getNetwork()).chainId;
+    return buildActionHashForDomain(action, signerBitmap, chainId, await vault.getAddress());
+  }
+
+  async function signAction(action, signerBitmap, signingWallet = aggSigner) {
+    const msgHash = await buildActionHash(action, signerBitmap);
+    const sig = buildSchnorrSignature(signingWallet.privateKey, aggPk.x, aggPk.y, msgHash);
+    return {
+      msgHash,
+      rAddr: sig.rAddr,
+      z: sig.z,
+      e: sig.e
+    };
+  }
+
+  beforeEach(async function () {
+    [owner, buyer, seller, mediator1, mediator2, mediator3, mediator4, mediator5, otherAccount] =
+      await ethers.getSigners();
+
+    mediatorCommittee = [
+      mediator1.address,
+      mediator2.address,
+      mediator3.address,
+      mediator4.address,
+      mediator5.address
+    ];
+
+    aggSigner = ethers.Wallet.createRandom();
+    aggPk = toPublicXY(aggSigner.privateKey);
+
+    const Factory = await ethers.getContractFactory("EscrowFactory");
+    factory = await Factory.deploy();
+
+    await deployEscrow();
   });
 
-  describe("Deployment", function () {
-    it("Should set the right buyer, seller, and mediator", async function () {
+  describe("Deployment and participant guardrails", function () {
+    it("sets buyer, seller and all five mediators", async function () {
       expect(await vault.buyer()).to.equal(buyer.address);
       expect(await vault.seller()).to.equal(seller.address);
-      expect(await vault.mediator()).to.equal(mediator.address);
+      expect(await vault.mediators(0)).to.equal(mediator1.address);
+      expect(await vault.mediators(1)).to.equal(mediator2.address);
+      expect(await vault.mediators(2)).to.equal(mediator3.address);
+      expect(await vault.mediators(3)).to.equal(mediator4.address);
+      expect(await vault.mediators(4)).to.equal(mediator5.address);
+      expect(await vault.status()).to.equal(0n);
     });
 
-    it("Should start with CREATED status", async function () {
-      expect(await vault.status()).to.equal(0); // 0 = CREATED
+    it("rejects duplicate mediator in factory", async function () {
+      const duplicated = [
+        mediator1.address,
+        mediator1.address,
+        mediator3.address,
+        mediator4.address,
+        mediator5.address
+      ];
+
+      await expect(
+        factory.connect(buyer).createEscrow(
+          seller.address,
+          duplicated,
+          [BigInt(aggPk.x), BigInt(aggPk.y)],
+          AMOUNT,
+          CONFIRM_DAYS,
+          TIMEOUT_DAYS
+        )
+      ).to.be.revertedWithCustomError(factory, "DuplicateMediator");
+    });
+
+    it("rejects mediator collision with seller in factory", async function () {
+      const conflictCommittee = [
+        seller.address,
+        mediator2.address,
+        mediator3.address,
+        mediator4.address,
+        mediator5.address
+      ];
+
+      await expect(
+        factory.connect(buyer).createEscrow(
+          seller.address,
+          conflictCommittee,
+          [BigInt(aggPk.x), BigInt(aggPk.y)],
+          AMOUNT,
+          CONFIRM_DAYS,
+          TIMEOUT_DAYS
+        )
+      ).to.be.revertedWithCustomError(factory, "ParticipantConflict");
+    });
+
+    it("rejects invalid aggregate key coordinates in factory", async function () {
+      await expect(
+        factory.connect(buyer).createEscrow(
+          seller.address,
+          mediatorCommittee,
+          [0, BigInt(aggPk.y)],
+          AMOUNT,
+          CONFIRM_DAYS,
+          TIMEOUT_DAYS
+        )
+      ).to.be.revertedWithCustomError(factory, "InvalidAggregateKey");
+    });
+
+    it("rejects off-curve aggregate key coordinates in factory", async function () {
+      const offCurveY = BigInt(aggPk.y) + 1n;
+
+      await expect(
+        factory.connect(buyer).createEscrow(
+          seller.address,
+          mediatorCommittee,
+          [BigInt(aggPk.x), offCurveY],
+          AMOUNT,
+          CONFIRM_DAYS,
+          TIMEOUT_DAYS
+        )
+      ).to.be.revertedWithCustomError(factory, "InvalidAggregateKey");
+    });
+
+    it("keeps defense-in-depth guardrail in vault constructor", async function () {
+      const Vault = await ethers.getContractFactory("EscrowVault");
+      const duplicated = [
+        mediator1.address,
+        mediator1.address,
+        mediator3.address,
+        mediator4.address,
+        mediator5.address
+      ];
+
+      await expect(
+        Vault.deploy(
+          ethers.hexlify(ethers.randomBytes(32)),
+          buyer.address,
+          seller.address,
+          duplicated,
+          [BigInt(aggPk.x), BigInt(aggPk.y)],
+          AMOUNT,
+          CONFIRM_DAYS,
+          TIMEOUT_DAYS
+        )
+      ).to.be.revertedWithCustomError(Vault, "DuplicateMediator");
+    });
+
+    it("rejects invalid amount in vault constructor", async function () {
+      const Vault = await ethers.getContractFactory("EscrowVault");
+
+      await expect(
+        Vault.deploy(
+          ethers.hexlify(ethers.randomBytes(32)),
+          buyer.address,
+          seller.address,
+          mediatorCommittee,
+          [BigInt(aggPk.x), BigInt(aggPk.y)],
+          0,
+          CONFIRM_DAYS,
+          TIMEOUT_DAYS
+        )
+      ).to.be.revertedWithCustomError(Vault, "InvalidAmount");
+    });
+
+    it("rejects invalid deadline in vault constructor", async function () {
+      const Vault = await ethers.getContractFactory("EscrowVault");
+
+      await expect(
+        Vault.deploy(
+          ethers.hexlify(ethers.randomBytes(32)),
+          buyer.address,
+          seller.address,
+          mediatorCommittee,
+          [BigInt(aggPk.x), BigInt(aggPk.y)],
+          AMOUNT,
+          0,
+          TIMEOUT_DAYS
+        )
+      ).to.be.revertedWithCustomError(Vault, "InvalidDeadline");
     });
   });
 
-  describe("Locking Funds", function () {
-    it("Should allow buyer to lock funds", async function () {
+  describe("Signer bitmap helper", function () {
+    it("counts set bits correctly", async function () {
+      expect(await vault.signerCount(0x1f)).to.equal(5n);
+      expect(await vault.signerCount(0x3f)).to.equal(6n);
+      expect(await vault.signerCount(0x7f)).to.equal(7n);
+    });
+
+    it("validates signer policy matrix", async function () {
+      expect(await vault.validateSignerBitmap(0x1f)).to.equal(true);
+      expect(await vault.validateSignerBitmap(0x3d)).to.equal(true);
+      expect(await vault.validateSignerBitmap(0x3e)).to.equal(true);
+      expect(await vault.validateSignerBitmap(0x7f)).to.equal(true);
+
+      expect(await vault.validateSignerBitmap(0x7c)).to.equal(false);
+      expect(await vault.validateSignerBitmap(0x0f)).to.equal(false);
+      expect(await vault.validateSignerBitmap(0x9f)).to.equal(false);
+    });
+  });
+
+  describe("Locking funds", function () {
+    it("allows buyer to lock funds", async function () {
       await expect(vault.connect(buyer).lockFunds({ value: AMOUNT }))
         .to.emit(vault, "FundsLocked")
         .withArgs(await vault.escrowId(), AMOUNT);
 
-      expect(await vault.status()).to.equal(1); // 1 = LOCKED
+      expect(await vault.status()).to.equal(1n);
       expect(await ethers.provider.getBalance(await vault.getAddress())).to.equal(AMOUNT);
     });
 
-    it("Should reject if anyone else tries to lock", async function () {
+    it("rejects non-buyer lock", async function () {
       await expect(vault.connect(seller).lockFunds({ value: AMOUNT }))
-        .to.be.revertedWith("Only buyer can lock");
+        .to.be.revertedWithCustomError(vault, "NotBuyer");
     });
 
-    it("Should reject if value is incorrect", async function () {
+    it("rejects wrong amount", async function () {
       await expect(vault.connect(buyer).lockFunds({ value: ethers.parseEther("0.5") }))
-        .to.be.revertedWith("Incorrect value");
+        .to.be.revertedWithCustomError(vault, "IncorrectValue");
     });
   });
 
-  describe("Happy Path: Release", function () {
+  describe("Release path", function () {
     beforeEach(async function () {
       await vault.connect(buyer).lockFunds({ value: AMOUNT });
     });
 
-    it("Should release funds to seller with valid signature", async function () {
-      // Create message hash: keccak256(abi.encodePacked(escrowId, "release"))
+    it("releases with valid 5-of-7 bitmap and signature", async function () {
+      const sig = await signAction("release", BITMAP_RELEASE);
       const escrowId = await vault.escrowId();
-      const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "release"]);
-      const msgHash = ethers.keccak256(payload);
-      const signature = buildSchnorrSignature(
-        laneSigners.release.privateKey,
-        lanePk.release.x,
-        lanePk.release.y,
-        msgHash
-      );
 
-      const sellerBalanceBefore = await ethers.provider.getBalance(seller.address);
-
-      const tx = await vault.release(signature.R_addr, signature.z, signature.e, msgHash);
-      await tx.wait();
-      
-      console.log(`\t[Metric] Payload size for TSS release(): ${ethers.getBytes(tx.data).length} bytes`);
+      const tx = await vault.release(sig.rAddr, sig.z, sig.e, sig.msgHash, BITMAP_RELEASE);
 
       await expect(tx)
         .to.emit(vault, "FundsReleased")
-        .withArgs(escrowId, seller.address);
+        .withArgs(escrowId, seller.address, BigInt(BITMAP_RELEASE), "release");
 
-      const sellerBalanceAfter = await ethers.provider.getBalance(seller.address);
-      expect(sellerBalanceAfter - sellerBalanceBefore).to.equal(AMOUNT);
-      expect(await vault.status()).to.equal(2); // 2 = RELEASED
+      expect(await vault.status()).to.equal(2n);
     });
 
-    it("Should revert with invalid signature", async function () {
-      const escrowId = await vault.escrowId();
-      const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "release"]);
-      const msgHash = ethers.keccak256(payload);
+    it("rejects bitmap with no buyer/seller core role", async function () {
+      const invalidBitmap = 0x7c;
+      const sig = await signAction("release", invalidBitmap);
+
+      await expect(vault.release(sig.rAddr, sig.z, sig.e, sig.msgHash, invalidBitmap))
+        .to.be.revertedWithCustomError(vault, "InvalidSignerBitmap");
+    });
+
+    it("rejects bitmap below 5 signers", async function () {
+      const invalidBitmap = 0x0f;
+      const sig = await signAction("release", invalidBitmap);
+
+      await expect(vault.release(sig.rAddr, sig.z, sig.e, sig.msgHash, invalidBitmap))
+        .to.be.revertedWithCustomError(vault, "InvalidSignerBitmap");
+    });
+
+    it("rejects hash tampering by action mismatch", async function () {
+      const sig = await signAction("refund", BITMAP_RELEASE);
+
+      await expect(vault.release(sig.rAddr, sig.z, sig.e, sig.msgHash, BITMAP_RELEASE))
+        .to.be.revertedWithCustomError(vault, "InvalidMsgHash");
+    });
+
+    it("rejects hash tampering by signer bitmap mismatch", async function () {
+      const sig = await signAction("release", BITMAP_RELEASE);
+
+      await expect(vault.release(sig.rAddr, sig.z, sig.e, sig.msgHash, BITMAP_REFUND))
+        .to.be.revertedWithCustomError(vault, "InvalidMsgHash");
+    });
+
+    it("rejects domain tampering by contract address mismatch", async function () {
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+      const forgedHash = await buildActionHashForDomain(
+        "release",
+        BITMAP_RELEASE,
+        chainId,
+        otherAccount.address
+      );
+      const sig = buildSchnorrSignature(aggSigner.privateKey, aggPk.x, aggPk.y, forgedHash);
+
+      await expect(vault.release(sig.rAddr, sig.z, sig.e, forgedHash, BITMAP_RELEASE))
+        .to.be.revertedWithCustomError(vault, "InvalidMsgHash");
+    });
+
+    it("rejects domain tampering by chainId mismatch", async function () {
+      const network = await ethers.provider.getNetwork();
+      const forgedHash = await buildActionHashForDomain(
+        "release",
+        BITMAP_RELEASE,
+        network.chainId + 1n,
+        await vault.getAddress()
+      );
+      const sig = buildSchnorrSignature(aggSigner.privateKey, aggPk.x, aggPk.y, forgedHash);
+
+      await expect(vault.release(sig.rAddr, sig.z, sig.e, forgedHash, BITMAP_RELEASE))
+        .to.be.revertedWithCustomError(vault, "InvalidMsgHash");
+    });
+
+    it("rejects wrong signer key", async function () {
       const wrongWallet = ethers.Wallet.createRandom();
-      const signature = buildSchnorrSignature(
-        wrongWallet.privateKey,
-        lanePk.release.x,
-        lanePk.release.y,
-        msgHash
-      );
+      const sig = await signAction("release", BITMAP_RELEASE, wrongWallet);
 
-      await expect(vault.release(signature.R_addr, signature.z, signature.e, msgHash))
-        .to.be.revertedWith("Invalid signature");
-    });
-
-    it("Should reject release signed with refund lane key", async function () {
-      const escrowId = await vault.escrowId();
-      const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "release"]);
-      const msgHash = ethers.keccak256(payload);
-
-      const wrongLaneSig = buildSchnorrSignature(
-        laneSigners.refund.privateKey,
-        lanePk.refund.x,
-        lanePk.refund.y,
-        msgHash
-      );
-
-      await expect(vault.release(wrongLaneSig.R_addr, wrongLaneSig.z, wrongLaneSig.e, msgHash))
-        .to.be.revertedWith("Invalid signature");
-    });
-
-    it("Should revert if action string is tampered", async function () {
-      const escrowId = await vault.escrowId();
-      // Sign "refund" instead of "release"
-      const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "refund"]);
-      const tamperedHash = ethers.keccak256(payload);
-      const signature = buildSchnorrSignature(
-        laneSigners.release.privateKey,
-        lanePk.release.x,
-        lanePk.release.y,
-        tamperedHash
-      );
-
-      // Calling release() expects hash of "release"
-      await expect(vault.release(signature.R_addr, signature.z, signature.e, tamperedHash))
-        .to.be.revertedWith("Invalid msgHash");
+      await expect(vault.release(sig.rAddr, sig.z, sig.e, sig.msgHash, BITMAP_RELEASE))
+        .to.be.revertedWithCustomError(vault, "InvalidSignature");
     });
   });
 
-  describe("Dispute & Refund", function () {
+  describe("Dispute and refund", function () {
     beforeEach(async function () {
       await vault.connect(buyer).lockFunds({ value: AMOUNT });
     });
 
-    it("Should allow buyer to open dispute and then refund", async function () {
-      const escrowId = await vault.escrowId();
+    it("only buyer can open dispute", async function () {
+      await expect(vault.connect(otherAccount).dispute())
+        .to.be.revertedWithCustomError(vault, "NotBuyer");
+    });
 
-      // Open Dispute
+    it("opens dispute then refunds with valid bitmap", async function () {
+      const escrowId = await vault.escrowId();
       await expect(vault.connect(buyer).dispute())
         .to.emit(vault, "DisputeOpened")
         .withArgs(escrowId);
-      expect(await vault.status()).to.equal(4); // 4 = DISPUTED
 
-      // Refund
-      const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "refund"]);
-      const msgHash = ethers.keccak256(payload);
-      const signature = buildSchnorrSignature(
-        laneSigners.refund.privateKey,
-        lanePk.refund.x,
-        lanePk.refund.y,
-        msgHash
-      );
+      const sig = await signAction("refund", BITMAP_REFUND);
+      await expect(vault.refund(sig.rAddr, sig.z, sig.e, sig.msgHash, BITMAP_REFUND))
+        .to.emit(vault, "FundsReleased")
+        .withArgs(escrowId, buyer.address, BigInt(BITMAP_REFUND), "refund");
 
-      const buyerBalanceBefore = await ethers.provider.getBalance(buyer.address);
+      expect(await vault.status()).to.equal(3n);
+    });
 
-      const tx = await vault.connect(buyer).refund(signature.R_addr, signature.z, signature.e, msgHash);
-      const receipt = await tx.wait();
-      const gasCost = receipt.gasUsed * receipt.gasPrice;
+    it("rejects invalid signer bitmap in refund", async function () {
+      await vault.connect(buyer).dispute();
+      const invalidBitmap = 0x7c;
+      const sig = await signAction("refund", invalidBitmap);
 
-      const buyerBalanceAfter = await ethers.provider.getBalance(buyer.address);
-
-      expect(buyerBalanceAfter - buyerBalanceBefore + gasCost).to.equal(AMOUNT);
-      expect(await vault.status()).to.equal(3); // 3 = REFUNDED
+      await expect(vault.refund(sig.rAddr, sig.z, sig.e, sig.msgHash, invalidBitmap))
+        .to.be.revertedWithCustomError(vault, "InvalidSignerBitmap");
     });
   });
 
-  describe("Timeout Path", function () {
+  describe("Timeout release path", function () {
     beforeEach(async function () {
       await vault.connect(buyer).lockFunds({ value: AMOUNT });
     });
 
-    it("Should not allow timeout release before deadline", async function () {
-      const escrowId = await vault.escrowId();
-      const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "timeout"]);
-      const msgHash = ethers.keccak256(payload);
-      const signature = buildSchnorrSignature(
-        laneSigners.timeout.privateKey,
-        lanePk.timeout.x,
-        lanePk.timeout.y,
-        msgHash
-      );
+    it("rejects timeout release before deadline", async function () {
+      const sig = await signAction("timeout", BITMAP_TIMEOUT);
 
-      await expect(vault.timeoutRelease(signature.R_addr, signature.z, signature.e, msgHash))
-        .to.be.revertedWith("Not timed out");
+      await expect(vault.timeoutRelease(sig.rAddr, sig.z, sig.e, sig.msgHash, BITMAP_TIMEOUT))
+        .to.be.revertedWithCustomError(vault, "NotTimedOut");
     });
 
-    it("Should allow timeout release after deadline", async function () {
-      const escrowId = await vault.escrowId();
-      const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, "timeout"]);
-      const msgHash = ethers.keccak256(payload);
-      const signature = buildSchnorrSignature(
-        laneSigners.timeout.privateKey,
-        lanePk.timeout.x,
-        lanePk.timeout.y,
-        msgHash
-      );
-
-      // Fast forward time
+    it("releases seller after timeout with valid signature", async function () {
       await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);
+      const sig = await signAction("timeout", BITMAP_TIMEOUT);
+      const escrowId = await vault.escrowId();
 
-      await expect(vault.timeoutRelease(signature.R_addr, signature.z, signature.e, msgHash))
+      await expect(vault.timeoutRelease(sig.rAddr, sig.z, sig.e, sig.msgHash, BITMAP_TIMEOUT))
         .to.emit(vault, "FundsReleased")
-        .withArgs(escrowId, seller.address);
+        .withArgs(escrowId, seller.address, BigInt(BITMAP_TIMEOUT), "timeout");
+
+      expect(await vault.status()).to.equal(2n);
+    });
+
+    it("rejects invalid signer bitmap in timeout release", async function () {
+      await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);
+      const invalidBitmap = 0x7c;
+      const sig = await signAction("timeout", invalidBitmap);
+
+      await expect(vault.timeoutRelease(sig.rAddr, sig.z, sig.e, sig.msgHash, invalidBitmap))
+        .to.be.revertedWithCustomError(vault, "InvalidSignerBitmap");
     });
   });
 });

@@ -43,6 +43,12 @@ function handleEvidenceUpload(req, res, next) {
 
 const router = express.Router();
 
+function isEscrowParticipant(escrow, userId) {
+  if (!escrow || !userId) return false;
+  if (escrow.buyerId === userId || escrow.sellerId === userId) return true;
+  return Array.isArray(escrow.escrowMediators) && escrow.escrowMediators.some((row) => row.mediatorId === userId);
+}
+
 function isEvidenceUploadAllowed(escrow, now = new Date()) {
   if (escrow.status !== 'DISPUTED') {
     return {
@@ -79,12 +85,19 @@ function isEvidenceUploadAllowed(escrow, now = new Date()) {
 router.post('/:id/evidence', authMiddleware, handleEvidenceUpload, async (req, res) => {
   try {
     const escrowId = req.params.id;
-    const escrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
+    const escrow = await prisma.escrow.findUnique({
+      where: { id: escrowId },
+      include: {
+        escrowMediators: {
+          select: { mediatorId: true }
+        }
+      }
+    });
     if (!escrow) return res.status(404).json({ error: 'Escrow not found' });
 
     // Chỉ các bên liên quan mới được upload
     const userId = req.user.id;
-    if (escrow.buyerId !== userId && escrow.sellerId !== userId && escrow.mediatorId !== userId) {
+    if (!isEscrowParticipant(escrow, userId)) {
       return res.status(403).json({ error: 'You are not a participant in this escrow' });
     }
 
@@ -156,11 +169,18 @@ router.post('/:id/evidence', authMiddleware, handleEvidenceUpload, async (req, r
 router.get('/:id/evidences', authMiddleware, async (req, res) => {
   try {
     const escrowId = req.params.id;
-    const escrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
+    const escrow = await prisma.escrow.findUnique({
+      where: { id: escrowId },
+      include: {
+        escrowMediators: {
+          select: { mediatorId: true }
+        }
+      }
+    });
     if (!escrow) return res.status(404).json({ error: 'Escrow not found' });
 
     const userId = req.user.id;
-    if (escrow.buyerId !== userId && escrow.sellerId !== userId && escrow.mediatorId !== userId) {
+    if (!isEscrowParticipant(escrow, userId)) {
       return res.status(403).json({ error: 'You are not a participant in this escrow' });
     }
 

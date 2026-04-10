@@ -15,14 +15,25 @@ function buildParty() {
 
 describe('Escrow Routes Integration', () => {
   const escrowId = '0x' + '12'.repeat(32);
+  const signerBitmapRelease = 0x1f;
+  const contractAddress = '0x00000000000000000000000000000000000000aa';
+  const chainId = '31337';
   let buyer;
   let seller;
-  let mediator;
+  let mediator1;
+  let mediator2;
+  let mediator3;
+  let mediator4;
+  let mediator5;
 
   beforeEach(async () => {
     buyer = buildParty();
     seller = buildParty();
-    mediator = buildParty();
+    mediator1 = buildParty();
+    mediator2 = buildParty();
+    mediator3 = buildParty();
+    mediator4 = buildParty();
+    mediator5 = buildParty();
     await clearSessions();
   });
 
@@ -35,16 +46,18 @@ describe('Escrow Routes Integration', () => {
       .post('/api/escrow/init')
       .send({
         escrowId,
+        chainId,
+        contractAddress,
         buyerAddr: buyer.addr,
         sellerAddr: seller.addr,
-        mediatorAddr: mediator.addr,
+        mediatorAddrs: [mediator1.addr, mediator2.addr, mediator3.addr, mediator4.addr, mediator5.addr],
         buyerPubKey: buyer.pub,
         sellerPubKey: seller.pub,
-        mediatorPubKey: mediator.pub
+        mediatorPubKeys: [mediator1.pub, mediator2.pub, mediator3.pub, mediator4.pub, mediator5.pub]
       });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toHaveProperty('pkAgg_bs');
+    expect(res.body).toEqual(expect.objectContaining({ ok: true, contractAddress, chainId }));
   }
 
   it('rejects /init when pubkey does not match address', async () => {
@@ -52,12 +65,14 @@ describe('Escrow Routes Integration', () => {
       .post('/api/escrow/init')
       .send({
         escrowId,
+        chainId,
+        contractAddress,
         buyerAddr: buyer.addr,
         sellerAddr: seller.addr,
-        mediatorAddr: mediator.addr,
+        mediatorAddrs: [mediator1.addr, mediator2.addr, mediator3.addr, mediator4.addr, mediator5.addr],
         buyerPubKey: seller.pub,
         sellerPubKey: seller.pub,
-        mediatorPubKey: mediator.pub
+        mediatorPubKeys: [mediator1.pub, mediator2.pub, mediator3.pub, mediator4.pub, mediator5.pub]
       });
 
     expect(res.statusCode).toBe(400);
@@ -71,12 +86,14 @@ describe('Escrow Routes Integration', () => {
       .post('/api/escrow/init')
       .send({
         escrowId,
+        chainId,
+        contractAddress,
         buyerAddr: buyer.addr,
         sellerAddr: seller.addr,
-        mediatorAddr: mediator.addr,
+        mediatorAddrs: [mediator1.addr, mediator2.addr, mediator3.addr, mediator4.addr, mediator5.addr],
         buyerPubKey: compressed,
         sellerPubKey: seller.pub,
-        mediatorPubKey: mediator.pub
+        mediatorPubKeys: [mediator1.pub, mediator2.pub, mediator3.pub, mediator4.pub, mediator5.pub]
       });
 
     expect(res.statusCode).toBe(400);
@@ -87,14 +104,15 @@ describe('Escrow Routes Integration', () => {
     await initSession();
 
     const nonce = ethers.hexlify(ethers.randomBytes(32));
-    const r = computeSignatureShare(mediator.priv, nonce, '0x' + '00'.repeat(32));
+    const r = computeSignatureShare(mediator5.priv, nonce, '0x' + '00'.repeat(32));
 
     const res = await request(app)
       .post('/api/escrow/nonce')
       .send({
         escrowId,
-        role: 'mediator',
+        role: 'mediator5',
         action: 'release',
+        signerBitmap: signerBitmapRelease,
         R_x: r.R_x,
         R_y: r.R_y
       });
@@ -115,6 +133,7 @@ describe('Escrow Routes Integration', () => {
         escrowId,
         role: 'buyer',
         action: 'release',
+        signerBitmap: signerBitmapRelease,
         R_x: rb.R_x,
         R_y: rb.R_y
       });
@@ -127,6 +146,7 @@ describe('Escrow Routes Integration', () => {
         escrowId,
         role: 'buyer',
         action: 'refund',
+        signerBitmap: signerBitmapRelease,
         R_x: rb.R_x,
         R_y: rb.R_y
       });
@@ -143,6 +163,7 @@ describe('Escrow Routes Integration', () => {
       .send({
         escrowId,
         role: 'buyer',
+        signerBitmap: signerBitmapRelease,
         z: '0x' + '01'.padStart(64, '0')
       });
 
@@ -154,66 +175,69 @@ describe('Escrow Routes Integration', () => {
     await initSession();
 
     const zero = '0x' + '00'.repeat(32);
-    const nonceBuyer = ethers.hexlify(ethers.randomBytes(32));
-    const nonceSeller = ethers.hexlify(ethers.randomBytes(32));
+    const releaseRoles = [
+      { role: 'buyer', party: buyer },
+      { role: 'seller', party: seller },
+      { role: 'mediator1', party: mediator1 },
+      { role: 'mediator2', party: mediator2 },
+      { role: 'mediator3', party: mediator3 }
+    ];
 
-    const rb = computeSignatureShare(buyer.priv, nonceBuyer, zero);
-    const rs = computeSignatureShare(seller.priv, nonceSeller, zero);
+    const round1 = releaseRoles.map((entry) => {
+      const nonce = ethers.hexlify(ethers.randomBytes(32));
+      const share = computeSignatureShare(entry.party.priv, nonce, zero);
+      return { ...entry, nonce, share };
+    });
 
-    const n1 = await request(app)
-      .post('/api/escrow/nonce')
-      .send({
-        escrowId,
-        role: 'buyer',
-        action: 'release',
-        R_x: rb.R_x,
-        R_y: rb.R_y
-      });
+    let challenge = null;
+    for (let index = 0; index < round1.length; index++) {
+      const nonceResponse = await request(app)
+        .post('/api/escrow/nonce')
+        .send({
+          escrowId,
+          role: round1[index].role,
+          action: 'release',
+          signerBitmap: signerBitmapRelease,
+          R_x: round1[index].share.R_x,
+          R_y: round1[index].share.R_y
+        });
 
-    expect(n1.statusCode).toBe(200);
-    expect(n1.body).toEqual({ received: 1, needed: 2 });
+      expect(nonceResponse.statusCode).toBe(200);
+      if (index < round1.length - 1) {
+        expect(nonceResponse.body).toEqual({ received: index + 1, needed: 5 });
+      } else {
+        expect(nonceResponse.body).toHaveProperty('challenge');
+        expect(nonceResponse.body).toHaveProperty('msgHash');
+        challenge = nonceResponse.body.challenge;
+      }
+    }
 
-    const n2 = await request(app)
-      .post('/api/escrow/nonce')
-      .send({
-        escrowId,
-        role: 'seller',
-        action: 'release',
-        R_x: rs.R_x,
-        R_y: rs.R_y
-      });
+    let finalSig = null;
+    for (let index = 0; index < round1.length; index++) {
+      const z = computeSignatureShare(round1[index].party.priv, round1[index].nonce, challenge).z;
+      const signResponse = await request(app)
+        .post('/api/escrow/sign')
+        .send({
+          escrowId,
+          role: round1[index].role,
+          signerBitmap: signerBitmapRelease,
+          z
+        });
 
-    expect(n2.statusCode).toBe(200);
-    expect(n2.body).toHaveProperty('challenge');
-    expect(n2.body).toHaveProperty('msgHash');
+      expect(signResponse.statusCode).toBe(200);
+      if (index < round1.length - 1) {
+        expect(signResponse.body).toEqual({ received: index + 1, needed: 5 });
+      } else {
+        finalSig = signResponse.body;
+      }
+    }
 
-    const zb = computeSignatureShare(buyer.priv, nonceBuyer, n2.body.challenge).z;
-    const zs = computeSignatureShare(seller.priv, nonceSeller, n2.body.challenge).z;
-
-    const s1 = await request(app)
-      .post('/api/escrow/sign')
-      .send({
-        escrowId,
-        role: 'buyer',
-        z: zb
-      });
-
-    expect(s1.statusCode).toBe(200);
-    expect(s1.body).toEqual({ received: 1, needed: 2 });
-
-    const s2 = await request(app)
-      .post('/api/escrow/sign')
-      .send({
-        escrowId,
-        role: 'seller',
-        z: zs
-      });
-
-    expect(s2.statusCode).toBe(200);
-    expect(s2.body).toHaveProperty('R_addr');
-    expect(s2.body).toHaveProperty('z');
-    expect(s2.body).toHaveProperty('e');
-    expect(s2.body).toHaveProperty('msgHash');
+    expect(finalSig).toBeDefined();
+    expect(finalSig).toHaveProperty('R_addr');
+    expect(finalSig).toHaveProperty('z');
+    expect(finalSig).toHaveProperty('e');
+    expect(finalSig).toHaveProperty('msgHash');
+    expect(finalSig.signerBitmap).toBe(signerBitmapRelease);
 
     const status = await request(app).get(`/api/escrow/${escrowId}/status`);
     expect(status.statusCode).toBe(200);

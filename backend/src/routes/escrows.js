@@ -6,10 +6,33 @@ import { buildDisputeLifecycleData, DISPUTE_PHASES } from '../lib/dispute-lifecy
 
 const router = express.Router();
 
+const MEDIATOR_COMMITTEE_SIZE = 5;
+
+function normalizeAddress(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeMediatorAddresses(mediatorAddresses) {
+  if (!Array.isArray(mediatorAddresses) || mediatorAddresses.length !== MEDIATOR_COMMITTEE_SIZE) {
+    return null;
+  }
+  return mediatorAddresses.map((address) => normalizeAddress(address));
+}
+
+function mediatorCommitteeIncludes(escrow, userId) {
+  return Array.isArray(escrow?.escrowMediators) && escrow.escrowMediators.some((row) => row.mediatorId === userId);
+}
+
+function isEscrowParticipant(escrow, userId) {
+  if (!escrow || !userId) return false;
+  if (escrow.buyerId === userId || escrow.sellerId === userId) return true;
+  return mediatorCommitteeIncludes(escrow, userId);
+}
+
 function getParticipantRole(escrow, userId) {
   if (escrow.buyerId === userId) return 'buyer';
   if (escrow.sellerId === userId) return 'seller';
-  if (escrow.mediatorId === userId) return 'mediator';
+  if (mediatorCommitteeIncludes(escrow, userId)) return 'mediator';
   return null;
 }
 
@@ -46,36 +69,50 @@ function emitDisputeEvent(io, escrow, eventName, payload) {
 /**
  * POST /api/escrows/draft
  * Tạo một giao dịch escrow mới ở trạng thái DRAFT (chưa deploy on-chain).
- * Body: { title, description, amount, sellerAddress, mediatorAddress }
+ * Body: { title, description, amount, sellerAddress, mediatorAddresses }
  */
 router.post('/draft', authMiddleware, async (req, res) => {
   try {
-    const { title, description, amount, sellerAddress, mediatorAddress } = req.body;
+    const { title, description, amount, sellerAddress, mediatorAddresses } = req.body;
+    const normalizedMediatorAddresses = normalizeMediatorAddresses(mediatorAddresses);
 
-    if (!title || !amount || !sellerAddress || !mediatorAddress) {
-      return res.status(400).json({ error: 'title, amount, sellerAddress, mediatorAddress are required' });
+    if (!title || !amount || !sellerAddress || !normalizedMediatorAddresses) {
+      return res.status(400).json({ error: 'title, amount, sellerAddress, mediatorAddresses[5] are required' });
     }
     if (typeof amount !== 'number' || amount <= 0) {
       return res.status(400).json({ error: 'amount must be a positive number' });
     }
 
     const buyerAddr = req.user.walletAddress;
-    if (buyerAddr === sellerAddress.toLowerCase()) {
+    const normalizedSellerAddress = normalizeAddress(sellerAddress);
+
+    if (buyerAddr === normalizedSellerAddress) {
       return res.status(400).json({ error: 'Buyer and Seller cannot be the same address' });
+    }
+    if (new Set(normalizedMediatorAddresses).size !== normalizedMediatorAddresses.length) {
+      return res.status(400).json({ error: 'Mediator addresses must be unique' });
+    }
+    if (normalizedMediatorAddresses.some((address) => !address)) {
+      return res.status(400).json({ error: 'Mediator addresses cannot be empty' });
+    }
+    if (normalizedMediatorAddresses.some((address) => address === buyerAddr || address === normalizedSellerAddress)) {
+      return res.status(400).json({ error: 'Mediator addresses must differ from buyer/seller' });
     }
 
     // Upsert seller & mediator (tạo tài khoản nếu chưa có)
     const seller = await prisma.user.upsert({
-      where: { walletAddress: sellerAddress.toLowerCase() },
+      where: { walletAddress: normalizedSellerAddress },
       update: {},
-      create: { walletAddress: sellerAddress.toLowerCase() }
+      create: { walletAddress: normalizedSellerAddress }
     });
 
-    const mediator = await prisma.user.upsert({
-      where: { walletAddress: mediatorAddress.toLowerCase() },
-      update: {},
-      create: { walletAddress: mediatorAddress.toLowerCase(), role: 'MEDIATOR' }
-    });
+    const mediatorUsers = await Promise.all(
+      normalizedMediatorAddresses.map((address) => prisma.user.upsert({
+        where: { walletAddress: address },
+        update: { role: 'MEDIATOR' },
+        create: { walletAddress: address, role: 'MEDIATOR' }
+      }))
+    );
 
     const escrow = await prisma.escrow.create({
       data: {
@@ -84,12 +121,22 @@ router.post('/draft', authMiddleware, async (req, res) => {
         amount,
         buyerId: req.user.id,
         sellerId: seller.id,
-        mediatorId: mediator.id
+        escrowMediators: {
+          create: mediatorUsers.map((mediator, index) => ({
+            mediatorId: mediator.id,
+            slot: index + 1
+          }))
+        }
       },
       include: {
         buyer: { select: { id: true, walletAddress: true, name: true } },
         seller: { select: { id: true, walletAddress: true, name: true } },
-        mediator: { select: { id: true, walletAddress: true, name: true } }
+        escrowMediators: {
+          include: {
+            mediator: { select: { id: true, walletAddress: true, name: true } }
+          },
+          orderBy: { slot: 'asc' }
+        }
       }
     });
 
@@ -116,13 +163,13 @@ router.get('/', authMiddleware, async (req, res) => {
     } else if (role === 'seller') {
       where = { sellerId: userId };
     } else if (role === 'mediator') {
-      where = { mediatorId: userId };
+      where = { escrowMediators: { some: { mediatorId: userId } } };
     } else {
       where = {
         OR: [
           { buyerId: userId },
           { sellerId: userId },
-          { mediatorId: userId }
+          { escrowMediators: { some: { mediatorId: userId } } }
         ]
       };
     }
@@ -132,7 +179,12 @@ router.get('/', authMiddleware, async (req, res) => {
       include: {
         buyer: { select: { id: true, walletAddress: true, name: true } },
         seller: { select: { id: true, walletAddress: true, name: true } },
-        mediator: { select: { id: true, walletAddress: true, name: true } },
+        escrowMediators: {
+          include: {
+            mediator: { select: { id: true, walletAddress: true, name: true } }
+          },
+          orderBy: { slot: 'asc' }
+        },
         _count: { select: { evidences: true } }
       },
       orderBy: { createdAt: 'desc' }
@@ -157,14 +209,16 @@ router.get('/:id/status-history', authMiddleware, async (req, res) => {
         id: true,
         buyerId: true,
         sellerId: true,
-        mediatorId: true
+        escrowMediators: {
+          select: { mediatorId: true }
+        }
       }
     });
 
     if (!escrow) return res.status(404).json({ error: 'Escrow not found' });
 
     const userId = req.user.id;
-    if (escrow.buyerId !== userId && escrow.sellerId !== userId && escrow.mediatorId !== userId) {
+    if (!isEscrowParticipant(escrow, userId)) {
       return res.status(403).json({ error: 'You are not a participant in this escrow' });
     }
 
@@ -210,7 +264,12 @@ router.get('/:id', authMiddleware, async (req, res) => {
       include: {
         buyer: { select: { id: true, walletAddress: true, name: true } },
         seller: { select: { id: true, walletAddress: true, name: true } },
-        mediator: { select: { id: true, walletAddress: true, name: true } },
+        escrowMediators: {
+          include: {
+            mediator: { select: { id: true, walletAddress: true, name: true } }
+          },
+          orderBy: { slot: 'asc' }
+        },
         evidences: {
           include: {
             uploader: { select: { id: true, walletAddress: true, name: true } }
@@ -224,7 +283,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
 
     // Kiểm tra quyền truy cập
     const userId = req.user.id;
-    if (escrow.buyerId !== userId && escrow.sellerId !== userId && escrow.mediatorId !== userId) {
+    if (!isEscrowParticipant(escrow, userId)) {
       return res.status(403).json({ error: 'You are not a participant in this escrow' });
     }
 
@@ -253,7 +312,14 @@ router.patch('/:id/status', authMiddleware, async (req, res) => {
     }
 
     const txResult = await prisma.$transaction(async (tx) => {
-      const escrow = await tx.escrow.findUnique({ where: { id: req.params.id } });
+      const escrow = await tx.escrow.findUnique({
+        where: { id: req.params.id },
+        include: {
+          escrowMediators: {
+            select: { mediatorId: true }
+          }
+        }
+      });
       if (!escrow) {
         const notFoundError = new Error('Escrow not found');
         notFoundError.statusCode = 404;
@@ -261,7 +327,7 @@ router.patch('/:id/status', authMiddleware, async (req, res) => {
       }
 
       const userId = req.user.id;
-      if (escrow.buyerId !== userId && escrow.sellerId !== userId && escrow.mediatorId !== userId) {
+      if (!isEscrowParticipant(escrow, userId)) {
         const forbiddenError = new Error('You are not a participant in this escrow');
         forbiddenError.statusCode = 403;
         throw forbiddenError;

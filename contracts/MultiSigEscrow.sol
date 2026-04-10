@@ -9,11 +9,15 @@ contract MultiSigEscrow {
     bytes32 public escrowId;
     address public buyer;
     address public seller;
-    address public mediator;
+    address[5] public mediators;
     uint256 public amount;
     Status public status;
     uint256 public confirmDeadline;
     uint256 public timeoutDeadline;
+
+    // Threshold: 5 out of 7 signers (buyer + seller + 5 mediators)
+    uint8 private constant THRESHOLD_SIGNERS = 5;
+    uint8 private constant TOTAL_SIGNERS = 7;
 
     // Tracking signatures
     mapping(address => bool) public hasSignedRelease;
@@ -36,15 +40,19 @@ contract MultiSigEscrow {
         bytes32 _escrowId,
         address _buyer,
         address _seller,
-        address _mediator,
+        address[5] memory _mediators,
         uint256 _amount,
         uint256 _confirmDays,
         uint256 _timeoutDays
     ) {
+        require(_buyer != address(0), "Invalid buyer");
+        require(_seller != address(0), "Invalid seller");
+        require(_buyer != _seller, "Buyer and seller must differ");
+
         escrowId = _escrowId;
         buyer = _buyer;
         seller = _seller;
-        mediator = _mediator;
+        mediators = _mediators;
         amount = _amount;
         status = Status.CREATED;
         
@@ -55,7 +63,16 @@ contract MultiSigEscrow {
     }
 
     modifier onlyParties() {
-        require(msg.sender == buyer || msg.sender == seller || msg.sender == mediator, "Not a party");
+        bool isParty = msg.sender == buyer || msg.sender == seller;
+        if (!isParty) {
+            for (uint8 i = 0; i < 5; i++) {
+                if (msg.sender == mediators[i]) {
+                    isParty = true;
+                    break;
+                }
+            }
+        }
+        require(isParty, "Not a party");
         _;
     }
 
@@ -80,14 +97,14 @@ contract MultiSigEscrow {
         
         emit Signed(escrowId, msg.sender, "release");
 
-        if (releaseSigs >= 2) {
+        if (releaseSigs >= THRESHOLD_SIGNERS) {
             _executeRelease();
         }
     }
 
     function _executeRelease() internal {
         status = Status.RELEASED;
-        payable(seller).transfer(amount);
+        _payout(seller, amount);
         emit FundsReleased(escrowId, seller);
     }
 
@@ -100,14 +117,14 @@ contract MultiSigEscrow {
 
         emit Signed(escrowId, msg.sender, "refund");
 
-        if (refundSigs >= 2) {
+        if (refundSigs >= THRESHOLD_SIGNERS) {
             _executeRefund();
         }
     }
 
     function _executeRefund() internal {
         status = Status.REFUNDED;
-        payable(buyer).transfer(amount);
+        _payout(buyer, amount);
         emit FundsReleased(escrowId, buyer);
     }
 
@@ -125,21 +142,27 @@ contract MultiSigEscrow {
         require(status == Status.LOCKED, "Invalid status");
         require(block.timestamp > timeoutDeadline, "Not timed out");
         require(!hasSignedTimeout[msg.sender], "Already signed");
-        require(msg.sender != buyer, "Buyer cannot timeout sign"); // Usually seller and mediator do this
 
         hasSignedTimeout[msg.sender] = true;
         timeoutSigs++;
 
         emit Signed(escrowId, msg.sender, "timeout");
 
-        if (timeoutSigs >= 2) {
+        if (timeoutSigs >= THRESHOLD_SIGNERS) {
             _executeTimeout();
         }
     }
 
     function _executeTimeout() internal {
         status = Status.RELEASED;
-        payable(seller).transfer(amount);
+        _payout(seller, amount);
         emit FundsReleased(escrowId, seller);
+    }
+
+    // ─── Safe payout using low-level call ─────────────────────────────────
+
+    function _payout(address recipient, uint256 value) private {
+        (bool success, ) = payable(recipient).call{value: value}("");
+        require(success, "Transfer failed");
     }
 }

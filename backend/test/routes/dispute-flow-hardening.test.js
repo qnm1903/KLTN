@@ -1,4 +1,4 @@
-import request from 'supertest';
+﻿import request from 'supertest';
 import express from 'express';
 import { jest } from '@jest/globals';
 import { clearSessions } from '../../src/store/session.js';
@@ -73,7 +73,7 @@ describe('Dispute flow hardening', () => {
       status: 'DRAFT',
       buyerId: 'user-1',
       sellerId: 'user-2',
-      mediatorId: 'user-3'
+      escrowMediators: [{ mediatorId: 'user-3' }]
     });
 
     const res = await request(app)
@@ -93,7 +93,7 @@ describe('Dispute flow hardening', () => {
       status: 'LOCKED',
       buyerId: 'user-1',
       sellerId: 'user-2',
-      mediatorId: 'user-3'
+      escrowMediators: [{ mediatorId: 'user-3' }]
     });
 
     const res = await request(app)
@@ -115,7 +115,7 @@ describe('Dispute flow hardening', () => {
       status: 'LOCKED',
       buyerId: 'user-1',
       sellerId: 'user-2',
-      mediatorId: 'user-3'
+      escrowMediators: [{ mediatorId: 'user-3' }]
     });
     mockPrisma.escrow.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.escrow.findUnique
@@ -124,7 +124,7 @@ describe('Dispute flow hardening', () => {
         status: 'LOCKED',
         buyerId: 'user-1',
         sellerId: 'user-2',
-        mediatorId: 'user-3'
+        escrowMediators: [{ mediatorId: 'user-3' }]
       })
       .mockResolvedValueOnce({ id: 'escrow-3', status: 'RELEASED' });
 
@@ -148,7 +148,7 @@ describe('Dispute flow hardening', () => {
       status: 'LOCKED',
       buyerId: 'user-1',
       sellerId: 'user-2',
-      mediatorId: 'user-3'
+      escrowMediators: [{ mediatorId: 'user-3' }]
     });
     mockPrisma.escrow.updateMany.mockResolvedValue({ count: 0 });
 
@@ -170,7 +170,7 @@ describe('Dispute flow hardening', () => {
         status: 'LOCKED',
         buyerId: 'user-1',
         sellerId: 'user-2',
-        mediatorId: 'user-3'
+        escrowMediators: [{ mediatorId: 'user-3' }]
       })
       .mockResolvedValueOnce({ id: 'escrow-6', status: 'DISPUTED', disputePhase: 'OPENED' });
     mockPrisma.escrow.updateMany.mockResolvedValue({ count: 1 });
@@ -216,7 +216,7 @@ describe('Dispute flow hardening', () => {
         disputePhase: 'DECISION_PENDING',
         buyerId: 'user-1',
         sellerId: 'user-2',
-        mediatorId: 'user-3'
+        escrowMediators: [{ mediatorId: 'user-3' }]
       })
       .mockResolvedValueOnce({ id: 'escrow-7', status: 'RELEASED', disputePhase: 'RESOLVED' });
     mockPrisma.escrow.updateMany.mockResolvedValue({ count: 1 });
@@ -245,7 +245,7 @@ describe('Dispute flow hardening', () => {
       status: 'LOCKED',
       buyerId: 'user-1',
       sellerId: 'user-2',
-      mediatorId: 'user-3'
+      escrowMediators: [{ mediatorId: 'user-3' }]
     });
 
     const res = await request(app)
@@ -266,7 +266,7 @@ describe('Dispute flow hardening', () => {
       disputePhase: 'REVIEW_WINDOW',
       buyerId: 'user-1',
       sellerId: 'user-2',
-      mediatorId: 'user-3'
+      escrowMediators: [{ mediatorId: 'user-3' }]
     });
 
     const res = await request(app)
@@ -288,7 +288,7 @@ describe('Dispute flow hardening', () => {
       evidenceDeadlineAt: new Date('2025-01-01T00:00:00.000Z'),
       buyerId: 'user-1',
       sellerId: 'user-2',
-      mediatorId: 'user-3'
+      escrowMediators: [{ mediatorId: 'user-3' }]
     });
 
     const res = await request(app)
@@ -309,7 +309,7 @@ describe('Dispute flow hardening', () => {
       disputePhase: 'EVIDENCE_WINDOW',
       buyerId: 'user-1',
       sellerId: 'user-2',
-      mediatorId: 'user-3',
+      escrowMediators: [{ mediatorId: 'user-3' }],
       chainEscrowId: '0xabc123'
     });
     mockPrisma.evidence.create.mockResolvedValue({
@@ -349,7 +349,7 @@ describe('Dispute flow hardening', () => {
       id: 'escrow-10',
       buyerId: 'user-1',
       sellerId: 'user-2',
-      mediatorId: 'user-3'
+      escrowMediators: [{ mediatorId: 'user-3' }]
     });
     mockPrisma.escrowStatusHistory.findMany.mockResolvedValue([
       {

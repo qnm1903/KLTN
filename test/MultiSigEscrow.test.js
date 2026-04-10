@@ -4,23 +4,30 @@ const { ethers } = require("hardhat");
 
 describe("MultiSigEscrow Benchmark", function () {
   let vault;
-  let owner, buyer, seller, mediator;
+  let owner, buyer, seller, mediator1, mediator2, mediator3, mediator4, mediator5;
 
   const AMOUNT = ethers.parseEther("1.0");
   const CONFIRM_DAYS = 14;
   const TIMEOUT_DAYS = 21;
 
   beforeEach(async function () {
-    [owner, buyer, seller, mediator] = await ethers.getSigners();
+    [owner, buyer, seller, mediator1, mediator2, mediator3, mediator4, mediator5] = await ethers.getSigners();
 
     const escrowId = ethers.id("test-multisig");
+    const mediators = [
+      mediator1.address,
+      mediator2.address,
+      mediator3.address,
+      mediator4.address,
+      mediator5.address
+    ];
 
     const MultiSigEscrow = await ethers.getContractFactory("MultiSigEscrow");
     vault = await MultiSigEscrow.deploy(
       escrowId,
       buyer.address,
       seller.address,
-      mediator.address,
+      mediators,
       AMOUNT,
       CONFIRM_DAYS,
       TIMEOUT_DAYS
@@ -35,16 +42,22 @@ describe("MultiSigEscrow Benchmark", function () {
       const tx1 = await vault.connect(buyer).signRelease();
       console.log(`\t[Metric] Payload size for MultiSig signRelease() (Buyer): ${ethers.getBytes(tx1.data).length} bytes`);
 
-      const sellerBalanceBefore = await ethers.provider.getBalance(seller.address);
       const tx2 = await vault.connect(seller).signRelease();
-      const receipt = await tx2.wait();
-      const gasCost = receipt.gasUsed * receipt.gasPrice;
+      await tx2.wait();
+
+      await vault.connect(mediator1).signRelease();
+      await vault.connect(mediator2).signRelease();
+
+      const sellerBalanceBefore = await ethers.provider.getBalance(seller.address);
+      const tx3 = await vault.connect(mediator3).signRelease();
+      const receipt = await tx3.wait();
       const sellerBalanceAfter = await ethers.provider.getBalance(seller.address);
 
       console.log(`\t[Metric] Payload size for MultiSig signRelease() (Seller): ${ethers.getBytes(tx2.data).length} bytes`);
-      console.log(`\t[Metric] Total MultiSig Payload size (2 txs): ${ethers.getBytes(tx1.data).length + ethers.getBytes(tx2.data).length} bytes`);
+      console.log(`\t[Metric] Payload size for MultiSig signRelease() (Mediator 3): ${ethers.getBytes(tx3.data).length} bytes`);
+      console.log(`\t[Metric] Total MultiSig Payload size (5 txs): ${ethers.getBytes(tx1.data).length + ethers.getBytes(tx2.data).length + ethers.getBytes(tx3.data).length} bytes`);
 
-      expect(sellerBalanceAfter - sellerBalanceBefore + gasCost).to.equal(AMOUNT);
+      expect(sellerBalanceAfter - sellerBalanceBefore).to.equal(AMOUNT);
       expect(await vault.status()).to.equal(2); // RELEASED
     });
   });
@@ -55,7 +68,10 @@ describe("MultiSigEscrow Benchmark", function () {
 
       await vault.connect(buyer).dispute();
 
-      await vault.connect(mediator).signRefund();
+      await vault.connect(mediator1).signRefund();
+      await vault.connect(mediator2).signRefund();
+      await vault.connect(mediator3).signRefund();
+      await vault.connect(mediator4).signRefund();
 
       const buyerBalanceBefore = await ethers.provider.getBalance(buyer.address);
       const tx = await vault.connect(buyer).signRefund();
@@ -75,7 +91,10 @@ describe("MultiSigEscrow Benchmark", function () {
       await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);
 
       await vault.connect(seller).signTimeout();
-      await vault.connect(mediator).signTimeout();
+      await vault.connect(mediator1).signTimeout();
+      await vault.connect(mediator2).signTimeout();
+      await vault.connect(mediator3).signTimeout();
+      await vault.connect(mediator4).signTimeout();
 
       expect(await vault.status()).to.equal(2); // RELEASED
     });

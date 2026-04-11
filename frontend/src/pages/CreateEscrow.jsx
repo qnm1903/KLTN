@@ -1,40 +1,45 @@
 import React, { useState, useEffect } from 'react';
 import { useWriteContract, useWaitForTransactionReceipt, useConnection } from 'wagmi';
 import { parseEther } from 'viem';
-// [FIX]: Sử dụng custom api instance thay vì axios thuần để tự động đính kèm JWT
 import api from '../lib/api'; 
-// [FIX]: Import đúng factoryAbi từ abis.js
 import { factoryAbi } from '../lib/abis'; 
-import { ESCROW_CONTRACT_ADDRESS } from '../lib/constants'; // Đảm bảo bạn có hằng số này
+import { ESCROW_CONTRACT_ADDRESS } from '../lib/constants';
 import { savePrivKey, savePubKey, getPrivKey, getPubKey } from '../lib/storage';
 
 export default function CreateEscrow() {
   const { address } = useConnection();
   
-  // Trạng thái cho công tắc Manual/Auto
-  const [setupMode, setSetupMode] = useState('manual'); 
-  
-  // Lưu trữ khóa TSS của Buyer hiển thị lên UI
+  // 1. Quản lý Khóa cá nhân/công khai của Buyer (tạo tự động)
   const [buyerTssKeys, setBuyerTssKeys] = useState({ privKey: '', pubKey: '' });
 
-  // Form state giữ nguyên các biến thời hạn của bạn
+  // 2. State cho các thông tin cơ bản
   const [formData, setFormData] = useState({
-    title: '', amount: '',
-    sellerAddress: '', sellerPubKey: '',
-    mediatorAddress: '', mediatorPubKey: '',
-    confirmDays: '7', timeoutDays: '14'
+    title: '', 
+    amount: '',
+    sellerAddress: '', 
+    sellerPubKey: '',
+    confirmDays: '7', 
+    timeoutDays: '14'
   });
+
+  // 3. State Mảng chứa đúng 5 Mediators (Bài toán 5-of-7)
+  const [mediators, setMediators] = useState([
+    { address: '', pubKey: '' },
+    { address: '', pubKey: '' },
+    { address: '', pubKey: '' },
+    { address: '', pubKey: '' },
+    { address: '', pubKey: '' }
+  ]);
 
   const [isInitializing, setIsInitializing] = useState(false);
 
-  // Khởi tạo/Lấy khóa cho Buyer tự động qua storage.js
+  // Sinh khóa DKG cho Buyer (Mock)
   useEffect(() => {
     if (address) {
       const existingPrivKey = getPrivKey();
       const existingPubKey = getPubKey();
       
       if (!existingPrivKey || !existingPubKey) {
-        // Tự sinh khóa nếu chưa có (Mock)
         const randomHex = Array.from({length: 40}, () => Math.floor(Math.random()*16).toString(16)).join('');
         const newPrivKey = `0x_priv_${randomHex.substring(0, 16)}`;
         const newPubKey = `0x_pub_${randomHex}`;
@@ -52,65 +57,69 @@ export default function CreateEscrow() {
   const { data: hash, error: writeError, isPending, writeContract } = useWriteContract();
   const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ hash });
 
-  // Gọi API hoàn tất sau khi tx On-chain Confirmed
+  // Lắng nghe giao dịch thành công để báo cho Backend
   useEffect(() => {
     const finalizeEscrow = async () => {
       if (isConfirmed && hash) {
         try {
-          // [FIX]: Dùng api.post để tận dụng config axios (base URL, JWT)
-          await api.post('/escrows/finalize', {
-            transactionHash: hash,
-            status: 'ACTIVE'
-          });
+          await api.post('/escrow/finalize', { transactionHash: hash, status: 'ACTIVE' });
           alert("🎉 Escrow fully created and active on-chain!");
-          // Tùy chọn: Chuyển hướng người dùng về trang Dashboard sau khi tạo xong
-          // window.location.href = '/'; 
+          window.location.href = '/'; 
         } catch (err) {
-          console.error("Lỗi đồng bộ Backend sau khi tạo Escrow:", err);
+          console.error("Lỗi đồng bộ Backend:", err);
         }
       }
     };
     finalizeEscrow();
   }, [isConfirmed, hash]);
 
+  // Handle Input thay đổi cho thông tin cơ bản
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
+  // Handle Input thay đổi cho mảng Mediators
+  const handleMediatorChange = (index, field, value) => {
+    const newMediators = [...mediators];
+    newMediators[index][field] = value;
+    setMediators(newMediators);
+  };
+
+  // XỬ LÝ SUBMIT (Giao tiếp Web2 -> Web3)
   const handleSubmit = async (e) => {
     e.preventDefault();
     setIsInitializing(true);
 
     try {
-      console.log("1. Sending 3 Public Keys to Backend for DKG Aggregation...");
       const escrowId = `ESC_${Date.now()}`;
+      
+      // BƯỚC 1: Lọc mảng để lấy list data gửi Backend
+      const mediatorAddresses = mediators.map(m => m.address);
+      const mediatorPubKeys = mediators.map(m => m.pubKey);
 
-      // BƯỚC A: Gọi API Init (Gửi kèm khóa pubKey của buyer vừa sinh ra)
+      // BƯỚC 2: Gọi API Init lấy pkAggCoords
       const initRes = await api.post('/escrow/init', {
         escrowId: escrowId,
         title: formData.title,
+        amount: formData.amount,
         buyerAddr: address,
         sellerAddr: formData.sellerAddress,
-        mediatorAddr: formData.mediatorAddress,
+        mediators: mediatorAddresses,      // Mảng 5 địa chỉ
         buyerPubKey: buyerTssKeys.pubKey, 
         sellerPubKey: formData.sellerPubKey,
-        mediatorPubKey: formData.mediatorPubKey,
-        amount: formData.amount
+        mediatorPubKeys: mediatorPubKeys   // Mảng 5 khóa công khai
       });
 
-      console.log("2. Received Aggregated Keys from Backend:", initRes.data);
       const pkAggCoords = initRes.data.pkAggCoords || [0n, 0n, 0n, 0n, 0n, 0n];
 
-      console.log("3. Initiating Smart Contract Transaction...");
-
-      // BƯỚC B: Giao dịch On-chain với các tham số thời hạn
+      // BƯỚC 3: Kích hoạt Smart Contract
       writeContract({
         address: ESCROW_CONTRACT_ADDRESS,
-        abi: factoryAbi, // [FIX]: Dùng factoryAbi đã import
+        abi: factoryAbi,
         functionName: 'createEscrow',
         args: [
           formData.sellerAddress,
-          formData.mediatorAddress,
+          mediatorAddresses, // Truyền nguyên mảng 5 địa chỉ vào Contract
           pkAggCoords,
           parseEther(formData.amount),
           BigInt(formData.confirmDays),
@@ -128,82 +137,78 @@ export default function CreateEscrow() {
   };
 
   return (
-    <div className="max-w-3xl mx-auto p-6 mt-10">
-      <div className="bg-[#1E293B]/50 backdrop-blur-md border border-white/10 rounded-2xl p-8 shadow-2xl">
-        
-        {/* HEADER & TOGGLE SWITCH */}
-        <div className="flex justify-between items-end mb-8">
-          <div>
-            <h2 className="text-3xl font-orbitron font-bold text-accent mb-2">Initialize Escrow</h2>
-            <p className="text-sm text-gray-400">Step 1: Distributed Key Generation</p>
-          </div>
-          <div className="flex bg-darkBg p-1 rounded-lg border border-gray-700">
-            <button type="button" onClick={() => setSetupMode('manual')} className={`px-4 py-2 text-sm font-bold rounded-md transition-all ${setupMode === 'manual' ? 'bg-primary text-white shadow-lg' : 'text-gray-500'}`}>Manual</button>
-            <button type="button" onClick={() => setSetupMode('auto')} className={`px-4 py-2 text-sm font-bold rounded-md transition-all flex items-center gap-2 ${setupMode === 'auto' ? 'bg-primary text-white shadow-lg' : 'text-gray-500'}`}>Auto-Join <span className="text-[10px] bg-accent text-black px-1.5 py-0.5 rounded uppercase">Soon</span></button>
-          </div>
-        </div>
-
-        {/* THÔNG TIN KHÓA BUYER (Tự động) */}
-        <div className="mb-6 p-4 bg-blue-900/20 rounded-xl border border-dashed border-blue-500/30">
-          <p className="text-xs text-blue-300 mb-1">Your Auto-Generated TSS Identity (Buyer)</p>
-          <div className="text-sm font-mono text-green-400 break-all">{buyerTssKeys.pubKey || "Generating..."}</div>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-6">
+    <div className="min-h-screen bg-slate-900 text-slate-50 font-sans py-10">
+      <div className="max-w-3xl mx-auto">
+        {/* CARD FORM THEO THIẾT KẾ FIGMA */}
+        <div className="bg-slate-800 p-8 rounded-2xl border border-slate-700 shadow-2xl">
           
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">Transaction Title</label>
-              <input type="text" name="title" value={formData.title} onChange={handleChange} className="w-full bg-darkBg border border-gray-700 rounded-lg px-4 py-3 text-white focus:border-primary" required />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-400 mb-2">Amount (ETH)</label>
-              <input type="number" name="amount" step="0.0001" value={formData.amount} onChange={handleChange} className="w-full bg-darkBg border border-gray-700 rounded-lg px-4 py-3 text-white focus:border-primary" required />
-            </div>
+          <h2 className="text-3xl font-bold mb-8">Initialize 5-of-7 Escrow</h2>
+
+          {/* HIỂN THỊ KHÓA BUYER */}
+          <div className="mb-8 p-4 bg-slate-900 rounded-lg border border-slate-700">
+            <p className="text-sm text-slate-400 mb-2">Your Auto-Generated TSS Identity (Buyer)</p>
+            <p className="font-mono text-emerald-400 text-sm break-all">{buyerTssKeys.pubKey || "Generating..."}</p>
           </div>
 
-          <hr className="border-gray-700" />
-
-          {setupMode === 'auto' ? (
-             <div className="text-center p-8 border border-dashed border-gray-600 rounded-xl">
-               <p className="text-accent">⏳ Auto-Join Mode is under construction.</p>
-             </div>
-          ) : (
-            <>
-              {/* Dữ liệu Seller */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm text-gray-400 mb-2">Seller Address</label>
-                  <input type="text" name="sellerAddress" value={formData.sellerAddress} onChange={handleChange} placeholder="0x..." className="w-full bg-darkBg border border-gray-700 rounded-lg px-4 py-3 text-white font-mono text-sm" required />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-400 mb-2">Seller Public Key</label>
-                  <input type="text" name="sellerPubKey" value={formData.sellerPubKey} onChange={handleChange} placeholder="0x_pub_..." className="w-full bg-darkBg border border-gray-700 rounded-lg px-4 py-3 text-white font-mono text-sm" required />
-                </div>
+          <form onSubmit={handleSubmit} className="flex flex-col gap-8">
+            
+            {/* KHỐI 1: THÔNG TIN CƠ BẢN */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium">Escrow Title / Description</label>
+                <input type="text" name="title" value={formData.title} onChange={handleChange} 
+                  className="bg-slate-900 border border-slate-600 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500" required />
               </div>
-
-              {/* Dữ liệu Mediator */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm text-gray-400 mb-2">Mediator Address</label>
-                  <input type="text" name="mediatorAddress" value={formData.mediatorAddress} onChange={handleChange} placeholder="0x..." className="w-full bg-darkBg border border-gray-700 rounded-lg px-4 py-3 text-white font-mono text-sm" required />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-400 mb-2">Mediator Public Key</label>
-                  <input type="text" name="mediatorPubKey" value={formData.mediatorPubKey} onChange={handleChange} placeholder="0x_pub_..." className="w-full bg-darkBg border border-gray-700 rounded-lg px-4 py-3 text-white font-mono text-sm" required />
-                </div>
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium">Amount (ETH)</label>
+                <input type="number" name="amount" step="0.0001" value={formData.amount} onChange={handleChange} 
+                  className="bg-slate-900 border border-slate-600 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500" required />
               </div>
-            </>
-          )}
+              <div className="flex flex-col gap-2 md:col-span-2">
+                <label className="text-sm font-medium">Seller Address</label>
+                <input type="text" name="sellerAddress" value={formData.sellerAddress} onChange={handleChange} placeholder="0x..." 
+                  className="bg-slate-900 border border-slate-600 rounded-lg px-4 py-3 font-mono focus:outline-none focus:border-blue-500" required />
+              </div>
+              <div className="flex flex-col gap-2 md:col-span-2">
+                <label className="text-sm font-medium">Seller Public Key</label>
+                <input type="text" name="sellerPubKey" value={formData.sellerPubKey} onChange={handleChange} placeholder="0x_pub_..." 
+                  className="bg-slate-900 border border-slate-600 rounded-lg px-4 py-3 font-mono focus:outline-none focus:border-blue-500" required />
+              </div>
+            </div>
 
-          <button type="submit" disabled={isInitializing || isPending || isConfirming || setupMode === 'auto'} className="w-full py-4 bg-primary hover:bg-blue-600 text-white font-bold rounded-lg transition-colors mt-6 disabled:opacity-50 disabled:cursor-not-allowed">
-            {isInitializing ? 'Fetching DKG from Backend...' : isPending ? 'Confirming in Wallet...' : isConfirming ? 'Mining Transaction...' : 'Initialize & Fund Escrow'}
-          </button>
-        </form>
+            {/* KHỐI 2: KHU VỰC 5 MEDIATORS (NỀN ĐEN) */}
+            <div className="bg-slate-900 p-6 rounded-xl border border-slate-700 flex flex-col gap-4">
+              <h3 className="text-slate-400 text-sm font-medium uppercase tracking-wider mb-2">Mediators (5 required)</h3>
+              
+              {mediators.map((mediator, index) => (
+                <div key={index} className="flex gap-4 items-start">
+                  <div className="w-8 h-10 mt-1 flex items-center justify-center bg-slate-800 rounded-full text-slate-400 font-bold text-sm shrink-0">
+                    {index + 1}
+                  </div>
+                  <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <input type="text" placeholder="Address (0x...)" value={mediator.address} 
+                      onChange={(e) => handleMediatorChange(index, 'address', e.target.value)}
+                      className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 font-mono text-sm focus:border-blue-500 w-full" required />
+                    <input type="text" placeholder="Public Key (0x_pub_...)" value={mediator.pubKey} 
+                      onChange={(e) => handleMediatorChange(index, 'pubKey', e.target.value)}
+                      className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 font-mono text-sm focus:border-blue-500 w-full" required />
+                  </div>
+                </div>
+              ))}
+            </div>
 
-        {/* Thông báo */}
-        {hash && <div className="mt-6 p-4 bg-blue-900/20 border border-blue-500/30 rounded-lg text-sm text-blue-300">Tx: {hash}</div>}
-        {writeError && <div className="mt-4 p-4 bg-red-900/20 border border-red-500/30 rounded-lg text-sm text-red-400">❌ Error: {writeError.shortMessage}</div>}
+            {/* NÚT BẤM */}
+            <button type="submit" disabled={isInitializing || isPending || isConfirming} 
+              className="w-full py-4 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-lg transition-colors mt-2 disabled:opacity-50 disabled:cursor-not-allowed">
+              {isInitializing ? 'Fetching DKG from Backend...' : isPending ? 'Confirming in Wallet...' : isConfirming ? 'Mining Transaction...' : 'Initialize Escrow'}
+            </button>
+          </form>
+
+          {/* Logs & Errors */}
+          {hash && <div className="mt-6 p-4 bg-blue-900/20 border border-blue-500/30 rounded-lg text-sm text-blue-300">Transaction Hash: {hash}</div>}
+          {writeError && <div className="mt-4 p-4 border border-red-500/50 bg-red-900/20 text-red-400 rounded-lg text-sm">❌ Contract Error: {writeError.shortMessage || writeError.message}</div>}
+        
+        </div>
       </div>
     </div>
   );

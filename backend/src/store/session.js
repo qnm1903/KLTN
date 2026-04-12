@@ -1,5 +1,10 @@
 // In-memory map: escrowId -> { pubKeys, pkAgg, nonces, zShares, signingRoles, signingAction, round2Context, completedActions, createdAt, status, parties }
-import { SESSION_TTL_MS } from '../crypto/dkg.js';
+import {
+	SESSION_TTL_MS,
+	getPubKeyCollectionSummary,
+	syncPubKeyCollectionState,
+	isPubKeySetComplete
+} from '../crypto/dkg.js';
 
 export const sessions = new Map();
 
@@ -39,17 +44,29 @@ function normalizeSession(session, fallbackCreatedAt = Date.now()) {
 	if (!session || typeof session !== 'object') return null;
 
 	const createdAt = Number(session.createdAt || fallbackCreatedAt || Date.now());
-	return {
+	const normalized = {
 		...session,
 		createdAt,
+		pubKeys: session.pubKeys && typeof session.pubKeys === 'object' ? session.pubKeys : {},
 		nonces: session.nonces && typeof session.nonces === 'object' ? session.nonces : {},
 		zShares: session.zShares && typeof session.zShares === 'object' ? session.zShares : {},
 		completedActions: Array.isArray(session.completedActions) ? session.completedActions : [],
 		signingRoles: Array.isArray(session.signingRoles) ? session.signingRoles : session.signingRoles || null,
 		signingAction: session.signingAction || null,
+		pubkeyCollectionState: session.pubkeyCollectionState || null,
+		pubKeyCollectionDueAt: Number(session.pubKeyCollectionDueAt || (createdAt + SESSION_TTL_MS)),
+		pubkeyAggregationCompletedAt: session.pubkeyAggregationCompletedAt || null,
+		precomputedPkAgg: session.precomputedPkAgg || null,
 		round2Context: session.round2Context || null,
 		status: session.status || 'INITIALIZED'
 	};
+
+	const summary = syncPubKeyCollectionState(normalized);
+	if (summary.complete && !normalized.pubkeyAggregationCompletedAt) {
+		normalized.pubkeyAggregationCompletedAt = createdAt;
+	}
+
+	return normalized;
 }
 
 function computeExpiresAt(createdAt) {
@@ -153,4 +170,17 @@ export async function deleteSession(escrowId, options = {}) {
 export async function clearSessions() {
 	sessions.clear();
 	await withPersistence((prisma) => prisma.signingSession.deleteMany());
+}
+
+export function getPubKeyCollectionStatus(session, now = Date.now()) {
+	return getPubKeyCollectionSummary(session, now);
+}
+
+export function isPubKeyCollectionExpired(session, now = Date.now()) {
+	const summary = getPubKeyCollectionSummary(session, now);
+	return summary.expired;
+}
+
+export function isPubKeyCollectionReady(session) {
+	return isPubKeySetComplete(session);
 }

@@ -20,6 +20,13 @@ export const ACTION_SIGNER_SETS = {
 
 const ROLE_BIT_POSITIONS = new Map(PARTICIPANT_ROLES.map((role, index) => [role, index]));
 
+function createEmptyPubKeyMap() {
+  return PARTICIPANT_ROLES.reduce((accumulator, role) => {
+    accumulator[role] = null;
+    return accumulator;
+  }, {});
+}
+
 function assertRole(role) {
   if (!ROLE_BIT_POSITIONS.has(role)) {
     throw new Error(`Invalid role: ${role}`);
@@ -36,6 +43,72 @@ export function getActionSigners(action) {
     throw new Error(`Unsupported action: ${action}`);
   }
   return [...roles];
+}
+
+function normalizePubKeyMap(session) {
+  const normalized = createEmptyPubKeyMap();
+  if (!session?.pubKeys || typeof session.pubKeys !== 'object') {
+    return normalized;
+  }
+
+  for (const role of PARTICIPANT_ROLES) {
+    if (session.pubKeys[role]) {
+      normalized[role] = session.pubKeys[role];
+    }
+  }
+
+  return normalized;
+}
+
+export function countCollectedPubKeys(session) {
+  const pubKeys = normalizePubKeyMap(session);
+  return PARTICIPANT_ROLES.filter((role) => Boolean(pubKeys[role])).length;
+}
+
+export function getMissingPubKeyRoles(session) {
+  const pubKeys = normalizePubKeyMap(session);
+  return PARTICIPANT_ROLES.filter((role) => !pubKeys[role]);
+}
+
+export function isPubKeySetComplete(session) {
+  return getMissingPubKeyRoles(session).length === 0;
+}
+
+export function getPubKeyCollectionSummary(session, now = Date.now()) {
+  const required = PARTICIPANT_ROLES.length;
+  const missingRoles = getMissingPubKeyRoles(session);
+  const received = required - missingRoles.length;
+  const dueAt = Number(session?.pubKeyCollectionDueAt || (Number(session?.createdAt || now) + SESSION_TTL_MS));
+  const complete = missingRoles.length === 0;
+  const expired = !complete && now > dueAt;
+
+  let state = complete ? 'COMPLETE' : received > 0 ? 'PARTIAL' : 'PENDING';
+  if (expired) {
+    state = 'EXPIRED';
+  }
+
+  return {
+    state,
+    required,
+    received,
+    missingRoles,
+    dueAt,
+    complete,
+    expired
+  };
+}
+
+export function syncPubKeyCollectionState(session, now = Date.now()) {
+  if (!session || typeof session !== 'object') {
+    return getPubKeyCollectionSummary(null, now);
+  }
+
+  const summary = getPubKeyCollectionSummary(session, now);
+  session.pubkeyCollectionState = summary.state;
+  if (!session.pubKeyCollectionDueAt) {
+    session.pubKeyCollectionDueAt = summary.dueAt;
+  }
+  return summary;
 }
 
 export function deriveSignerBitmap(roles) {
@@ -90,6 +163,7 @@ export function initDKG(
     throw new Error('Seven participant public keys are required');
   }
 
+  const createdAt = Date.now();
   const session = {
     participants: participants || {},
     contractAddress: contractAddress || null,
@@ -109,13 +183,64 @@ export function initDKG(
     signingAction: null,
     signingBitmap: null,
     completedActions: [],
-    createdAt: Date.now(),
+    createdAt,
+    pubkeyCollectionState: 'COMPLETE',
+    pubKeyCollectionDueAt: createdAt + SESSION_TTL_MS,
+    pubkeyAggregationCompletedAt: createdAt,
     status: 'INITIALIZED'
   };
 
   return {
     session
   };
+}
+
+export function initIncrementalDKG(
+  escrowId,
+  {
+    participants,
+    contractAddress,
+    chainId,
+    dueAtMs
+  }
+) {
+  if (!participants?.buyer || !participants?.seller || !Array.isArray(participants?.mediators) || participants.mediators.length !== 5) {
+    throw new Error('Escrow participants are incomplete for incremental initialization');
+  }
+
+  const createdAt = Date.now();
+  const dueAt = Number(dueAtMs || (createdAt + SESSION_TTL_MS));
+  const session = {
+    participants,
+    contractAddress: contractAddress || null,
+    chainId: chainId ? BigInt(chainId).toString() : null,
+    pubKeys: createEmptyPubKeyMap(),
+    nonces: {},
+    zShares: {},
+    signingRoles: null,
+    signingAction: null,
+    signingBitmap: null,
+    completedActions: [],
+    createdAt,
+    pubkeyCollectionState: 'PENDING',
+    pubKeyCollectionDueAt: dueAt,
+    pubkeyAggregationCompletedAt: null,
+    precomputedPkAgg: null,
+    status: 'INITIALIZED'
+  };
+
+  return { session };
+}
+
+export function aggregateWhenReady(session) {
+  if (!isPubKeySetComplete(session)) {
+    return null;
+  }
+
+  return Object.entries(ACTION_SIGNER_SETS).reduce((accumulator, [action, roles]) => {
+    accumulator[action] = aggregatePubKeysForRoles(session.pubKeys, roles);
+    return accumulator;
+  }, {});
 }
 
 /**

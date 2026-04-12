@@ -1,17 +1,22 @@
 import express from 'express';
-import { deleteSession, getSession, hasSession, saveSession } from '../store/session.js';
+import { deleteSession, getSession, getPubKeyCollectionStatus, hasSession, saveSession } from '../store/session.js';
 import {
+  aggregateWhenReady,
+  PARTICIPANT_ROLES,
   getActionSigners,
+  getPubKeyCollectionSummary,
   getPkAggForRoles,
   initDKG,
+  initIncrementalDKG,
   SESSION_TTL_MS
 } from '../crypto/dkg.js';
 import { aggregateNonces, computeChallenge, aggregateZShares } from '../crypto/schnorr.js';
 import { ethers } from 'ethers';
 import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-limit.js';
+import prisma from '../lib/prisma.js';
 
 const router = express.Router();
-const { escrowInitMax, escrowSignMax } = getRateLimitConfig();
+const { escrowInitMax, escrowSignMax, escrowPubKeySubmitMax } = getRateLimitConfig();
 
 const escrowInitRateLimiter = createRouteRateLimiter({
   max: escrowInitMax,
@@ -23,8 +28,16 @@ const escrowSignRateLimiter = createRouteRateLimiter({
   message: 'Too many escrow sign requests. Please try again later.'
 });
 
-const VALID_ROLES = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
+const escrowPubKeySubmitRateLimiter = createRouteRateLimiter({
+  max: escrowPubKeySubmitMax,
+  message: 'Too many pubkey submission requests. Please try again later.'
+});
+
+const VALID_ROLES = [...PARTICIPANT_ROLES];
 const VALID_ACTIONS = ['release', 'refund', 'timeout'];
+const MEDIATOR_COMMITTEE_SIZE = 5;
+
+let pubKeyPersistenceDisabled = false;
 
 function getActionSignerRoles(action) {
   return getActionSigners(action);
@@ -52,6 +65,9 @@ function buildMsgHash(escrowId, action, signerBitmap, contractAddress, chainId) 
 }
 
 function normalizePubKey(pubKeyHex) {
+  if (typeof pubKeyHex !== 'string') {
+    throw new Error('Invalid public key format');
+  }
   const clean = pubKeyHex.replace('0x', '');
   if (clean.startsWith('04')) {
     return clean;
@@ -63,6 +79,161 @@ function normalizePubKey(pubKeyHex) {
     return '04' + clean;
   }
   throw new Error('Invalid public key format');
+}
+
+function isMissingTableError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('no such table') || message.includes('does not exist') || error?.code === 'P2021';
+}
+
+function normalizeAddress(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function toIsoTimestamp(timestampMs) {
+  return Number.isFinite(Number(timestampMs)) ? new Date(Number(timestampMs)).toISOString() : null;
+}
+
+function toCollectionPayload(summary) {
+  return {
+    state: summary.state,
+    required: summary.required,
+    received: summary.received,
+    missingRoles: summary.missingRoles,
+    dueAt: toIsoTimestamp(summary.dueAt)
+  };
+}
+
+function getRoleAddress(participants, role) {
+  if (!participants || typeof participants !== 'object') return null;
+  if (role === 'buyer') return normalizeAddress(participants.buyer);
+  if (role === 'seller') return normalizeAddress(participants.seller);
+  if (!role.startsWith('mediator')) return null;
+
+  const slot = Number(role.replace('mediator', ''));
+  if (!Number.isInteger(slot) || slot < 1 || slot > MEDIATOR_COMMITTEE_SIZE) {
+    return null;
+  }
+
+  const mediators = Array.isArray(participants.mediators) ? participants.mediators : [];
+  return normalizeAddress(mediators[slot - 1]);
+}
+
+function buildParticipantsSnapshot(escrow) {
+  const mediatorBySlot = new Array(MEDIATOR_COMMITTEE_SIZE).fill(null);
+
+  for (const row of escrow.escrowMediators || []) {
+    if (!row?.slot || row.slot < 1 || row.slot > MEDIATOR_COMMITTEE_SIZE) continue;
+    mediatorBySlot[row.slot - 1] = normalizeAddress(row?.mediator?.walletAddress);
+  }
+
+  if (!normalizeAddress(escrow?.buyer?.walletAddress) || !normalizeAddress(escrow?.seller?.walletAddress)) {
+    return null;
+  }
+  if (mediatorBySlot.some((address) => !address)) {
+    return null;
+  }
+
+  return {
+    buyer: normalizeAddress(escrow.buyer.walletAddress),
+    seller: normalizeAddress(escrow.seller.walletAddress),
+    mediators: mediatorBySlot
+  };
+}
+
+async function resolveEscrowParticipants(escrowId) {
+  const escrow = await prisma.escrow.findUnique({
+    where: { id: escrowId },
+    select: {
+      id: true,
+      buyer: { select: { walletAddress: true } },
+      seller: { select: { walletAddress: true } },
+      escrowMediators: {
+        select: {
+          slot: true,
+          mediator: { select: { walletAddress: true } }
+        },
+        orderBy: { slot: 'asc' }
+      }
+    }
+  });
+
+  if (!escrow) {
+    return null;
+  }
+
+  const participants = buildParticipantsSnapshot(escrow);
+  if (!participants) {
+    throw new Error('Escrow participants are incomplete. Expected buyer, seller, and 5 mediators.');
+  }
+
+  return participants;
+}
+
+async function savePubKeySubmission(escrowId, role, pubKey) {
+  if (pubKeyPersistenceDisabled || !prisma?.pubKeySubmission?.create) {
+    return { status: 'skipped' };
+  }
+
+  try {
+    // Dùng create-first để tận dụng unique(escrowId, role):
+    // - insert thành công => lần submit đầu tiên của role
+    // - dính P2002 => đã có bản ghi, so sánh để phân biệt idempotent vs conflict
+    // Không dùng upsert vì upsert có thể overwrite pubKey cũ trong race condition.
+    await prisma.pubKeySubmission.create({
+      data: {
+        escrowId,
+        role,
+        pubKey
+      }
+    });
+    return { status: 'created' };
+  } catch (error) {
+    if (isMissingTableError(error)) {
+      pubKeyPersistenceDisabled = true;
+      console.warn('[escrow-route] PubKeySubmission table is unavailable, falling back to session payload only.');
+      return { status: 'skipped' };
+    }
+
+    if (error?.code === 'P2002' && prisma?.pubKeySubmission?.findUnique) {
+      const existing = await prisma.pubKeySubmission.findUnique({
+        where: {
+          escrowId_role: {
+            escrowId,
+            role
+          }
+        },
+        select: { pubKey: true }
+      });
+
+      if (existing?.pubKey) {
+        const existingPubKey = '0x' + normalizePubKey(existing.pubKey);
+        const incomingPubKey = '0x' + normalizePubKey(pubKey);
+        if (existingPubKey.toLowerCase() === incomingPubKey.toLowerCase()) {
+          return { status: 'idempotent' };
+        }
+      }
+
+      return { status: 'conflict' };
+    }
+
+    throw error;
+  }
+}
+
+async function clearPubKeySubmissions(escrowId) {
+  if (pubKeyPersistenceDisabled || !prisma?.pubKeySubmission?.deleteMany) return;
+
+  try {
+    await prisma.pubKeySubmission.deleteMany({ where: { escrowId } });
+  } catch (error) {
+    if (isMissingTableError(error)) {
+      pubKeyPersistenceDisabled = true;
+      console.warn('[escrow-route] PubKeySubmission table is unavailable, skipping cleanup.');
+      return;
+    }
+    throw error;
+  }
 }
 
 function rolesMatchAction(roles, action) {
@@ -93,59 +264,265 @@ router.post('/init', escrowInitRateLimiter, async (req, res) => {
       mediatorPubKeys
     } = req.body;
 
-    if (!escrowId || !chainId || !contractAddress || !buyerAddr || !sellerAddr ||
-        !Array.isArray(mediatorAddrs) || mediatorAddrs.length !== 5 ||
-        !buyerPubKey || !sellerPubKey || !Array.isArray(mediatorPubKeys) || mediatorPubKeys.length !== 5) {
+    if (!escrowId || !chainId || !contractAddress) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    const derivedBuyer = ethers.computeAddress('0x' + normalizePubKey(buyerPubKey));
-    const derivedSeller = ethers.computeAddress('0x' + normalizePubKey(sellerPubKey));
-    const derivedMediatorAddrs = mediatorPubKeys.map((pubKey) => ethers.computeAddress('0x' + normalizePubKey(pubKey)));
+    if (!ethers.isAddress(contractAddress)) {
+      return res.status(400).json({ error: 'Invalid contractAddress' });
+    }
 
-    if (derivedBuyer.toLowerCase() !== buyerAddr.toLowerCase()) {
-      return res.status(400).json({ error: 'buyerPubKey does not match buyerAddr' });
+    let normalizedChainId;
+    try {
+      normalizedChainId = BigInt(chainId).toString();
+    } catch {
+      return res.status(400).json({ error: 'Invalid chainId' });
     }
-    if (derivedSeller.toLowerCase() !== sellerAddr.toLowerCase()) {
-      return res.status(400).json({ error: 'sellerPubKey does not match sellerAddr' });
-    }
-    for (let index = 0; index < mediatorAddrs.length; index++) {
-      if (derivedMediatorAddrs[index].toLowerCase() !== mediatorAddrs[index].toLowerCase()) {
-        return res.status(400).json({ error: `mediatorPubKeys[${index}] does not match mediatorAddrs[${index}]` });
-      }
-    }
+
+    const normalizedContractAddress = ethers.getAddress(contractAddress);
 
     if (await hasSession(escrowId)) {
       return res.status(409).json({ error: 'Session already exists for this escrowId' });
     }
 
-    const { session } = initDKG(escrowId, {
-      buyerPubKey,
-      sellerPubKey,
-      mediatorPubKeys,
-      participants: {
+    const batchPayloadProvided = Boolean(
+      buyerAddr || sellerAddr || mediatorAddrs || buyerPubKey || sellerPubKey || mediatorPubKeys
+    );
+
+    if (batchPayloadProvided) {
+      if (!buyerAddr || !sellerAddr || !Array.isArray(mediatorAddrs) || mediatorAddrs.length !== 5 ||
+          !buyerPubKey || !sellerPubKey || !Array.isArray(mediatorPubKeys) || mediatorPubKeys.length !== 5) {
+        return res.status(400).json({ error: 'Missing required fields' });
+      }
+
+      const derivedBuyer = ethers.computeAddress('0x' + normalizePubKey(buyerPubKey));
+      const derivedSeller = ethers.computeAddress('0x' + normalizePubKey(sellerPubKey));
+      const derivedMediatorAddrs = mediatorPubKeys.map((pubKey) => ethers.computeAddress('0x' + normalizePubKey(pubKey)));
+
+      if (derivedBuyer.toLowerCase() !== buyerAddr.toLowerCase()) {
+        return res.status(400).json({ error: 'buyerPubKey does not match buyerAddr' });
+      }
+      if (derivedSeller.toLowerCase() !== sellerAddr.toLowerCase()) {
+        return res.status(400).json({ error: 'sellerPubKey does not match sellerAddr' });
+      }
+      for (let index = 0; index < mediatorAddrs.length; index++) {
+        if (derivedMediatorAddrs[index].toLowerCase() !== mediatorAddrs[index].toLowerCase()) {
+          return res.status(400).json({ error: `mediatorPubKeys[${index}] does not match mediatorAddrs[${index}]` });
+        }
+      }
+
+      const { session } = initDKG(escrowId, {
+        buyerPubKey,
+        sellerPubKey,
+        mediatorPubKeys,
+        participants: {
+          buyer: buyerAddr.toLowerCase(),
+          seller: sellerAddr.toLowerCase(),
+          mediators: mediatorAddrs.map((address) => address.toLowerCase())
+        },
+        contractAddress: normalizedContractAddress,
+        chainId: normalizedChainId
+      });
+
+      session.parties = {
         buyer: buyerAddr.toLowerCase(),
         seller: sellerAddr.toLowerCase(),
         mediators: mediatorAddrs.map((address) => address.toLowerCase())
-      },
-      contractAddress,
-      chainId
+      };
+      await saveSession(escrowId, session);
+
+      const collection = getPubKeyCollectionSummary(session);
+      return res.json({
+        ok: true,
+        contractAddress: normalizedContractAddress,
+        chainId: normalizedChainId,
+        collection: toCollectionPayload(collection)
+      });
+    }
+
+    const participants = await resolveEscrowParticipants(escrowId);
+    if (!participants) {
+      return res.status(404).json({ error: 'Escrow not found' });
+    }
+
+    await clearPubKeySubmissions(escrowId);
+
+    const { session } = initIncrementalDKG(escrowId, {
+      participants,
+      contractAddress: normalizedContractAddress,
+      chainId: normalizedChainId,
+      dueAtMs: Date.now() + SESSION_TTL_MS
     });
 
-    session.parties = {
-      buyer: buyerAddr.toLowerCase(),
-      seller: sellerAddr.toLowerCase(),
-      mediators: mediatorAddrs.map((address) => address.toLowerCase())
-    };
+    session.parties = participants;
     await saveSession(escrowId, session);
 
-    res.json({ ok: true, contractAddress, chainId });
+    const collection = getPubKeyCollectionSummary(session);
+    return res.json({
+      ok: true,
+      contractAddress: normalizedContractAddress,
+      chainId: normalizedChainId,
+      collection: toCollectionPayload(collection)
+    });
   } catch (error) {
     console.error('Error in /init:', error.message);
     if (/public key/i.test(error.message)) {
       return res.status(400).json({ error: error.message });
     }
+    if (/participants are incomplete/i.test(error.message)) {
+      return res.status(409).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/pubkey/submit', escrowPubKeySubmitRateLimiter, async (req, res) => {
+  try {
+    const { escrowId, role, pubKey } = req.body;
+
+    if (!escrowId || !role || !pubKey) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    if (typeof escrowId !== 'string' || typeof role !== 'string' || typeof pubKey !== 'string') {
+      return res.status(400).json({ error: 'Invalid payload types' });
+    }
+    if (!VALID_ROLES.includes(role)) {
+      return res.status(400).json({ error: `Invalid role. Allowed: ${VALID_ROLES.join(', ')}` });
+    }
+
+    const session = await checkSession(escrowId, res);
+    if (!session) return;
+
+    const io = req.app.get('io');
+    const summaryBefore = getPubKeyCollectionSummary(session);
+    if (summaryBefore.expired) {
+      const wasExpired = session.pubkeyCollectionState === 'EXPIRED';
+      session.pubkeyCollectionState = 'EXPIRED';
+      await saveSession(escrowId, session);
+
+      if (io && !wasExpired) {
+        io.to(escrowId).emit('pubkey_collection_expired', {
+          escrowId,
+          dueAt: toIsoTimestamp(summaryBefore.dueAt),
+          expiredAt: new Date().toISOString()
+        });
+      }
+
+      return res.status(410).json({
+        error: 'Pubkey collection expired',
+        collection: toCollectionPayload(getPubKeyCollectionSummary(session))
+      });
+    }
+
+    const normalizedPubKey = '0x' + normalizePubKey(pubKey);
+    session.pubKeys = session.pubKeys && typeof session.pubKeys === 'object' ? session.pubKeys : {};
+    const existingPubKey = session.pubKeys[role];
+    if (existingPubKey) {
+      const normalizedExistingPubKey = '0x' + normalizePubKey(existingPubKey);
+      if (normalizedExistingPubKey.toLowerCase() === normalizedPubKey.toLowerCase()) {
+        const collection = getPubKeyCollectionSummary(session);
+        return res.json({
+          ok: true,
+          state: collection.state,
+          received: collection.received,
+          required: collection.required,
+          isIdempotent: true,
+          collection: toCollectionPayload(collection)
+        });
+      }
+
+      if (io) {
+        io.to(escrowId).emit('pubkey_rejected', { escrowId, role, reason: 'CONFLICT' });
+      }
+      return res.status(409).json({ error: `Role '${role}' already submitted a different pubKey` });
+    }
+
+    const participants = session.participants || session.parties;
+    const expectedAddress = getRoleAddress(participants, role);
+    if (!expectedAddress) {
+      if (io) {
+        io.to(escrowId).emit('pubkey_rejected', { escrowId, role, reason: 'ROLE_NOT_ALLOWED' });
+      }
+      return res.status(403).json({ error: `Role '${role}' is not allowed in this escrow` });
+    }
+
+    const derivedAddress = ethers.computeAddress(normalizedPubKey).toLowerCase();
+
+    if (derivedAddress !== expectedAddress) {
+      if (io) {
+        io.to(escrowId).emit('pubkey_rejected', { escrowId, role, reason: 'PUBKEY_ADDR_MISMATCH' });
+      }
+      return res.status(400).json({ error: `${role} pubKey does not match expected address` });
+    }
+
+    const persistenceResult = await savePubKeySubmission(escrowId, role, normalizedPubKey);
+    if (persistenceResult.status === 'conflict') {
+      if (io) {
+        io.to(escrowId).emit('pubkey_rejected', { escrowId, role, reason: 'CONFLICT' });
+      }
+      return res.status(409).json({ error: `Role '${role}' already submitted a different pubKey` });
+    }
+    if (persistenceResult.status === 'idempotent') {
+      session.pubKeys[role] = normalizedPubKey;
+      await saveSession(escrowId, session);
+
+      const collection = getPubKeyCollectionSummary(session);
+      return res.json({
+        ok: true,
+        state: collection.state,
+        received: collection.received,
+        required: collection.required,
+        isIdempotent: true,
+        collection: toCollectionPayload(collection)
+      });
+    }
+
+    session.pubKeys[role] = normalizedPubKey;
+    let summary = getPubKeyCollectionSummary(session);
+    session.pubkeyCollectionState = summary.complete ? 'COMPLETE' : 'PARTIAL';
+
+    if (summary.complete && !session.pubkeyAggregationCompletedAt) {
+      session.precomputedPkAgg = aggregateWhenReady(session);
+      session.pubkeyAggregationCompletedAt = Date.now();
+    }
+
+    await saveSession(escrowId, session);
+
+    summary = getPubKeyCollectionSummary(session);
+
+    if (io) {
+      io.to(escrowId).emit('pubkey_received', {
+        escrowId,
+        role,
+        received: summary.received,
+        required: summary.required,
+        missingRoles: summary.missingRoles
+      });
+
+      if (summary.complete) {
+        io.to(escrowId).emit('pubkey_collection_complete', {
+          escrowId,
+          received: summary.received,
+          required: summary.required,
+          completedAt: toIsoTimestamp(session.pubkeyAggregationCompletedAt || Date.now())
+        });
+      }
+    }
+
+    return res.json({
+      ok: true,
+      state: summary.state,
+      received: summary.received,
+      required: summary.required,
+      isIdempotent: false,
+      collection: toCollectionPayload(summary)
+    });
+  } catch (error) {
+    console.error('Error in /pubkey/submit:', error.message);
+    if (/public key|invalid role|does not match expected address/i.test(error.message)) {
+      return res.status(400).json({ error: error.message });
+    }
+    return res.status(500).json({ error: error.message });
   }
 });
 
@@ -174,6 +551,22 @@ router.post('/nonce', async (req, res) => {
 
     const session = await checkSession(escrowId, res);
     if (!session) return;
+
+    const collection = getPubKeyCollectionSummary(session);
+    if (collection.expired) {
+      session.pubkeyCollectionState = 'EXPIRED';
+      await saveSession(escrowId, session);
+      return res.status(410).json({
+        error: 'Pubkey collection expired',
+        collection: toCollectionPayload(collection)
+      });
+    }
+    if (!collection.complete) {
+      return res.status(409).json({
+        error: 'Pubkey collection is incomplete. Submit all participant pubkeys first.',
+        collection: toCollectionPayload(collection)
+      });
+    }
 
     if (session.completedActions.includes(action)) {
       return res.status(409).json({ error: `Action '${action}' already signed` });
@@ -336,6 +729,7 @@ router.post('/sign', escrowSignRateLimiter, async (req, res) => {
 router.get('/:id/status', async (req, res) => {
   const session = await checkSession(req.params.id, res);
   if (!session) return;
+  const pubkeyCollection = getPubKeyCollectionStatus(session);
   res.json({
     status: session.status,
     signingAction: session.signingAction,
@@ -343,7 +737,8 @@ router.get('/:id/status', async (req, res) => {
     nonceCount: Object.keys(session.nonces).length,
     zShareCount: Object.keys(session.zShares).length,
     parties: session.parties,
-    completedActions: session.completedActions
+    completedActions: session.completedActions,
+    pubkeyCollection: toCollectionPayload(pubkeyCollection)
   });
 });
 

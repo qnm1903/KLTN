@@ -1,4 +1,11 @@
-import { getActionSigners, getPkAggForRoles, initDKG } from '../../src/crypto/dkg.js';
+import {
+  aggregateWhenReady,
+  getActionSigners,
+  getPkAggForRoles,
+  getPubKeyCollectionSummary,
+  initDKG,
+  initIncrementalDKG
+} from '../../src/crypto/dkg.js';
 import { generateKeyPair } from '../../src/crypto/ecc.js';
 
 describe('DKG Crypto Functions', () => {
@@ -46,5 +53,79 @@ describe('DKG Crypto Functions', () => {
     expect(refundPk.x.startsWith('0x')).toBe(true);
     expect(timeoutPk.x.startsWith('0x')).toBe(true);
     expect(releasePk.y.startsWith('0x')).toBe(true);
+  });
+
+  it('initializes incremental DKG session with pending collection state', () => {
+    const now = Date.now();
+    const { session } = initIncrementalDKG('escrow-incremental-1', {
+      participants: {
+        buyer: '0x1111111111111111111111111111111111111111',
+        seller: '0x2222222222222222222222222222222222222222',
+        mediators: [
+          '0x3333333333333333333333333333333333333331',
+          '0x3333333333333333333333333333333333333332',
+          '0x3333333333333333333333333333333333333333',
+          '0x3333333333333333333333333333333333333334',
+          '0x3333333333333333333333333333333333333335'
+        ]
+      },
+      contractAddress: '0x00000000000000000000000000000000000000aa',
+      chainId: '31337',
+      dueAtMs: now + 30 * 60 * 1000
+    });
+
+    const summary = getPubKeyCollectionSummary(session, now);
+    expect(summary.state).toBe('PENDING');
+    expect(summary.required).toBe(7);
+    expect(summary.received).toBe(0);
+    expect(summary.complete).toBe(false);
+    expect(session.pubkeyAggregationCompletedAt).toBeNull();
+  });
+
+  it('aggregates only when all 7 pubkeys are collected', () => {
+    const buyer = generateKeyPair();
+    const seller = generateKeyPair();
+    const mediators = [
+      generateKeyPair(),
+      generateKeyPair(),
+      generateKeyPair(),
+      generateKeyPair(),
+      generateKeyPair()
+    ];
+
+    const { session } = initIncrementalDKG('escrow-incremental-2', {
+      participants: {
+        buyer: '0x1111111111111111111111111111111111111111',
+        seller: '0x2222222222222222222222222222222222222222',
+        mediators: [
+          '0x3333333333333333333333333333333333333331',
+          '0x3333333333333333333333333333333333333332',
+          '0x3333333333333333333333333333333333333333',
+          '0x3333333333333333333333333333333333333334',
+          '0x3333333333333333333333333333333333333335'
+        ]
+      },
+      contractAddress: '0x00000000000000000000000000000000000000aa',
+      chainId: '31337'
+    });
+
+    session.pubKeys.buyer = buyer.pubKey;
+    session.pubKeys.seller = seller.pubKey;
+    session.pubKeys.mediator1 = mediators[0].pubKey;
+    session.pubKeys.mediator2 = mediators[1].pubKey;
+    session.pubKeys.mediator3 = mediators[2].pubKey;
+    session.pubKeys.mediator4 = mediators[3].pubKey;
+
+    expect(aggregateWhenReady(session)).toBeNull();
+
+    session.pubKeys.mediator5 = mediators[4].pubKey;
+    const aggregates = aggregateWhenReady(session);
+
+    expect(aggregates).toBeDefined();
+    expect(aggregates).toHaveProperty('release');
+    expect(aggregates).toHaveProperty('refund');
+    expect(aggregates).toHaveProperty('timeout');
+    expect(aggregates.release.x.startsWith('0x')).toBe(true);
+    expect(aggregates.release.y.startsWith('0x')).toBe(true);
   });
 });

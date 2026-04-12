@@ -9,6 +9,8 @@ const router = express.Router();
 
 const NONCE_TTL = 5 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS = Number.parseInt(process.env.REFRESH_TOKEN_TTL_MS || '', 10) || 7 * 24 * 60 * 60 * 1000;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const REFRESH_COOKIE_SAME_SITE = IS_PRODUCTION ? 'strict' : 'lax';
 const { authNonceMax, authVerifyMax } = getRateLimitConfig();
 const authNonceRateLimiter = createRouteRateLimiter({
   max: authNonceMax,
@@ -25,6 +27,28 @@ function buildAuthMessage(nonce) {
 
 function hashRefreshToken(rawToken) {
   return crypto.createHash('sha256').update(rawToken).digest('hex');
+}
+
+function getRefreshCookieOptions(maxAge = REFRESH_TOKEN_TTL_MS) {
+  return {
+    httpOnly: true,
+    secure: IS_PRODUCTION,
+    sameSite: REFRESH_COOKIE_SAME_SITE,
+    path: '/api/auth',
+    maxAge,
+  };
+}
+
+function setRefreshCookie(res, refreshToken, maxAge = REFRESH_TOKEN_TTL_MS) {
+  res.cookie('refresh_token', refreshToken, getRefreshCookieOptions(maxAge));
+}
+
+function clearRefreshCookie(res) {
+  res.clearCookie('refresh_token', getRefreshCookieOptions(0));
+}
+
+function getRefreshTokenFromCookie(req) {
+  return req.cookies?.['refresh_token'] || null;
 }
 
 async function issueSessionTokens(user) {
@@ -59,7 +83,8 @@ async function issueSessionTokens(user) {
     token: accessToken,
     accessToken,
     refreshToken,
-    refreshTokenExpiresAt: refreshTokenExpiresAt.toISOString()
+    refreshTokenExpiresAt: refreshTokenExpiresAt.toISOString(),
+    refreshTokenMaxAge: REFRESH_TOKEN_TTL_MS,
   };
 }
 
@@ -165,8 +190,12 @@ router.post('/verify', authVerifyRateLimiter, async (req, res) => {
 
     const sessionTokens = await issueSessionTokens(user);
 
+    setRefreshCookie(res, sessionTokens.refreshToken, sessionTokens.refreshTokenMaxAge);
+
     res.json({
-      ...sessionTokens,
+      token: sessionTokens.accessToken,
+      accessToken: sessionTokens.accessToken,
+      refreshTokenExpiresAt: sessionTokens.refreshTokenExpiresAt,
       user: {
         id: user.id,
         walletAddress: user.walletAddress,
@@ -182,9 +211,9 @@ router.post('/verify', authVerifyRateLimiter, async (req, res) => {
 
 router.post('/refresh', authVerifyRateLimiter, async (req, res) => {
   try {
-    const { refreshToken } = req.body;
-    if (!refreshToken || typeof refreshToken !== 'string') {
-      return res.status(400).json({ error: 'refreshToken is required' });
+    const refreshToken = getRefreshTokenFromCookie(req);
+    if (!refreshToken) {
+      return res.status(401).json({ error: 'Missing refresh token cookie' });
     }
 
     const tokenHash = hashRefreshToken(refreshToken);
@@ -203,6 +232,7 @@ router.post('/refresh', authVerifyRateLimiter, async (req, res) => {
     });
 
     if (!stored || stored.revokedAt || stored.expiresAt.getTime() <= Date.now() || !stored.user) {
+      clearRefreshCookie(res);
       return res.status(401).json({ error: 'Invalid or expired refresh token' });
     }
 
@@ -228,10 +258,11 @@ router.post('/refresh', authVerifyRateLimiter, async (req, res) => {
       role: stored.user.role
     });
 
+    setRefreshCookie(res, nextRefreshToken, REFRESH_TOKEN_TTL_MS);
+
     return res.json({
       token: accessToken,
       accessToken,
-      refreshToken: nextRefreshToken,
       refreshTokenExpiresAt: nextRefreshTokenExpiresAt.toISOString(),
       user: stored.user
     });
@@ -243,20 +274,21 @@ router.post('/refresh', authVerifyRateLimiter, async (req, res) => {
 
 router.post('/logout', authVerifyRateLimiter, async (req, res) => {
   try {
-    const { refreshToken } = req.body;
-    if (!refreshToken || typeof refreshToken !== 'string') {
-      return res.status(400).json({ error: 'refreshToken is required' });
+    const refreshToken = getRefreshTokenFromCookie(req);
+
+    if (refreshToken) {
+      await prisma.refreshToken.updateMany({
+        where: {
+          tokenHash: hashRefreshToken(refreshToken),
+          revokedAt: null
+        },
+        data: {
+          revokedAt: new Date()
+        }
+      });
     }
 
-    await prisma.refreshToken.updateMany({
-      where: {
-        tokenHash: hashRefreshToken(refreshToken),
-        revokedAt: null
-      },
-      data: {
-        revokedAt: new Date()
-      }
-    });
+    clearRefreshCookie(res);
 
     return res.json({ ok: true });
   } catch (error) {

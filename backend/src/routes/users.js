@@ -22,7 +22,7 @@ router.get('/me', authMiddleware, async (req, res) => {
           select: {
             boughtEscrows: true,
             soldEscrows: true,
-            mediatedEscrows: true
+            mediatedEscrowLinks: true
           }
         }
       }
@@ -67,7 +67,7 @@ router.get('/mediators', authMiddleware, async (req, res) => {
         id: true,
         walletAddress: true,
         name: true,
-        _count: { select: { mediatedEscrows: true } }
+        _count: { select: { mediatedEscrowLinks: true } }
       },
       orderBy: { createdAt: 'asc' }
     });

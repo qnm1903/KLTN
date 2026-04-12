@@ -1,15 +1,50 @@
 import axios from 'axios';
+import {
+  clearSession,
+  getStoredAccessToken,
+  setSession,
+} from '../store/authStore';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api',
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
 });
 
+let inFlightRefreshPromise = null;
+
+async function refreshAccessToken() {
+  const response = await axios.post(
+    `${api.defaults.baseURL}/auth/refresh`,
+    {},
+    {
+      withCredentials: true,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    },
+  );
+
+  const { data } = response;
+  const nextAccessToken = data?.accessToken || data?.token;
+
+  if (!nextAccessToken) {
+    throw new Error('Refresh endpoint did not return access token');
+  }
+
+  setSession({
+    accessToken: nextAccessToken,
+    user: data?.user || null,
+  });
+
+  return nextAccessToken;
+}
+
 // Interceptor: Tự động gắn token vào header nếu có
 api.interceptors.request.use((config) => {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('jwt_token') : null;
+  const token = getStoredAccessToken();
   if (token) {
     if (config.headers && typeof config.headers.set === 'function') {
       config.headers.set('Authorization', `Bearer ${token}`);
@@ -23,26 +58,48 @@ api.interceptors.request.use((config) => {
   throw error;
 });
 
-// Interceptor 2: Xử lý Response trả về từ Server
 api.interceptors.response.use(
-  (response) => {
-    // Nếu API gọi thành công, trả về data bình thường
-    return response;
-  },
-  (error) => {
-    // Xử lý bảo mật: Nếu Server báo lỗi 401 (Token hết hạn / Không hợp lệ)
-    if (error.response && error.response.status === 401) {
-      console.warn('Phiên đăng nhập đã hết hạn. Vui lòng ký lại SIWE.');
-      
-      // Xóa token cũ để dọn dẹp state
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem('jwt_token');
-        // Tùy chọn nâng cao: Có thể emit một event để Jotai biết và reset state kết nối
-        window.dispatchEvent(new Event('session_expired'));
-      }
+  (response) => response,
+  async (error) => {
+    const statusCode = error.response?.status;
+    const originalRequest = error.config;
+
+    if (!originalRequest) {
+      throw error;
     }
-    return Promise.reject(error);
-  }
+
+    const isUnauthorized = statusCode === 401;
+    const isRefreshCall = typeof originalRequest.url === 'string' && originalRequest.url.includes('/auth/refresh');
+    const wasRetried = !!originalRequest._retry;
+
+    if (!isUnauthorized || isRefreshCall || wasRetried) {
+      throw error;
+    }
+
+    originalRequest._retry = true;
+
+    try {
+      if (!inFlightRefreshPromise) {
+        inFlightRefreshPromise = refreshAccessToken().finally(() => {
+          inFlightRefreshPromise = null;
+        });
+      }
+
+      const nextAccessToken = await inFlightRefreshPromise;
+
+      if (originalRequest.headers && typeof originalRequest.headers.set === 'function') {
+        originalRequest.headers.set('Authorization', `Bearer ${nextAccessToken}`);
+      } else {
+        originalRequest.headers = originalRequest.headers || {};
+        originalRequest.headers.Authorization = `Bearer ${nextAccessToken}`;
+      }
+
+      return api(originalRequest);
+    } catch {
+      clearSession();
+      throw error;
+    }
+  },
 );
 
 export default api;

@@ -1,66 +1,136 @@
-/**
- * DKG — Distributed Key Generation (No Trusted Dealer)
- *
- * Option 2 upgrade từ trusted dealer:
- *   - Mỗi bên (buyer, seller, mediator) tự sinh (s_i, PK_i) ở FRONTEND
- *   - Frontend gửi PUBLIC keys lên backend (không bao giờ private keys)
- *   - Backend tính 3 đôi PKagg cho 3 tổ hợp 2-of-3:
- *       PKagg_buyerSeller   = PK_buyer + PK_seller    -> dùng cho 'release'
- *       PKagg_buyerMediator = PK_buyer + PK_mediator  -> dùng cho 'refund'
- *       PKagg_sellerMediator = PK_seller + PK_mediator -> dùng cho 'timeout'
- *   - Backend không biết bất kỳ private key nào
- */
-
 import { aggregatePublicKeys } from './schnorr.js';
 
 export const SESSION_TTL_MS = 30 * 60 * 1000; // 30 phút
 
+export const PARTICIPANT_ROLES = [
+  'buyer',
+  'seller',
+  'mediator1',
+  'mediator2',
+  'mediator3',
+  'mediator4',
+  'mediator5'
+];
+
+export const ACTION_SIGNER_SETS = {
+  release: ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'],
+  refund: ['buyer', 'mediator1', 'mediator2', 'mediator3', 'mediator4'],
+  timeout: ['seller', 'mediator2', 'mediator3', 'mediator4', 'mediator5']
+};
+
+const ROLE_BIT_POSITIONS = new Map(PARTICIPANT_ROLES.map((role, index) => [role, index]));
+
+function assertRole(role) {
+  if (!ROLE_BIT_POSITIONS.has(role)) {
+    throw new Error(`Invalid role: ${role}`);
+  }
+}
+
+function normalizeRoles(roles) {
+  return [...new Set(roles)].sort((left, right) => ROLE_BIT_POSITIONS.get(left) - ROLE_BIT_POSITIONS.get(right));
+}
+
+export function getActionSigners(action) {
+  const roles = ACTION_SIGNER_SETS[action];
+  if (!roles) {
+    throw new Error(`Unsupported action: ${action}`);
+  }
+  return [...roles];
+}
+
+export function deriveSignerBitmap(roles) {
+  if (!Array.isArray(roles) || roles.length === 0) {
+    throw new Error('Signer roles are required');
+  }
+
+  return normalizeRoles(roles).reduce((bitmap, role) => {
+    assertRole(role);
+    return bitmap | (1 << ROLE_BIT_POSITIONS.get(role));
+  }, 0);
+}
+
+export function aggregatePubKeysForRoles(pubKeysByRole, roles) {
+  if (!pubKeysByRole || typeof pubKeysByRole !== 'object') {
+    throw new Error('Public keys are required');
+  }
+
+  const orderedRoles = normalizeRoles(roles);
+  const pubKeys = orderedRoles.map((role) => {
+    assertRole(role);
+    const pubKey = pubKeysByRole[role];
+    if (!pubKey) {
+      throw new Error(`Missing public key for role: ${role}`);
+    }
+    return pubKey;
+  });
+
+  const aggregate = aggregatePublicKeys(pubKeys);
+  return { x: aggregate.x, y: aggregate.y };
+}
+
 /**
- * Khởi tạo session DKG từ 3 public keys do frontend cung cấp.
+ * Khởi tạo session DKG từ 7 public keys do frontend cung cấp.
  *
  * @param {string} escrowId
- * @param {{ buyerPubKey, sellerPubKey, mediatorPubKey }} pubKeys
- * @returns {{ pkAgg_bs, pkAgg_bm, pkAgg_sm, session }}
+ * @param {{ buyerPubKey, sellerPubKey, mediatorPubKeys, participants, contractAddress, chainId }} params
+ * @returns {{ session }}
  */
-export function initDKG(escrowId, { buyerPubKey, sellerPubKey, mediatorPubKey }) {
-  const pkAgg_bs = aggregatePublicKeys([buyerPubKey, sellerPubKey]);
-  const pkAgg_bm = aggregatePublicKeys([buyerPubKey, mediatorPubKey]);
-  const pkAgg_sm = aggregatePublicKeys([sellerPubKey, mediatorPubKey]);
+export function initDKG(
+  escrowId,
+  {
+    buyerPubKey,
+    sellerPubKey,
+    mediatorPubKeys,
+    participants,
+    contractAddress,
+    chainId
+  }
+) {
+  if (!buyerPubKey || !sellerPubKey || !Array.isArray(mediatorPubKeys) || mediatorPubKeys.length !== 5) {
+    throw new Error('Seven participant public keys are required');
+  }
 
   const session = {
-    pubKeys: { buyer: buyerPubKey, seller: sellerPubKey, mediator: mediatorPubKey },
-    pkAgg: {
-      buyerSeller: pkAgg_bs,
-      buyerMediator: pkAgg_bm,
-      sellerMediator: pkAgg_sm
+    participants: participants || {},
+    contractAddress: contractAddress || null,
+    chainId: chainId ? BigInt(chainId).toString() : null,
+    pubKeys: {
+      buyer: buyerPubKey,
+      seller: sellerPubKey,
+      mediator1: mediatorPubKeys[0],
+      mediator2: mediatorPubKeys[1],
+      mediator3: mediatorPubKeys[2],
+      mediator4: mediatorPubKeys[3],
+      mediator5: mediatorPubKeys[4]
     },
     nonces: {},          // Round 1: { role: { R_x, R_y } }
     zShares: {},         // Round 2: { role: z_hex }
     signingRoles: null,  // 2 bên đang ký, set khi bắt đầu round 1
     signingAction: null,
+    signingBitmap: null,
     completedActions: [],
     createdAt: Date.now(),
     status: 'INITIALIZED'
   };
 
   return {
-    pkAgg_bs: { x: pkAgg_bs.x, y: pkAgg_bs.y },
-    pkAgg_bm: { x: pkAgg_bm.x, y: pkAgg_bm.y },
-    pkAgg_sm: { x: pkAgg_sm.x, y: pkAgg_sm.y },
     session
   };
 }
 
 /**
- * Lấy PKagg phù hợp cho 2 bên đang ký.
+ * Lấy PKagg phù hợp cho các bên đang ký.
  */
 export function getPkAggForRoles(session, roles) {
-  const key = [...roles].sort().join('+');
-  const map = {
-    'buyer+seller':    session.pkAgg.buyerSeller,
-    'buyer+mediator':  session.pkAgg.buyerMediator,
-    'mediator+seller': session.pkAgg.sellerMediator
-  };
-  if (!map[key]) throw new Error(`No PKagg for role pair: ${key}`);
-  return map[key];
+  if (!session?.pubKeys) {
+    throw new Error('Session public keys are not available');
+  }
+
+  return aggregatePubKeysForRoles(session.pubKeys, roles);
+}
+
+export function hasExactActionSigners(action, roles) {
+  const expected = getActionSigners(action).sort();
+  const actual = normalizeRoles(roles);
+  return expected.length === actual.length && expected.every((role, index) => role === actual[index]);
 }

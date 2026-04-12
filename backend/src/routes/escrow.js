@@ -1,6 +1,11 @@
 import express from 'express';
 import { deleteSession, getSession, hasSession, saveSession } from '../store/session.js';
-import { initDKG, getPkAggForRoles, SESSION_TTL_MS } from '../crypto/dkg.js';
+import {
+  getActionSigners,
+  getPkAggForRoles,
+  initDKG,
+  SESSION_TTL_MS
+} from '../crypto/dkg.js';
 import { aggregateNonces, computeChallenge, aggregateZShares } from '../crypto/schnorr.js';
 import { ethers } from 'ethers';
 import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-limit.js';
@@ -18,13 +23,12 @@ const escrowSignRateLimiter = createRouteRateLimiter({
   message: 'Too many escrow sign requests. Please try again later.'
 });
 
-const VALID_ROLES = ['buyer', 'seller', 'mediator'];
+const VALID_ROLES = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
 const VALID_ACTIONS = ['release', 'refund', 'timeout'];
-const ACTION_ROLE_PAIRS = {
-  release: ['buyer', 'seller'],
-  refund: ['buyer', 'mediator'],
-  timeout: ['seller', 'mediator']
-};
+
+function getActionSignerRoles(action) {
+  return getActionSigners(action);
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -39,9 +43,12 @@ async function checkSession(escrowId, res) {
   return session;
 }
 
-function buildMsgHash(escrowId, action) {
+function buildMsgHash(escrowId, action, signerBitmap, contractAddress, chainId) {
   const id = escrowId.startsWith('0x') ? escrowId : ethers.id(escrowId);
-  return ethers.solidityPackedKeccak256(['bytes32', 'string'], [id, action]);
+  return ethers.solidityPackedKeccak256(
+    ['uint256', 'address', 'bytes32', 'string', 'uint8'],
+    [BigInt(chainId).toString(), contractAddress, id, action, signerBitmap]
+  );
 }
 
 function normalizePubKey(pubKeyHex) {
@@ -58,13 +65,9 @@ function normalizePubKey(pubKeyHex) {
   throw new Error('Invalid public key format');
 }
 
-function roleIsAllowedForAction(role, action) {
-  return ACTION_ROLE_PAIRS[action].includes(role);
-}
-
 function rolesMatchAction(roles, action) {
-  const expected = [...ACTION_ROLE_PAIRS[action]].sort().join('+');
-  const actual = [...roles].sort().join('+');
+  const expected = [...getActionSignerRoles(action)].sort().join('+');
+  const actual = [...new Set(roles)].sort().join('+');
   return expected === actual;
 }
 
@@ -78,17 +81,27 @@ function rolesMatchAction(roles, action) {
  */
 router.post('/init', escrowInitRateLimiter, async (req, res) => {
   try {
-    const { escrowId, buyerAddr, sellerAddr, mediatorAddr,
-            buyerPubKey, sellerPubKey, mediatorPubKey } = req.body;
+    const {
+      escrowId,
+      chainId,
+      contractAddress,
+      buyerAddr,
+      sellerAddr,
+      mediatorAddrs,
+      buyerPubKey,
+      sellerPubKey,
+      mediatorPubKeys
+    } = req.body;
 
-    if (!escrowId || !buyerAddr || !sellerAddr || !mediatorAddr ||
-        !buyerPubKey || !sellerPubKey || !mediatorPubKey) {
+    if (!escrowId || !chainId || !contractAddress || !buyerAddr || !sellerAddr ||
+        !Array.isArray(mediatorAddrs) || mediatorAddrs.length !== 5 ||
+        !buyerPubKey || !sellerPubKey || !Array.isArray(mediatorPubKeys) || mediatorPubKeys.length !== 5) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
     const derivedBuyer = ethers.computeAddress('0x' + normalizePubKey(buyerPubKey));
     const derivedSeller = ethers.computeAddress('0x' + normalizePubKey(sellerPubKey));
-    const derivedMediator = ethers.computeAddress('0x' + normalizePubKey(mediatorPubKey));
+    const derivedMediatorAddrs = mediatorPubKeys.map((pubKey) => ethers.computeAddress('0x' + normalizePubKey(pubKey)));
 
     if (derivedBuyer.toLowerCase() !== buyerAddr.toLowerCase()) {
       return res.status(400).json({ error: 'buyerPubKey does not match buyerAddr' });
@@ -96,25 +109,37 @@ router.post('/init', escrowInitRateLimiter, async (req, res) => {
     if (derivedSeller.toLowerCase() !== sellerAddr.toLowerCase()) {
       return res.status(400).json({ error: 'sellerPubKey does not match sellerAddr' });
     }
-    if (derivedMediator.toLowerCase() !== mediatorAddr.toLowerCase()) {
-      return res.status(400).json({ error: 'mediatorPubKey does not match mediatorAddr' });
+    for (let index = 0; index < mediatorAddrs.length; index++) {
+      if (derivedMediatorAddrs[index].toLowerCase() !== mediatorAddrs[index].toLowerCase()) {
+        return res.status(400).json({ error: `mediatorPubKeys[${index}] does not match mediatorAddrs[${index}]` });
+      }
     }
 
     if (await hasSession(escrowId)) {
       return res.status(409).json({ error: 'Session already exists for this escrowId' });
     }
 
-    const { session, ...result } = initDKG(escrowId, { buyerPubKey, sellerPubKey, mediatorPubKey });
+    const { session } = initDKG(escrowId, {
+      buyerPubKey,
+      sellerPubKey,
+      mediatorPubKeys,
+      participants: {
+        buyer: buyerAddr.toLowerCase(),
+        seller: sellerAddr.toLowerCase(),
+        mediators: mediatorAddrs.map((address) => address.toLowerCase())
+      },
+      contractAddress,
+      chainId
+    });
 
     session.parties = {
       buyer: buyerAddr.toLowerCase(),
       seller: sellerAddr.toLowerCase(),
-      mediator: mediatorAddr.toLowerCase()
+      mediators: mediatorAddrs.map((address) => address.toLowerCase())
     };
     await saveSession(escrowId, session);
 
-    // Trả về 3 PKagg pairs để đưa vào constructor EscrowVault
-    res.json(result);
+    res.json({ ok: true, contractAddress, chainId });
   } catch (error) {
     console.error('Error in /init:', error.message);
     if (/public key/i.test(error.message)) {
@@ -135,9 +160,9 @@ router.post('/init', escrowInitRateLimiter, async (req, res) => {
  */
 router.post('/nonce', async (req, res) => {
   try {
-    const { escrowId, role, action, R_x, R_y } = req.body;
+    const { escrowId, role, action, signerBitmap, R_x, R_y } = req.body;
 
-    if (!escrowId || !role || !action || !R_x || !R_y) {
+    if (!escrowId || !role || !action || signerBitmap === undefined || !R_x || !R_y) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
     if (!VALID_ROLES.includes(role)) {
@@ -145,9 +170,6 @@ router.post('/nonce', async (req, res) => {
     }
     if (!VALID_ACTIONS.includes(action)) {
       return res.status(400).json({ error: `Invalid action. Allowed: ${VALID_ACTIONS.join(', ')}` });
-    }
-    if (!roleIsAllowedForAction(role, action)) {
-      return res.status(403).json({ error: `Role '${role}' is not allowed for action '${action}'` });
     }
 
     const session = await checkSession(escrowId, res);
@@ -157,13 +179,26 @@ router.post('/nonce', async (req, res) => {
       return res.status(409).json({ error: `Action '${action}' already signed` });
     }
 
+    const actionRoles = getActionSignerRoles(action);
+    if (!actionRoles.includes(role)) {
+      return res.status(403).json({ error: `Role '${role}' is not allowed for action '${action}'` });
+    }
+
+    const bitmap = Number(signerBitmap);
+    if (!Number.isInteger(bitmap) || bitmap < 0 || bitmap > 0x7f) {
+      return res.status(400).json({ error: 'Invalid signerBitmap' });
+    }
+
     // Khi round 1 bắt đầu, lock action và xác định 2 bên tham gia
     if (!session.signingAction) {
       session.signingAction = action;
       session.nonces = {};
       session.zShares = {};
+      session.signingBitmap = bitmap;
     } else if (session.signingAction !== action) {
       return res.status(409).json({ error: 'Different action already in progress' });
+    } else if (session.signingBitmap !== bitmap) {
+      return res.status(409).json({ error: 'Different signerBitmap already in progress' });
     }
 
     // Verify role này có trong session
@@ -172,8 +207,8 @@ router.post('/nonce', async (req, res) => {
     }
 
     const nonceCountBefore = Object.keys(session.nonces).length;
-    if (!session.nonces[role] && nonceCountBefore >= 2) {
-      return res.status(409).json({ error: 'Nonce round already has 2 participants' });
+    if (!session.nonces[role] && nonceCountBefore >= actionRoles.length) {
+      return res.status(409).json({ error: 'Nonce round already has enough participants' });
     }
 
     session.nonces[role] = { R_x, R_y };
@@ -182,18 +217,19 @@ router.post('/nonce', async (req, res) => {
     const io = req.app.get('io');
     const nonceCount = Object.keys(session.nonces).length;
 
-    if (nonceCount < 2) {
-      if (io) io.to(escrowId).emit('nonce_received', { count: nonceCount, needed: 2 });
-      return res.json({ received: nonceCount, needed: 2 });
+    if (nonceCount < actionRoles.length) {
+      if (io) io.to(escrowId).emit('nonce_received', { count: nonceCount, needed: actionRoles.length });
+      return res.json({ received: nonceCount, needed: actionRoles.length });
     }
 
-    // Đủ 2 nonces — tổng hợp R, tính PKagg và challenge e
+    // Đủ nonces — tổng hợp R, tính PKagg và challenge e
     const roles = Object.keys(session.nonces);
     if (!rolesMatchAction(roles, action)) {
       session.nonces = {};
       session.zShares = {};
       session.signingRoles = null;
       session.signingAction = null;
+      session.signingBitmap = null;
       session.round2Context = null;
       await saveSession(escrowId, session);
       return res.status(403).json({ error: `Signer roles do not match action '${action}' requirements` });
@@ -203,19 +239,19 @@ router.post('/nonce', async (req, res) => {
     const pkAgg = getPkAggForRoles(session, roles);
     const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNonces(Object.values(session.nonces));
 
-    const msgHash = buildMsgHash(escrowId, action);
+    const msgHash = buildMsgHash(escrowId, action, bitmap, session.contractAddress, session.chainId);
     const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
 
     // Lưu context cho round 2
-    session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge };
+    session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: bitmap };
     await saveSession(escrowId, session);
 
     // Broadcast challenge — mỗi bên dùng e để tính z_i = k_i + e * s_i
     if (io) {
-      io.to(escrowId).emit('nonce_collected', { R_addr, challenge, msgHash, pkAgg });
+      io.to(escrowId).emit('nonce_collected', { R_addr, challenge, msgHash, pkAgg, signerBitmap: bitmap });
     }
 
-    return res.json({ ok: true, R_addr, challenge, msgHash, pkAgg });
+    return res.json({ ok: true, R_addr, challenge, msgHash, pkAgg, signerBitmap: bitmap });
   } catch (error) {
     console.error('Error in /nonce:', error.message);
     res.status(500).json({ error: error.message });
@@ -234,9 +270,9 @@ router.post('/nonce', async (req, res) => {
  */
 router.post('/sign', escrowSignRateLimiter, async (req, res) => {
   try {
-    const { escrowId, role, z } = req.body;
+    const { escrowId, role, signerBitmap, z } = req.body;
 
-    if (!escrowId || !role || !z) {
+    if (!escrowId || !role || signerBitmap === undefined || !z) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
     if (!VALID_ROLES.includes(role)) {
@@ -249,10 +285,13 @@ router.post('/sign', escrowSignRateLimiter, async (req, res) => {
     if (!session.round2Context) {
       return res.status(400).json({ error: 'Round 1 not completed. Submit nonces first.' });
     }
+    if (session.round2Context.signerBitmap !== Number(signerBitmap)) {
+      return res.status(409).json({ error: 'Signer bitmap does not match current signing session' });
+    }
     if (!session.signingRoles.includes(role)) {
       return res.status(403).json({ error: `Role '${role}' is not part of current signing session` });
     }
-    if (!roleIsAllowedForAction(role, session.signingAction)) {
+    if (!getActionSignerRoles(session.signingAction).includes(role)) {
       return res.status(403).json({ error: `Role '${role}' is not allowed for action '${session.signingAction}'` });
     }
 
@@ -262,12 +301,12 @@ router.post('/sign', escrowSignRateLimiter, async (req, res) => {
     const io = req.app.get('io');
     const zCount = Object.keys(session.zShares).length;
 
-    if (zCount < 2) {
-      if (io) io.to(escrowId).emit('z_received', { count: zCount, needed: 2 });
-      return res.json({ received: zCount, needed: 2 });
+    if (zCount < session.signingRoles.length) {
+      if (io) io.to(escrowId).emit('z_received', { count: zCount, needed: session.signingRoles.length });
+      return res.json({ received: zCount, needed: session.signingRoles.length });
     }
 
-    // Đủ 2 z shares — tổng hợp chữ ký cuối
+    // Đủ z shares — tổng hợp chữ ký cuối
     const { R_addr, pkAgg, msgHash, challenge: e } = session.round2Context;
     const z_agg = aggregateZShares(Object.values(session.zShares));
 
@@ -277,10 +316,11 @@ router.post('/sign', escrowSignRateLimiter, async (req, res) => {
     session.zShares = {};
     session.signingRoles = null;
     session.signingAction = null;
+    session.signingBitmap = null;
     session.round2Context = null;
     await saveSession(escrowId, session);
 
-    const sig = { R_addr, z: z_agg, e, msgHash };
+    const sig = { R_addr, z: z_agg, e, msgHash, signerBitmap: Number(signerBitmap) };
 
     if (io) io.to(escrowId).emit('schnorr_complete', sig);
 
@@ -299,6 +339,7 @@ router.get('/:id/status', async (req, res) => {
   res.json({
     status: session.status,
     signingAction: session.signingAction,
+    signerBitmap: session.signingBitmap,
     nonceCount: Object.keys(session.nonces).length,
     zShareCount: Object.keys(session.zShares).length,
     parties: session.parties,

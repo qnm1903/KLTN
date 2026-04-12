@@ -50,7 +50,9 @@ async function checkEscrowParticipantAccess(escrowId, userId) {
       chainEscrowId: true,
       buyerId: true,
       sellerId: true,
-      mediatorId: true
+      escrowMediators: {
+        select: { mediatorId: true }
+      }
     }
   });
 
@@ -58,7 +60,10 @@ async function checkEscrowParticipantAccess(escrowId, userId) {
     return { ok: false, error: 'Escrow not found' };
   }
 
-  if (escrow.buyerId !== userId && escrow.sellerId !== userId && escrow.mediatorId !== userId) {
+  const isMediator = Array.isArray(escrow.escrowMediators)
+    && escrow.escrowMediators.some((row) => row.mediatorId === userId);
+
+  if (escrow.buyerId !== userId && escrow.sellerId !== userId && !isMediator) {
     return { ok: false, error: 'You are not a participant in this escrow' };
   }
 

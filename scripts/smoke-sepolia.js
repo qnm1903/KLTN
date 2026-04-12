@@ -5,7 +5,7 @@
  *
  * Executes complete flow:
  * 1. Deploy EscrowFactory (or read from deployments/sepolia.json)
- * 2. Create 3 test wallets (buyer, seller, mediator)
+ * 2. Create 7 test wallets (buyer, seller, mediator1..mediator5)
  * 3. Initialize backend session via /api/escrow/init
  * 4. Lock funds in EscrowVault
  * 5. Round 1: Collect nonces via /api/escrow/nonce
@@ -72,15 +72,37 @@ class TestWallet {
   }
 }
 
+const PARTICIPANT_ROLES = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
+const ACTION_SIGNER_SETS = {
+  release: ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'],
+  refund: ['buyer', 'mediator1', 'mediator2', 'mediator3', 'mediator4'],
+  timeout: ['seller', 'mediator2', 'mediator3', 'mediator4', 'mediator5']
+};
+
+function signerBitmapForRoles(roles) {
+  const roleBits = {
+    buyer: 0,
+    seller: 1,
+    mediator1: 2,
+    mediator2: 3,
+    mediator3: 4,
+    mediator4: 5,
+    mediator5: 6
+  };
+
+  return roles.reduce((bitmap, role) => bitmap | (1 << roleBits[role]), 0);
+}
+
 class SigningContext {
   constructor(escrowId, action, parties, pubKeys) {
     this.escrowId = escrowId;
     this.action = action;
-    this.parties = parties; // { buyer, seller, mediator }
-    this.pubKeys = pubKeys; // { buyer, seller, mediator }
+    this.parties = parties; // { buyer, seller, mediators: [] }
+    this.pubKeys = pubKeys; // { buyer, seller, mediator1..mediator5 }
     this.msgHash = null;
     this.R = null; // Aggregated nonce point
-    this.signers = []; // Roles that will sign (2 of 3)
+    this.signers = []; // Roles that will sign (5 of 7)
+    this.signerBitmap = 0;
     this.nonces = {}; // { role => R_i }
     this.zShares = {}; // { role => z_i }
     this.finalSig = null; // { rAddr, z, e }
@@ -134,24 +156,32 @@ async function loadOrDeployFactory() {
   return factoryAddress;
 }
 
-function aggregatePubKeys(pubKeyA, pubKeyB) {
-  const a = ec.keyFromPublic('04' + pubKeyA, 'hex').getPublic();
-  const b = ec.keyFromPublic('04' + pubKeyB, 'hex').getPublic();
-  const sum = a.add(b);
+function aggregatePubKeys(pubKeys) {
+  const keys = Array.isArray(pubKeys) ? pubKeys : Array.from(arguments);
+  if (!keys.length) {
+    throw new Error('At least one public key is required');
+  }
+
+  const [first, ...rest] = keys;
+  let sum = ec.keyFromPublic('04' + first, 'hex').getPublic();
+
+  for (const pubKey of rest) {
+    const point = ec.keyFromPublic('04' + pubKey, 'hex').getPublic();
+    sum = sum.add(point);
+  }
+
   return {
     x: '0x' + sum.getX().toString(16).padStart(64, '0'),
     y: '0x' + sum.getY().toString(16).padStart(64, '0')
   };
 }
 
-// Generate and fund 3 wallets with secp256k1 keys
+// Generate and fund 7 wallets with secp256k1 keys
 async function createTestWallets(provider, funder) {
   console.log('🔑 Creating test wallets...\n');
 
   const wallets = {};
-  const roles = ['buyer', 'seller', 'mediator'];
-
-  for (const role of roles) {
+  for (const role of PARTICIPANT_ROLES) {
     const signer = ethers.Wallet.createRandom().connect(provider);
     const privKey = signer.privateKey.replace('0x', '');
     const pubKeyWithPrefix = ethers.SigningKey.computePublicKey(signer.privateKey, false);
@@ -179,12 +209,26 @@ async function backendInit(ctx, wallets) {
 
   const payload = {
     escrowId: ctx.escrowId,
+    chainId: String(await hre.ethers.provider.getNetwork().then((network) => network.chainId)),
+    contractAddress: ctx.contractAddress,
     buyerAddr: wallets.buyer.address,
     sellerAddr: wallets.seller.address,
-    mediatorAddr: wallets.mediator.address,
+    mediatorAddrs: [
+      wallets.mediator1.address,
+      wallets.mediator2.address,
+      wallets.mediator3.address,
+      wallets.mediator4.address,
+      wallets.mediator5.address
+    ],
     buyerPubKey: wallets.buyer.pubKey,
     sellerPubKey: wallets.seller.pubKey,
-    mediatorPubKey: wallets.mediator.pubKey
+    mediatorPubKeys: [
+      wallets.mediator1.pubKey,
+      wallets.mediator2.pubKey,
+      wallets.mediator3.pubKey,
+      wallets.mediator4.pubKey,
+      wallets.mediator5.pubKey
+    ]
   };
 
   try {
@@ -192,17 +236,9 @@ async function backendInit(ctx, wallets) {
       timeout: 10000
     });
     
-    // Backend returns { pkAgg_bs: {x, y}, pkAgg_bm: {x, y}, pkAgg_sm: {x, y} }
-    ctx.pkAggPairs = response.data;
-    
-    // msgHash is computed by backend as: keccak256(escrowId_hash, action)
-    // We'll compute it the same way after getting escrowId
-    const id = ctx.escrowId.startsWith('0x') ? ctx.escrowId : ethers.id(ctx.escrowId);
-    ctx.msgHash = ethers.solidityPackedKeccak256(['bytes32', 'string'], [id, ctx.action]);
-    
     console.log(`✓ Session initialized`);
-    console.log(`  msgHash: ${ctx.msgHash}`);
-    console.log(`  PKagg pairs computed\n`);
+    console.log(`  contract: ${ctx.contractAddress}`);
+    console.log(`  signerBitmap: 0x${ctx.signerBitmap.toString(16)}\n`);
   } catch (err) {
     throw new Error(`Backend /init failed: ${err.message}`);
   }
@@ -231,6 +267,7 @@ async function backendNonce(ctx, wallets, role) {
     escrowId: ctx.escrowId,
     role,
     action: ctx.action,
+    signerBitmap: ctx.signerBitmap,
     R_x: ctx.nonces[role].R_x,
     R_y: ctx.nonces[role].R_y
   };
@@ -277,6 +314,7 @@ async function backendSign(ctx, wallets, role) {
   const payload = {
     escrowId: ctx.escrowId,
     role,
+    signerBitmap: ctx.signerBitmap,
     z: '0x' + z_i.toString(16).padStart(64, '0')
   };
 
@@ -324,7 +362,7 @@ async function callRelease(vault, sig) {
   console.log(`✓ Calling release()...\n`);
 
   const rAddr = sig.R_addr || sig.rAddr;
-  const tx = await vault.release(rAddr, sig.z, sig.e, sig.msgHash);
+  const tx = await vault.release(rAddr, sig.z, sig.e, sig.msgHash, sig.signerBitmap);
   const receipt = await tx.wait();
 
   console.log(`✓ Release executed`);
@@ -338,7 +376,7 @@ async function callRefund(vault, sig) {
   console.log(`✓ Calling refund()...\n`);
 
   const rAddr = sig.R_addr || sig.rAddr;
-  const tx = await vault.refund(rAddr, sig.z, sig.e, sig.msgHash);
+  const tx = await vault.refund(rAddr, sig.z, sig.e, sig.msgHash, sig.signerBitmap);
   const receipt = await tx.wait();
 
   console.log(`✓ Refund executed`);
@@ -367,7 +405,7 @@ async function callTimeoutRelease(vault, sig) {
   console.log(`✓ Calling timeoutRelease()...\n`);
 
   const rAddr = sig.R_addr || sig.rAddr;
-  const tx = await vault.timeoutRelease(rAddr, sig.z, sig.e, sig.msgHash);
+  const tx = await vault.timeoutRelease(rAddr, sig.z, sig.e, sig.msgHash, sig.signerBitmap);
   const receipt = await tx.wait();
 
   console.log(`✓ Timeout release executed`);
@@ -409,26 +447,30 @@ async function runSmokeTest(action) {
   const wallets = await createTestWallets(hre.ethers.provider, funder);
 
   // Determine signers for this action
-  const actionSigners = {
-    release: ['buyer', 'seller'],
-    refund: ['buyer', 'mediator'],
-    timeout: ['seller', 'mediator']
-  };
-
-  const signers = actionSigners[action];
+  const signers = ACTION_SIGNER_SETS[action];
+  if (!signers) {
+    throw new Error(`Unsupported action: ${action}`);
+  }
+  const mediatorRoles = ['mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
+  const signerBitmap = signerBitmapForRoles(signers);
 
   // Create context (escrowId will be set after EscrowCreatedEvent)
   const ctx = new SigningContext('', action, {
     buyer: wallets.buyer.address,
     seller: wallets.seller.address,
-    mediator: wallets.mediator.address
+    mediators: mediatorRoles.map((role) => wallets[role].address)
   }, {
     buyer: wallets.buyer.pubKey,
     seller: wallets.seller.pubKey,
-    mediator: wallets.mediator.pubKey
+    mediator1: wallets.mediator1.pubKey,
+    mediator2: wallets.mediator2.pubKey,
+    mediator3: wallets.mediator3.pubKey,
+    mediator4: wallets.mediator4.pubKey,
+    mediator5: wallets.mediator5.pubKey
   });
 
   ctx.signers = signers;
+  ctx.signerBitmap = signerBitmap;
 
   try {
     // 1. Load factory
@@ -436,23 +478,18 @@ async function runSmokeTest(action) {
     const Factory = await hre.ethers.getContractFactory('EscrowFactory');
     const factory = Factory.attach(factoryAddress);
 
-    // 2. Build local PKagg coordinates for vault creation
-    const pkAgg_bs = aggregatePubKeys(wallets.buyer.pubKey, wallets.seller.pubKey);
-    const pkAgg_bm = aggregatePubKeys(wallets.buyer.pubKey, wallets.mediator.pubKey);
-    const pkAgg_sm = aggregatePubKeys(wallets.seller.pubKey, wallets.mediator.pubKey);
+    // 2. Build local PKagg coordinates for vault creation from the active signer set
+    const pkAgg = aggregatePubKeys(signers.map((role) => wallets[role].pubKey));
 
     // 3. Create escrow vault from buyer wallet
     console.log(`🏗️  Creating EscrowVault...\n`);
 
-    const fullPkCoords = [
-      pkAgg_bs.x, pkAgg_bs.y,
-      pkAgg_bm.x, pkAgg_bm.y,
-      pkAgg_sm.x, pkAgg_sm.y
-    ];
+    const fullPkCoords = [pkAgg.x, pkAgg.y];
+    const mediatorAddresses = mediatorRoles.map((role) => wallets[role].address);
 
     const createTx = await factory.connect(wallets.buyer.signer).createEscrow(
       wallets.seller.address,
-      wallets.mediator.address,
+      mediatorAddresses,
       fullPkCoords,
       ethers.parseEther('0.1'),
       1, // confirmDays
@@ -490,6 +527,14 @@ async function runSmokeTest(action) {
     const vaultAddr = parsedEvent.args.escrowAddress || parsedEvent.args[0];
     const emittedEscrowId = parsedEvent.args.escrowId || parsedEvent.args[1];
     ctx.escrowId = emittedEscrowId;
+    ctx.contractAddress = vaultAddr;
+
+    const chainId = (await hre.ethers.provider.getNetwork()).chainId;
+    const id = ctx.escrowId.startsWith('0x') ? ctx.escrowId : ethers.id(ctx.escrowId);
+    ctx.msgHash = ethers.solidityPackedKeccak256(
+      ['uint256', 'address', 'bytes32', 'string', 'uint8'],
+      [chainId, ctx.contractAddress, id, ctx.action, ctx.signerBitmap]
+    );
 
     // 4. Initialize backend with the actual on-chain escrowId
     await backendInit(ctx, wallets);
@@ -502,7 +547,7 @@ async function runSmokeTest(action) {
     const amount = ethers.parseEther('0.1');
     await lockFunds(vault.connect(wallets.buyer.signer), wallets.buyer.signer, amount);
 
-    // 6. Backend round 1: Collect nonces from both signers
+    // 6. Backend round 1: Collect nonces from the action committee
     console.log(`🔄 Round 1: Collecting nonces from ${signers.join(' + ')}...\n`);
     for (const role of signers) {
       await backendNonce(ctx, wallets, role);

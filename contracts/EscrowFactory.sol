@@ -4,32 +4,48 @@ pragma solidity ^0.8.24;
 import "./EscrowVault.sol";
 
 contract EscrowFactory {
+    uint256 private constant FIELD_MODULUS = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F;
+
+    error ZeroAddress();
+    error ParticipantConflict();
+    error DuplicateMediator();
+    error InvalidAggregateKey();
+
     mapping(address => address[]) public escrowsByBuyer;
     mapping(address => address[]) public escrowsBySeller;
 
-    event EscrowCreatedEvent(address escrowAddress, bytes32 escrowId, address buyer, address seller);
+    event EscrowCreatedEvent(
+        address escrowAddress,
+        bytes32 escrowId,
+        address buyer,
+        address seller,
+        address[5] mediators
+    );
 
     function createEscrow(
         address seller,
-        address mediator,
-        uint256[6] calldata pkAggCoords,
+        address[5] calldata mediators,
+        uint256[2] calldata pkAggCoords,
         uint256 amount,
         uint256 confirmDays,
         uint256 timeoutDays
     ) external returns (address) {
         address buyer = msg.sender;
-        // Generate pseudo-random escrowId based on inputs and timestamp
+        _validateParticipants(buyer, seller, mediators);
+        _validateAggregateKey(pkAggCoords);
+
         bytes32 escrowId = keccak256(
             abi.encodePacked(
                 buyer,
                 seller,
                 block.timestamp,
+                mediators[0],
+                mediators[1],
+                mediators[2],
+                mediators[3],
+                mediators[4],
                 pkAggCoords[0],
-                pkAggCoords[1],
-                pkAggCoords[2],
-                pkAggCoords[3],
-                pkAggCoords[4],
-                pkAggCoords[5]
+                pkAggCoords[1]
             )
         );
 
@@ -37,7 +53,7 @@ contract EscrowFactory {
             escrowId,
             buyer,
             seller,
-            mediator,
+            mediators,
             pkAggCoords,
             amount,
             confirmDays,
@@ -49,8 +65,40 @@ contract EscrowFactory {
         escrowsByBuyer[buyer].push(vaultAddress);
         escrowsBySeller[seller].push(vaultAddress);
 
-        emit EscrowCreatedEvent(vaultAddress, escrowId, buyer, seller);
+        emit EscrowCreatedEvent(vaultAddress, escrowId, buyer, seller, mediators);
 
         return vaultAddress;
+    }
+
+    function _validateParticipants(
+        address buyer,
+        address seller,
+        address[5] calldata mediators
+    ) private pure {
+        if (buyer == address(0) || seller == address(0)) revert ZeroAddress();
+        if (buyer == seller) revert ParticipantConflict();
+
+        for (uint8 i = 0; i < 5; i++) {
+            address mediatorAddr = mediators[i];
+            if (mediatorAddr == address(0)) revert ZeroAddress();
+            if (mediatorAddr == buyer || mediatorAddr == seller) revert ParticipantConflict();
+
+            for (uint8 j = i + 1; j < 5; j++) {
+                if (mediatorAddr == mediators[j]) revert DuplicateMediator();
+            }
+        }
+    }
+
+    function _validateAggregateKey(uint256[2] calldata coords) private pure {
+        uint256 x = coords[0];
+        uint256 y = coords[1];
+        if (x == 0 || y == 0 || x >= FIELD_MODULUS || y >= FIELD_MODULUS) {
+            revert InvalidAggregateKey();
+        }
+
+        uint256 lhs = mulmod(y, y, FIELD_MODULUS);
+        uint256 x2 = mulmod(x, x, FIELD_MODULUS);
+        uint256 rhs = addmod(mulmod(x2, x, FIELD_MODULUS), 7, FIELD_MODULUS);
+        if (lhs != rhs) revert InvalidAggregateKey();
     }
 }

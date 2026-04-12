@@ -1,5 +1,6 @@
 import request from 'supertest';
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import { ethers } from 'ethers';
 import { jest } from '@jest/globals';
 
@@ -35,6 +36,7 @@ function buildSiweMessage(nonce) {
 
 function buildApp() {
   const app = express();
+  app.use(cookieParser());
   app.use(express.json());
   app.use('/api/auth', authRouter);
   return app;
@@ -90,7 +92,10 @@ describe('Auth Routes', () => {
     expect(verifyRes.statusCode).toBe(200);
     expect(verifyRes.body).toHaveProperty('token');
     expect(verifyRes.body).toHaveProperty('accessToken');
-    expect(verifyRes.body).toHaveProperty('refreshToken');
+    expect(verifyRes.body).not.toHaveProperty('refreshToken');
+    expect(verifyRes.headers['set-cookie']).toBeDefined();
+    expect(verifyRes.headers['set-cookie'][0]).toMatch(/refresh_token=/i);
+    expect(verifyRes.headers['set-cookie'][0]).toMatch(/HttpOnly/i);
     expect(verifyRes.body.user.walletAddress).toBe(address);
     expect(mockPrisma.authNonce.deleteMany).toHaveBeenCalledWith({
       where: {
@@ -174,12 +179,16 @@ describe('Auth Routes', () => {
 
     const res = await request(app)
       .post('/api/auth/refresh')
-      .send({ refreshToken: 'valid-refresh-token' });
+      .set('Cookie', ['refresh_token=valid-refresh-token'])
+      .send({});
 
     expect(res.statusCode).toBe(200);
     expect(res.body).toHaveProperty('token');
     expect(res.body).toHaveProperty('accessToken');
-    expect(res.body).toHaveProperty('refreshToken');
+    expect(res.body).not.toHaveProperty('refreshToken');
+    expect(res.headers['set-cookie']).toBeDefined();
+    expect(res.headers['set-cookie'][0]).toMatch(/refresh_token=/i);
+    expect(res.headers['set-cookie'][0]).toMatch(/HttpOnly/i);
     expect(mockPrisma.refreshToken.update).toHaveBeenCalledTimes(1);
     expect(mockPrisma.refreshToken.create).toHaveBeenCalledTimes(1);
   });
@@ -202,10 +211,13 @@ describe('Auth Routes', () => {
 
     const res = await request(app)
       .post('/api/auth/refresh')
-      .send({ refreshToken: 'expired-refresh-token' });
+      .set('Cookie', ['refresh_token=expired-refresh-token'])
+      .send({});
 
     expect(res.statusCode).toBe(401);
     expect(res.body.error).toMatch(/invalid or expired refresh token/i);
+    expect(res.headers['set-cookie']).toBeDefined();
+    expect(res.headers['set-cookie'][0]).toMatch(/refresh_token=/i);
     expect(mockPrisma.refreshToken.update).not.toHaveBeenCalled();
   });
 
@@ -214,10 +226,13 @@ describe('Auth Routes', () => {
 
     const res = await request(app)
       .post('/api/auth/logout')
-      .send({ refreshToken: 'refresh-token-to-revoke' });
+      .set('Cookie', ['refresh_token=refresh-token-to-revoke'])
+      .send({});
 
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ ok: true });
+    expect(res.headers['set-cookie']).toBeDefined();
+    expect(res.headers['set-cookie'][0]).toMatch(/refresh_token=/i);
     expect(mockPrisma.refreshToken.updateMany).toHaveBeenCalledTimes(1);
   });
 });

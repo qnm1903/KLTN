@@ -1,13 +1,13 @@
 // test/gas-benchmark.test.js
 //
 // Benchmark gas consumption cho EscrowVault (TSS) vs MultiSigEscrow (MultiSig)
-// Chạy N = 20 lần với keys ngẫu nhiên mỗi iteration để đảm bảo calldata bytes thực sự ngẫu nhiên.
+// Chạy N = 20 lần với key tổng hợp ngẫu nhiên mỗi iteration để đảm bảo calldata bytes thực sự ngẫu nhiên.
 //
 // Cách chạy:
 //   npx hardhat test test/gas-benchmark.test.js
 //
 // Kết quả ghi ra:
-//   gas_benchmark_results.json  (cùng thư mục với gas_results.json)
+//   gas_benchmark_results.json
 
 const { expect } = require("chai");
 const { time }   = require("@nomicfoundation/hardhat-toolbox/network-helpers");
@@ -37,7 +37,7 @@ function toPublicXY(privateKey) {
 
 /**
  * Tạo chữ ký Schnorr hợp lệ cho contract EscrowVault.
- * Đây là phiên bản "trusted dealer" (1 lane key) dùng cho testing.
+ * Đây là phiên bản "trusted dealer" (1 key tổng hợp) dùng cho testing.
  */
 function buildSchnorrSignature(privateKey, pkX, pkY, msgHash) {
   const nonce    = ethers.hexlify(ethers.randomBytes(32));
@@ -62,18 +62,26 @@ function buildSchnorrSignature(privateKey, pkX, pkY, msgHash) {
   };
 }
 
-function buildMsgHash(escrowId, action) {
-  const payload = ethers.solidityPacked(["bytes32", "string"], [escrowId, action]);
-  return ethers.keccak256(payload);
+async function buildMsgHash(vault, action, signerBitmap) {
+  const chainId = (await ethers.provider.getNetwork()).chainId;
+  const escrowId = await vault.escrowId();
+  return ethers.solidityPackedKeccak256(
+    ["uint256", "address", "bytes32", "string", "uint8"],
+    [chainId, await vault.getAddress(), escrowId, action, signerBitmap]
+  );
 }
 
 // ─── Thống kê ────────────────────────────────────────────────────────────────
 
 function calcStats(samples) {
   const n    = samples.length;
+  if (n === 0) {
+    throw new Error("calcStats received empty samples");
+  }
   const mean = samples.reduce((a, b) => a + b, 0) / n;
-  const variance =
-    samples.reduce((acc, v) => acc + (v - mean) ** 2, 0) / (n - 1);
+  const variance = n > 1
+    ? samples.reduce((acc, v) => acc + (v - mean) ** 2, 0) / (n - 1)
+    : 0;
   const stdDev = Math.sqrt(variance);
   const margin = 1.96 * (stdDev / Math.sqrt(n)); // 95% CI
   return {
@@ -92,18 +100,17 @@ function savingsPct(tssGas, multisigGas) {
 
 // ─── Deploy helpers ──────────────────────────────────────────────────────────
 
-async function deployFreshVault(buyer, seller, mediator, laneKeys) {
+async function deployFreshVault(buyer, seller, mediators, aggKey) {
   const Factory = await ethers.getContractFactory("EscrowFactory");
   const factory = await Factory.deploy();
   await factory.waitForDeployment();
 
   const tx = await factory.connect(buyer).createEscrow(
     seller.address,
-    mediator.address,
+    mediators,
     [
-      BigInt(laneKeys.release.x), BigInt(laneKeys.release.y),
-      BigInt(laneKeys.refund.x),  BigInt(laneKeys.refund.y),
-      BigInt(laneKeys.timeout.x), BigInt(laneKeys.timeout.y),
+      BigInt(aggKey.x),
+      BigInt(aggKey.y)
     ],
     AMOUNT,
     CONFIRM_DAYS,
@@ -118,14 +125,14 @@ async function deployFreshVault(buyer, seller, mediator, laneKeys) {
   return ethers.getContractAt("EscrowVault", vaultAddress);
 }
 
-async function deployFreshMultiSig(buyer, seller, mediator) {
+async function deployFreshMultiSig(buyer, seller, mediators) {
   const MultiSig = await ethers.getContractFactory("MultiSigEscrow");
   const escrowId = ethers.randomBytes(32);
   const ms = await MultiSig.deploy(
     escrowId,
     buyer.address,
     seller.address,
-    mediator.address,
+    mediators,
     AMOUNT,
     CONFIRM_DAYS,
     TIMEOUT_DAYS
@@ -134,14 +141,11 @@ async function deployFreshMultiSig(buyer, seller, mediator) {
   return ms;
 }
 
-function randomLaneKeys() {
-  const release = ethers.Wallet.createRandom();
-  const refund  = ethers.Wallet.createRandom();
-  const timeout = ethers.Wallet.createRandom();
+function randomAggKey() {
+  const wallet = ethers.Wallet.createRandom();
   return {
-    release: { pk: release.privateKey, ...toPublicXY(release.privateKey) },
-    refund:  { pk: refund.privateKey,  ...toPublicXY(refund.privateKey)  },
-    timeout: { pk: timeout.privateKey, ...toPublicXY(timeout.privateKey) },
+    pk: wallet.privateKey,
+    ...toPublicXY(wallet.privateKey)
   };
 }
 
@@ -155,14 +159,23 @@ const tss = {
   dispute:         [],
 };
 
-const ms = {
+const ms5of7 = {
   lockFunds:       [],
   signRelease_1:   [],
   signRelease_2:   [],
+  signRelease_3:   [],
+  signRelease_4:   [],
+  signRelease_5:   [],
   signRefund_1:    [],
   signRefund_2:    [],
+  signRefund_3:    [],
+  signRefund_4:    [],
+  signRefund_5:    [],
   signTimeout_1:   [],
   signTimeout_2:   [],
+  signTimeout_3:   [],
+  signTimeout_4:   [],
+  signTimeout_5:   [],
   dispute:         [],
 };
 
@@ -172,11 +185,24 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
   // Mỗi test có thể cần deploy + nhiều tx → tăng timeout lên cao
   this.timeout(600_000); // 10 phút
 
-  let owner, buyer, seller, mediator, buyer2, seller2, mediator2;
+  const BITMAP_RELEASE = 0x1f;
+  const BITMAP_REFUND = 0x3e;
+  const BITMAP_TIMEOUT = 0x3d;
+
+  let owner, buyer, seller, mediator, mediator2, mediator3, mediator4, mediator5;
+  let mediatorCommittee;
 
   before(async function () {
-    [owner, buyer, seller, mediator, buyer2, seller2, mediator2] =
+    [owner, buyer, seller, mediator, mediator2, mediator3, mediator4, mediator5] =
       await ethers.getSigners();
+
+    mediatorCommittee = [
+      mediator.address,
+      mediator2.address,
+      mediator3.address,
+      mediator4.address,
+      mediator5.address
+    ];
   });
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -189,8 +215,8 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
     describe(`lockFunds (${N} runs)`, function () {
       for (let i = 0; i < N; i++) {
         it(`run #${i + 1}`, async function () {
-          const laneKeys = randomLaneKeys();
-          const vault    = await deployFreshVault(buyer, seller, mediator, laneKeys);
+          const aggKey = randomAggKey();
+          const vault  = await deployFreshVault(buyer, seller, mediatorCommittee, aggKey);
 
           const tx      = await vault.connect(buyer).lockFunds({ value: AMOUNT });
           const receipt = await tx.wait();
@@ -203,17 +229,16 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
     describe(`release (${N} runs)`, function () {
       for (let i = 0; i < N; i++) {
         it(`run #${i + 1}`, async function () {
-          const laneKeys = randomLaneKeys();
-          const vault    = await deployFreshVault(buyer, seller, mediator, laneKeys);
+          const aggKey = randomAggKey();
+          const vault  = await deployFreshVault(buyer, seller, mediatorCommittee, aggKey);
           await vault.connect(buyer).lockFunds({ value: AMOUNT });
 
-          const escrowId = await vault.escrowId();
-          const msgHash  = buildMsgHash(escrowId, "release");
+          const msgHash  = await buildMsgHash(vault, "release", BITMAP_RELEASE);
           const sig      = buildSchnorrSignature(
-            laneKeys.release.pk, laneKeys.release.x, laneKeys.release.y, msgHash
+            aggKey.pk, aggKey.x, aggKey.y, msgHash
           );
 
-          const tx      = await vault.release(sig.R_addr, sig.z, sig.e, msgHash);
+          const tx      = await vault.release(sig.R_addr, sig.z, sig.e, msgHash, BITMAP_RELEASE);
           const receipt = await tx.wait();
           tss.release.push(Number(receipt.gasUsed));
         });
@@ -224,8 +249,8 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
     describe(`dispute (${N} runs)`, function () {
       for (let i = 0; i < N; i++) {
         it(`run #${i + 1}`, async function () {
-          const laneKeys = randomLaneKeys();
-          const vault    = await deployFreshVault(buyer, seller, mediator, laneKeys);
+          const aggKey = randomAggKey();
+          const vault  = await deployFreshVault(buyer, seller, mediatorCommittee, aggKey);
           await vault.connect(buyer).lockFunds({ value: AMOUNT });
 
           const tx      = await vault.connect(buyer).dispute();
@@ -239,18 +264,17 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
     describe(`refund (${N} runs)`, function () {
       for (let i = 0; i < N; i++) {
         it(`run #${i + 1}`, async function () {
-          const laneKeys = randomLaneKeys();
-          const vault    = await deployFreshVault(buyer, seller, mediator, laneKeys);
+          const aggKey = randomAggKey();
+          const vault  = await deployFreshVault(buyer, seller, mediatorCommittee, aggKey);
           await vault.connect(buyer).lockFunds({ value: AMOUNT });
           await vault.connect(buyer).dispute();
 
-          const escrowId = await vault.escrowId();
-          const msgHash  = buildMsgHash(escrowId, "refund");
+          const msgHash  = await buildMsgHash(vault, "refund", BITMAP_REFUND);
           const sig      = buildSchnorrSignature(
-            laneKeys.refund.pk, laneKeys.refund.x, laneKeys.refund.y, msgHash
+            aggKey.pk, aggKey.x, aggKey.y, msgHash
           );
 
-          const tx      = await vault.refund(sig.R_addr, sig.z, sig.e, msgHash);
+          const tx      = await vault.refund(sig.R_addr, sig.z, sig.e, msgHash, BITMAP_REFUND);
           const receipt = await tx.wait();
           tss.refund.push(Number(receipt.gasUsed));
         });
@@ -261,20 +285,19 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
     describe(`timeoutRelease (${N} runs)`, function () {
       for (let i = 0; i < N; i++) {
         it(`run #${i + 1}`, async function () {
-          const laneKeys = randomLaneKeys();
-          const vault    = await deployFreshVault(buyer, seller, mediator, laneKeys);
+          const aggKey = randomAggKey();
+          const vault  = await deployFreshVault(buyer, seller, mediatorCommittee, aggKey);
           await vault.connect(buyer).lockFunds({ value: AMOUNT });
 
           // Bỏ qua timeout deadline
           await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);
 
-          const escrowId = await vault.escrowId();
-          const msgHash  = buildMsgHash(escrowId, "timeout");
+          const msgHash  = await buildMsgHash(vault, "timeout", BITMAP_TIMEOUT);
           const sig      = buildSchnorrSignature(
-            laneKeys.timeout.pk, laneKeys.timeout.x, laneKeys.timeout.y, msgHash
+            aggKey.pk, aggKey.x, aggKey.y, msgHash
           );
 
-          const tx      = await vault.timeoutRelease(sig.R_addr, sig.z, sig.e, msgHash);
+          const tx      = await vault.timeoutRelease(sig.R_addr, sig.z, sig.e, msgHash, BITMAP_TIMEOUT);
           const receipt = await tx.wait();
           tss.timeoutRelease.push(Number(receipt.gasUsed));
         });
@@ -283,40 +306,38 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
   });
 
   // ══════════════════════════════════════════════════════════════════════════
-  //  PHẦN 2: MultiSig — MultiSigEscrow
+  //  PHẦN 2: MultiSig 5-of-7 — MultiSigEscrow (Upgraded)
   // ══════════════════════════════════════════════════════════════════════════
 
-  describe("MultiSig — MultiSigEscrow", function () {
+  describe("MultiSig 5-of-7 — MultiSigEscrow (Upgraded)", function () {
 
     // ── 2a. lockFunds ────────────────────────────────────────────────────────
     describe(`lockFunds (${N} runs)`, function () {
       for (let i = 0; i < N; i++) {
         it(`run #${i + 1}`, async function () {
-          const contract = await deployFreshMultiSig(buyer, seller, mediator);
+          const contract = await deployFreshMultiSig(buyer, seller, mediatorCommittee);
 
           const tx      = await contract.connect(buyer).lockFunds({ value: AMOUNT });
           const receipt = await tx.wait();
-          ms.lockFunds.push(Number(receipt.gasUsed));
+          ms5of7.lockFunds.push(Number(receipt.gasUsed));
         });
       }
     });
 
-    // ── 2b. signRelease (2 tx riêng biệt) ───────────────────────────────────
-    describe(`signRelease x2 (${N} runs)`, function () {
+    // ── 2b. signRelease (5 tx → ngưỡng 5-of-7) ──────────────────────────────
+    describe(`signRelease x5 (${N} runs)`, function () {
       for (let i = 0; i < N; i++) {
         it(`run #${i + 1}`, async function () {
-          const contract = await deployFreshMultiSig(buyer, seller, mediator);
+          const contract = await deployFreshMultiSig(buyer, seller, mediatorCommittee);
           await contract.connect(buyer).lockFunds({ value: AMOUNT });
 
-          // Chữ ký 1 (chưa đủ ngưỡng)
-          const tx1      = await contract.connect(buyer).signRelease();
-          const receipt1 = await tx1.wait();
-          ms.signRelease_1.push(Number(receipt1.gasUsed));
+          const signers = [buyer, seller, mediator, mediator2, mediator3];
 
-          // Chữ ký 2 (đủ ngưỡng → kích hoạt release)
-          const tx2      = await contract.connect(seller).signRelease();
-          const receipt2 = await tx2.wait();
-          ms.signRelease_2.push(Number(receipt2.gasUsed));
+          for (let j = 0; j < 5; j++) {
+            const tx      = await contract.connect(signers[j]).signRelease();
+            const receipt = await tx.wait();
+            ms5of7[`signRelease_${j + 1}`].push(Number(receipt.gasUsed));
+          }
         });
       }
     });
@@ -325,56 +346,52 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
     describe(`dispute (${N} runs)`, function () {
       for (let i = 0; i < N; i++) {
         it(`run #${i + 1}`, async function () {
-          const contract = await deployFreshMultiSig(buyer, seller, mediator);
+          const contract = await deployFreshMultiSig(buyer, seller, mediatorCommittee);
           await contract.connect(buyer).lockFunds({ value: AMOUNT });
 
           const tx      = await contract.connect(buyer).dispute();
           const receipt = await tx.wait();
-          ms.dispute.push(Number(receipt.gasUsed));
+          ms5of7.dispute.push(Number(receipt.gasUsed));
         });
       }
     });
 
-    // ── 2d. signRefund (2 tx riêng biệt, sau dispute) ───────────────────────
-    describe(`signRefund x2 (${N} runs)`, function () {
+    // ── 2d. signRefund (5 tx → ngưỡng 5-of-7, sau dispute) ──────────────────
+    describe(`signRefund x5 (${N} runs)`, function () {
       for (let i = 0; i < N; i++) {
         it(`run #${i + 1}`, async function () {
-          const contract = await deployFreshMultiSig(buyer, seller, mediator);
+          const contract = await deployFreshMultiSig(buyer, seller, mediatorCommittee);
           await contract.connect(buyer).lockFunds({ value: AMOUNT });
           await contract.connect(buyer).dispute();
 
-          // Chữ ký 1 (chưa đủ ngưỡng)
-          const tx1      = await contract.connect(buyer).signRefund();
-          const receipt1 = await tx1.wait();
-          ms.signRefund_1.push(Number(receipt1.gasUsed));
+          const signers = [buyer, seller, mediator, mediator2, mediator3];
 
-          // Chữ ký 2 (đủ ngưỡng → kích hoạt refund)
-          const tx2      = await contract.connect(mediator).signRefund();
-          const receipt2 = await tx2.wait();
-          ms.signRefund_2.push(Number(receipt2.gasUsed));
+          for (let j = 0; j < 5; j++) {
+            const tx      = await contract.connect(signers[j]).signRefund();
+            const receipt = await tx.wait();
+            ms5of7[`signRefund_${j + 1}`].push(Number(receipt.gasUsed));
+          }
         });
       }
     });
 
-    // ── 2e. signTimeout (2 tx, sau khi qua deadline) ─────────────────────────
-    describe(`signTimeout x2 (${N} runs)`, function () {
+    // ── 2e. signTimeout (5 tx → ngưỡng 5-of-7, sau deadline) ────────────────
+    describe(`signTimeout x5 (${N} runs)`, function () {
       for (let i = 0; i < N; i++) {
         it(`run #${i + 1}`, async function () {
-          const contract = await deployFreshMultiSig(buyer, seller, mediator);
+          const contract = await deployFreshMultiSig(buyer, seller, mediatorCommittee);
           await contract.connect(buyer).lockFunds({ value: AMOUNT });
 
           // Bỏ qua timeout deadline
           await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);
 
-          // Chữ ký 1 (seller — không phải buyer, theo contract logic)
-          const tx1      = await contract.connect(seller).signTimeout();
-          const receipt1 = await tx1.wait();
-          ms.signTimeout_1.push(Number(receipt1.gasUsed));
+          const signers = [seller, buyer, mediator, mediator2, mediator3];
 
-          // Chữ ký 2 (mediator → kích hoạt timeout release)
-          const tx2      = await contract.connect(mediator).signTimeout();
-          const receipt2 = await tx2.wait();
-          ms.signTimeout_2.push(Number(receipt2.gasUsed));
+          for (let j = 0; j < 5; j++) {
+            const tx      = await contract.connect(signers[j]).signTimeout();
+            const receipt = await tx.wait();
+            ms5of7[`signTimeout_${j + 1}`].push(Number(receipt.gasUsed));
+          }
         });
       }
     });
@@ -394,48 +411,65 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
       dispute:        calcStats(tss.dispute),
     };
 
-    const msStats = {
-      lockFunds:     calcStats(ms.lockFunds),
-      signRelease_1: calcStats(ms.signRelease_1),
-      signRelease_2: calcStats(ms.signRelease_2),
-      signRefund_1:  calcStats(ms.signRefund_1),
-      signRefund_2:  calcStats(ms.signRefund_2),
-      signTimeout_1: calcStats(ms.signTimeout_1),
-      signTimeout_2: calcStats(ms.signTimeout_2),
-      dispute:       calcStats(ms.dispute),
+    const ms5of7Stats = {
+      lockFunds:     calcStats(ms5of7.lockFunds),
+      signRelease_1: calcStats(ms5of7.signRelease_1),
+      signRelease_2: calcStats(ms5of7.signRelease_2),
+      signRelease_3: calcStats(ms5of7.signRelease_3),
+      signRelease_4: calcStats(ms5of7.signRelease_4),
+      signRelease_5: calcStats(ms5of7.signRelease_5),
+      signRefund_1:  calcStats(ms5of7.signRefund_1),
+      signRefund_2:  calcStats(ms5of7.signRefund_2),
+      signRefund_3:  calcStats(ms5of7.signRefund_3),
+      signRefund_4:  calcStats(ms5of7.signRefund_4),
+      signRefund_5:  calcStats(ms5of7.signRefund_5),
+      signTimeout_1: calcStats(ms5of7.signTimeout_1),
+      signTimeout_2: calcStats(ms5of7.signTimeout_2),
+      signTimeout_3: calcStats(ms5of7.signTimeout_3),
+      signTimeout_4: calcStats(ms5of7.signTimeout_4),
+      signTimeout_5: calcStats(ms5of7.signTimeout_5),
+      dispute:       calcStats(ms5of7.dispute),
     };
 
     // ── Tính gas theo kịch bản (không tính deploy) ─────────────────────────
     // Happy Path
     const tss_happy    = tssStats.lockFunds.mean + tssStats.release.mean;
-    const ms_happy     = msStats.lockFunds.mean  + msStats.signRelease_1.mean + msStats.signRelease_2.mean;
+    const ms5of7_happy = ms5of7Stats.lockFunds.mean + 
+                         ms5of7Stats.signRelease_1.mean + ms5of7Stats.signRelease_2.mean +
+                         ms5of7Stats.signRelease_3.mean + ms5of7Stats.signRelease_4.mean +
+                         ms5of7Stats.signRelease_5.mean;
 
     // Dispute + Refund
     const tss_dispute  = tssStats.lockFunds.mean + tssStats.dispute.mean + tssStats.refund.mean;
-    const ms_dispute   = msStats.lockFunds.mean  + msStats.dispute.mean  + msStats.signRefund_1.mean + msStats.signRefund_2.mean;
+    const ms5of7_dispute = ms5of7Stats.lockFunds.mean + ms5of7Stats.dispute.mean +
+                           ms5of7Stats.signRefund_1.mean + ms5of7Stats.signRefund_2.mean +
+                           ms5of7Stats.signRefund_3.mean + ms5of7Stats.signRefund_4.mean +
+                           ms5of7Stats.signRefund_5.mean;
 
     // Timeout
     const tss_timeout  = tssStats.lockFunds.mean + tssStats.timeoutRelease.mean;
-    const ms_timeout   = msStats.lockFunds.mean  + msStats.signTimeout_1.mean + msStats.signTimeout_2.mean;
+    const ms5of7_timeout = ms5of7Stats.lockFunds.mean + ms5of7Stats.signTimeout_1.mean +
+                           ms5of7Stats.signTimeout_2.mean + ms5of7Stats.signTimeout_3.mean +
+                           ms5of7Stats.signTimeout_4.mean + ms5of7Stats.signTimeout_5.mean;
 
     const scenarios = {
       happy_path: {
-        tss_mean:     tss_happy,
-        multisig_mean: ms_happy,
-        savings_gas:  ms_happy - tss_happy,
-        savings_pct:  parseFloat(savingsPct(tss_happy, ms_happy)),
+        tss_mean:      tss_happy,
+        multisig_5of7: ms5of7_happy,
+        savings_gas: ms5of7_happy - tss_happy,
+        savings_pct: parseFloat(savingsPct(tss_happy, ms5of7_happy)),
       },
       dispute_refund: {
-        tss_mean:     tss_dispute,
-        multisig_mean: ms_dispute,
-        savings_gas:  ms_dispute - tss_dispute,
-        savings_pct:  parseFloat(savingsPct(tss_dispute, ms_dispute)),
+        tss_mean:      tss_dispute,
+        multisig_5of7: ms5of7_dispute,
+        savings_gas: ms5of7_dispute - tss_dispute,
+        savings_pct: parseFloat(savingsPct(tss_dispute, ms5of7_dispute)),
       },
       timeout: {
-        tss_mean:     tss_timeout,
-        multisig_mean: ms_timeout,
-        savings_gas:  ms_timeout - tss_timeout,
-        savings_pct:  parseFloat(savingsPct(tss_timeout, ms_timeout)),
+        tss_mean:      tss_timeout,
+        multisig_5of7: ms5of7_timeout,
+        savings_gas: ms5of7_timeout - tss_timeout,
+        savings_pct: parseFloat(savingsPct(tss_timeout, ms5of7_timeout)),
       },
     };
 
@@ -473,7 +507,7 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
       );
     }
 
-    console.log("\n📊 MultiSig — MultiSigEscrow (gas per function call)");
+    console.log("\n📊 MultiSig 5-of-7 — MultiSigEscrow (Upgraded) (gas per function call)");
     console.log(SEP);
     console.log(
       "  Function".padEnd(22) +
@@ -481,7 +515,7 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
       "StdDev".padStart(10) + "  95% CI"
     );
     console.log(SEP);
-    for (const [fn, s] of Object.entries(msStats)) {
+    for (const [fn, s] of Object.entries(ms5of7Stats)) {
       console.log(
         `  ${fn}`.padEnd(22) +
         String(s.mean).padStart(10) +
@@ -493,27 +527,26 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
     }
 
     // --- Scenario comparison ---
-    console.log("\n🔥 Scenario Comparison (gas, không tính deploy)");
-    console.log(SEP);
-    console.log(
-      "  Kịch bản".padEnd(22) +
-      "TSS (gas)".padStart(14) +
-      "MultiSig (gas)".padStart(16) +
-      "Tiết kiệm (gas)".padStart(18) +
-      "Tiết kiệm (%)".padStart(15)
-    );
-    console.log(SEP);
-
     const scenarioLabels = {
       happy_path:     "Happy Path",
       dispute_refund: "Dispute+Refund",
       timeout:        "Timeout",
     };
+    console.log("\n🔥 Scenario Comparison — TSS vs MultiSig 5-of-7 (gas, không tính deploy)");
+    console.log(SEP);
+    console.log(
+      "  Kịch bản".padEnd(22) +
+      "TSS (gas)".padStart(14) +
+      "MultiSig 5-of-7".padStart(16) +
+      "Tiết kiệm (gas)".padStart(18) +
+      "Tiết kiệm (%)".padStart(15)
+    );
+    console.log(SEP);
     for (const [key, sc] of Object.entries(scenarios)) {
       console.log(
         `  ${scenarioLabels[key]}`.padEnd(22) +
         String(sc.tss_mean).padStart(14) +
-        String(sc.multisig_mean).padStart(16) +
+        String(sc.multisig_5of7).padStart(16) +
         String(sc.savings_gas).padStart(18) +
         `${sc.savings_pct}%`.padStart(15)
       );
@@ -540,15 +573,15 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
         N,
         network:   "hardhat",
         timestamp: new Date().toISOString(),
-        note:      "Gas = receipt.gasUsed từ Hardhat local network. N lần với random lane keys.",
+        note:      "Gas = receipt.gasUsed từ Hardhat local network. N lần với random aggregate keys.",
       },
-      tss:      tssStats,
-      multisig: msStats,
+      tss:          tssStats,
+      multisig_5of7: ms5of7Stats,
       scenarios,
       summary: {
         avg_savings_pct:  parseFloat(avgSavings),
         conclusion:
-          `TSS tiết kiệm trung bình ${avgSavings}% gas on-chain so với MultiSig 2-of-3 ` +
+          `TSS tiết kiệm trung bình ${avgSavings}% gas so với MultiSig 5-of-7 ` +
           `(N=${N}, Hardhat local). Variance calldata < 0.1% của mean → kết quả ổn định.`,
       },
     };

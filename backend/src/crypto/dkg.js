@@ -104,7 +104,7 @@ export function syncPubKeyCollectionState(session, now = Date.now()) {
   }
 
   const summary = getPubKeyCollectionSummary(session, now);
-  session.pubkeyCollectionState = summary.state;
+  session.pubKeyCollectionState = summary.state;
   if (!session.pubKeyCollectionDueAt) {
     session.pubKeyCollectionDueAt = summary.dueAt;
   }
@@ -184,9 +184,9 @@ export function initDKG(
     signingBitmap: null,
     completedActions: [],
     createdAt,
-    pubkeyCollectionState: 'COMPLETE',
+    pubKeyCollectionState: 'COMPLETE',
     pubKeyCollectionDueAt: createdAt + SESSION_TTL_MS,
-    pubkeyAggregationCompletedAt: createdAt,
+    pubKeyAggregationCompletedAt: createdAt,
     status: 'INITIALIZED'
   };
 
@@ -222,9 +222,9 @@ export function initIncrementalDKG(
     signingBitmap: null,
     completedActions: [],
     createdAt,
-    pubkeyCollectionState: 'PENDING',
+    pubKeyCollectionState: 'PENDING',
     pubKeyCollectionDueAt: dueAt,
-    pubkeyAggregationCompletedAt: null,
+    pubKeyAggregationCompletedAt: null,
     precomputedPkAgg: null,
     status: 'INITIALIZED'
   };

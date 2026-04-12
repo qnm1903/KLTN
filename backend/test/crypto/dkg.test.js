@@ -79,7 +79,7 @@ describe('DKG Crypto Functions', () => {
     expect(summary.required).toBe(7);
     expect(summary.received).toBe(0);
     expect(summary.complete).toBe(false);
-    expect(session.pubkeyAggregationCompletedAt).toBeNull();
+    expect(session.pubKeyAggregationCompletedAt).toBeNull();
   });
 
   it('aggregates only when all 7 pubkeys are collected', () => {

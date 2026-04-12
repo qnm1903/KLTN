@@ -97,7 +97,7 @@ export default function Home() {
             <div 
               key={escrow.id} 
               onClick={() => navigate(`/escrow/${escrow.id}`)}
-              className="bg-[#1E293B]/50 border border-white/10 rounded-2xl p-6 cursor-pointer hover:border-primary/50 hover:shadow-[0_0_20px_rgba(30,58,138,0.2)] transition-all group"
+              className="bg-surface/50 border border-white/10 rounded-2xl p-6 cursor-pointer hover:border-primary/50 hover:shadow-[0_0_20px_rgba(30,58,138,0.2)] transition-all group"
             >
               <div className="flex justify-between items-start mb-4">
                 <h3 className="text-lg font-bold text-white group-hover:text-primary transition-colors line-clamp-1">{escrow.title}</h3>

@@ -6,7 +6,7 @@ import {
   addSystemLogAtom,
   escrowStatusAtom
 } from './escrowStore';
-import socket from '../../lib/socket'; // Đảm bảo import đúng đường dẫn file socket của bạn
+import {socket} from '../../lib/socket'; 
 
 /**
  * Custom Hook xử lý đồng bộ Socket.io và Optimistic UI Updates
@@ -17,11 +17,11 @@ export const useEscrowSync = (escrowId) => {
   const setStatus = useSetAtom(escrowStatusAtom);
   const addLog = useSetAtom(addSystemLogAtom);
 
-  // Lắng nghe các sự kiện từ Relayer (Server)
+  // Lắng nghe các sự kiện từ Relayer 
   useEffect(() => {
     if (!escrowId) return;
 
-    // Join vào room riêng của giao dịch này
+    // Join vào room riêng của giao dịch
     socket.emit('join_escrow', escrowId);
     addLog({ message: `Joined secure room for Escrow #${escrowId}`, type: 'success' });
 

@@ -1,19 +1,24 @@
-/* 1. Đặt các lệnh @import ở vị trí trên cùng của file */
+/* 1. Import Fonts & Tailwind */
 @import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;700&family=Orbitron:wght@400;700;900&display=swap');
 @import "tailwindcss";
 
-/* 2. Định nghĩa Theme Tailwind */
+/* 2. Định nghĩa Theme Tailwind (Đồng bộ 100% với Figma Design System) */
 @theme {
-  --color-darkBg: #0F172A;
-  --color-primary: #1E3A8A;
-  --color-accent: #CA8A04;
+  --color-background: #0F172A; /* Nền tổng của DApp */
+  --color-surface: #1E293B;    /* Nền của Card/Form */
+  --color-primary: #3B82F6;    /* Nút bấm / Hành động chính */
+  --color-success: #10B981;    /* Trạng thái thành công / Đã ký */
+  --color-danger: #EF4444;     /* Lỗi / Từ chối (Bổ sung thêm) */
+  --color-text-primary: #F8FAFC; /* Màu chữ chính */
   
   --font-orbitron: "Orbitron", sans-serif;
   --font-exo: "Exo 2", sans-serif;
 }
 
-/* 3. Các CSS tùy chỉnh khác */
+/* 3. Global Styles cơ bản */
 body {
-  background-color: var(--color-darkBg);
-  color: white;
+  background-color: var(--color-background);
+  color: var(--color-text-primary);
+  /* Chống bôi đen text ở các UI tĩnh để giống App thực thụ */
+  -webkit-font-smoothing: antialiased;
 }

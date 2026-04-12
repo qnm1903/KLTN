@@ -23,4 +23,26 @@ api.interceptors.request.use((config) => {
   throw error;
 });
 
+// Interceptor 2: Xử lý Response trả về từ Server
+api.interceptors.response.use(
+  (response) => {
+    // Nếu API gọi thành công, trả về data bình thường
+    return response;
+  },
+  (error) => {
+    // Xử lý bảo mật: Nếu Server báo lỗi 401 (Token hết hạn / Không hợp lệ)
+    if (error.response && error.response.status === 401) {
+      console.warn('Phiên đăng nhập đã hết hạn. Vui lòng ký lại SIWE.');
+      
+      // Xóa token cũ để dọn dẹp state
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('jwt_token');
+        // Tùy chọn nâng cao: Có thể emit một event để Jotai biết và reset state kết nối
+        window.dispatchEvent(new Event('session_expired'));
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 export default api;

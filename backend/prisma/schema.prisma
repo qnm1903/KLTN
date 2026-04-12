@@ -60,10 +60,11 @@ model Escrow {
   pkAggSmX String?
   pkAggSmY String?
 
-  evidences      Evidence[]
-  statusHistory  EscrowStatusHistory[]
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  evidences          Evidence[]
+  statusHistory      EscrowStatusHistory[]
+  pubKeySubmissions  PubKeySubmission[]
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
 
   // Indices for cron job queries
   @@index([status, timeoutDeadline])
@@ -174,4 +175,18 @@ model SigningSession {
   updatedAt DateTime @updatedAt
 
   @@index([status, expiresAt])
+}
+
+model PubKeySubmission {
+  id          String   @id @default(uuid())
+  escrowId    String
+  role        String   // BUYER | SELLER | MEDIATOR
+  pubKey      String
+  submittedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  escrow Escrow @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+
+  @@unique([escrowId, role])
+  @@index([escrowId])
 }

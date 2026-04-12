@@ -156,6 +156,10 @@ export function setupSockets(server) {
 }
 
 // Events broadcast qua io.to(escrowId).emit() từ routes/escrow.js:
+//   'pubkey_received'           — { escrowId, role, received, required, missingRoles }
+//   'pubkey_rejected'           — { escrowId, role, reason }
+//   'pubkey_collection_complete'— { escrowId, received, required, completedAt }
+//   'pubkey_collection_expired' — { escrowId, dueAt, expiredAt }
 //   'nonce_received'   — { count, needed }  khi nhận được 1 nonce
 //   'nonce_collected'  — { R_addr, challenge, msgHash, pkAgg }  khi đủ 2 nonces
 //   'z_received'       — { count, needed }  khi nhận được 1 z share

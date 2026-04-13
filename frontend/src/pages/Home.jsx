@@ -1,25 +1,49 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConnection } from 'wagmi';
+import { useAtomValue } from 'jotai';
 import api from '../lib/api';
+import { authAtom, getStoredAccessToken } from '../store/authStore';
 
 export default function Home() {
   const navigate = useNavigate();
   const { address, isConnected } = useConnection();
+  const auth = useAtomValue(authAtom);
   
   // State quản lý danh sách Escrow khi đã đăng nhập
   const [escrows, setEscrows] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
 
+  const resolveRoleParam = (escrow) => {
+    const normalizedAddress = String(address || '').toLowerCase();
+    if (!normalizedAddress) return null;
+
+    if (escrow?.buyer?.walletAddress?.toLowerCase() === normalizedAddress) return 'buyer';
+    if (escrow?.seller?.walletAddress?.toLowerCase() === normalizedAddress) return 'seller';
+
+    const mediatorRow = (escrow?.escrowMediators || []).find(
+      (row) => row?.mediator?.walletAddress?.toLowerCase() === normalizedAddress
+    );
+
+    if (mediatorRow?.slot) {
+      return `mediator${mediatorRow.slot}`;
+    }
+
+    return null;
+  };
+
   // Fetch danh sách Escrow từ Backend khi ví đã kết nối
   useEffect(() => {
     const fetchEscrows = async () => {
       if (!address) return;
+
+      const token = getStoredAccessToken();
+      if (!token) return;
+
       setIsLoading(true);
       try {
-        // Gọi API lấy danh sách đơn hàng liên quan đến ví hiện tại
-        const { data } = await api.get(`/escrows?address=${address}`);
-        setEscrows(data.escrows || []);
+        const { data } = await api.get('/escrows');
+        setEscrows(Array.isArray(data) ? data : []);
       } catch (error) {
         console.error("Failed to fetch escrows:", error);
       } finally {
@@ -30,7 +54,7 @@ export default function Home() {
     if (isConnected) {
       fetchEscrows();
     }
-  }, [address, isConnected]);
+  }, [address, isConnected, auth?.isAuthenticated]);
 
   // TRẠNG THÁI 1: CHƯA KẾT NỐI VÍ (Hiển thị Landing Page)
   if (!isConnected) {
@@ -96,7 +120,11 @@ export default function Home() {
           {escrows.map((escrow) => (
             <div 
               key={escrow.id} 
-              onClick={() => navigate(`/escrow/${escrow.id}`)}
+              onClick={() => {
+                const roleParam = resolveRoleParam(escrow);
+                const query = roleParam ? `?role=${roleParam}` : '';
+                navigate(`/escrow/${escrow.id}${query}`);
+              }}
               className="bg-surface/50 border border-white/10 rounded-2xl p-6 cursor-pointer hover:border-primary/50 hover:shadow-[0_0_20px_rgba(30,58,138,0.2)] transition-all group"
             >
               <div className="flex justify-between items-start mb-4">
@@ -113,8 +141,8 @@ export default function Home() {
                 <div className="flex justify-between">
                   <span>Role:</span>
                   <span className="text-accent">
-                    {escrow.buyerAddr?.toLowerCase() === address?.toLowerCase() ? 'BUYER' : 
-                     escrow.sellerAddr?.toLowerCase() === address?.toLowerCase() ? 'SELLER' : 'MEDIATOR'}
+                    {escrow.buyer?.walletAddress?.toLowerCase() === address?.toLowerCase() ? 'BUYER' : 
+                     escrow.seller?.walletAddress?.toLowerCase() === address?.toLowerCase() ? 'SELLER' : 'MEDIATOR'}
                   </span>
                 </div>
               </div>

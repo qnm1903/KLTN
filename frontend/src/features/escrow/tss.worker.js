@@ -15,52 +15,54 @@ const simulateHeavyECC = (complexity = 10000000) => {
 
 // Lắng nghe thông điệp từ Main Thread (React)
 self.onmessage = async (event) => {
-  const { action, payload, taskId } = event.data;
+  const { action, taskId } = event.data;
 
   try {
     switch (action) {
-      case 'INIT_DKG':
+      case 'INIT_DKG': {
         // Giai đoạn 1: Distributed Key Generation (Tạo khóa phân tán)
         self.postMessage({ taskId, status: 'computing', log: 'Starting ECC Key Generation...' });
-        
+
         // Giả lập tính toán nặng mất khoảng 2-3 giây
-        simulateHeavyECC(30000000); 
-        
+        simulateHeavyECC(30000000);
+
         const mockPkAggCoords = "0x" + Math.random().toString(16).slice(2, 66); // Fake 32-byte hex
-        
-        self.postMessage({ 
-          taskId, 
-          status: 'success', 
+
+        self.postMessage({
+          taskId,
+          status: 'success',
           result: { pkAggCoords: mockPkAggCoords },
-          log: 'DKG Completed successfully.' 
+          log: 'DKG Completed successfully.'
         });
         break;
+      }
 
-      case 'GENERATE_SIGNATURE_SHARE':
+      case 'GENERATE_SIGNATURE_SHARE': {
         // Giai đoạn 2: Tạo mảnh chữ ký (Signature Share)
         self.postMessage({ taskId, status: 'computing', log: 'Calculating Schnorr signature share...' });
-        
+
         simulateHeavyECC(15000000); // Tính toán nhẹ hơn DKG một chút
-        
+
         const mockSignatureShare = "0x" + Math.random().toString(16).slice(2, 66);
-        
-        self.postMessage({ 
-          taskId, 
-          status: 'success', 
+
+        self.postMessage({
+          taskId,
+          status: 'success',
           result: { signatureShare: mockSignatureShare },
-          log: 'Signature share generated.' 
+          log: 'Signature share generated.'
         });
         break;
+      }
 
       default:
         throw new Error('Unknown action specified for TSS Worker');
     }
   } catch (error) {
-    self.postMessage({ 
-      taskId, 
-      status: 'error', 
+    self.postMessage({
+      taskId,
+      status: 'error',
       error: error.message,
-      log: `Error: ${error.message}` 
+      log: `Error: ${error.message}`
     });
   }
 };

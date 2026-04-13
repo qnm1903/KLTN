@@ -25,13 +25,16 @@ export const escrowErrorAtom = atom(null);
 export const addSystemLogAtom = atom(
   null,
   (get, set, newLog) => {
+    if (!newLog || typeof newLog.message !== 'string') {
+      console.warn('addSystemLogAtom: invalid log entry', newLog);
+      return;
+    }
     const currentLogs = get(systemLogsAtom);
     const logEntry = {
       time: new Date().toLocaleTimeString(),
       message: newLog.message,
       type: newLog.type || 'info' // 'info', 'success', 'warning', 'error'
-    };
-    // Giữ lại tối đa 50 dòng log gần nhất để tránh tràn bộ nhớ
+    };    // Giữ lại tối đa 50 dòng log gần nhất để tránh tràn bộ nhớ
     set(systemLogsAtom, [...currentLogs, logEntry].slice(-50));
   }
 );

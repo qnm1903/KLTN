@@ -14,7 +14,7 @@ CREATE TABLE "EscrowStatusHistory" (
     "fromStatus" TEXT NOT NULL,
     "toStatus" TEXT NOT NULL,
     "reason" TEXT,
-    "metadata" TEXT, //SQLite
+    "metadata" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "EscrowStatusHistory_escrowId_fkey" FOREIGN KEY ("escrowId") REFERENCES "Escrow" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "EscrowStatusHistory_actorUserId_fkey" FOREIGN KEY ("actorUserId") REFERENCES "User" ("id") ON DELETE SET NULL ON UPDATE CASCADE

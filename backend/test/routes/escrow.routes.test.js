@@ -1,4 +1,5 @@
 import request from 'supertest';
+import jwt from 'jsonwebtoken';
 import { ethers } from 'ethers';
 import app from '../../src/app.js';
 import { clearSessions, saveSession } from '../../src/store/session.js';
@@ -12,6 +13,25 @@ function buildParty() {
     priv: wallet.privateKey,
     pub: ethers.SigningKey.computePublicKey(wallet.privateKey, false)
   };
+}
+
+function authHeaderForParty(party) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error('JWT_SECRET must be set for auth-protected escrow route tests');
+  }
+
+  const token = jwt.sign(
+    {
+      id: party.addr.toLowerCase(),
+      walletAddress: party.addr.toLowerCase(),
+      role: 'USER'
+    },
+    secret,
+    { expiresIn: '1h' }
+  );
+
+  return { Authorization: `Bearer ${token}` };
 }
 
 describe('Escrow Routes Integration', () => {
@@ -173,6 +193,7 @@ describe('Escrow Routes Integration', () => {
 
     const res = await request(app)
       .post('/api/escrow/nonce')
+      .set(authHeaderForParty(mediator5))
       .send({
         escrowId,
         role: 'mediator5',
@@ -194,6 +215,7 @@ describe('Escrow Routes Integration', () => {
 
     const first = await request(app)
       .post('/api/escrow/nonce')
+      .set(authHeaderForParty(buyer))
       .send({
         escrowId,
         role: 'buyer',
@@ -207,6 +229,7 @@ describe('Escrow Routes Integration', () => {
 
     const second = await request(app)
       .post('/api/escrow/nonce')
+      .set(authHeaderForParty(buyer))
       .send({
         escrowId,
         role: 'buyer',
@@ -225,6 +248,7 @@ describe('Escrow Routes Integration', () => {
 
     const res = await request(app)
       .post('/api/escrow/sign')
+      .set(authHeaderForParty(buyer))
       .send({
         escrowId,
         role: 'buyer',
@@ -258,6 +282,7 @@ describe('Escrow Routes Integration', () => {
     for (let index = 0; index < round1.length; index++) {
       const nonceResponse = await request(app)
         .post('/api/escrow/nonce')
+        .set(authHeaderForParty(round1[index].party))
         .send({
           escrowId,
           role: round1[index].role,
@@ -282,6 +307,7 @@ describe('Escrow Routes Integration', () => {
       const z = computeSignatureShare(round1[index].party.priv, round1[index].nonce, challenge).z;
       const signResponse = await request(app)
         .post('/api/escrow/sign')
+        .set(authHeaderForParty(round1[index].party))
         .send({
           escrowId,
           role: round1[index].role,
@@ -315,18 +341,19 @@ describe('Escrow Routes Integration', () => {
     await initIncrementalSession(incrementalEscrowId);
 
     const submissions = [
-      { role: 'buyer', pubKey: buyer.pub },
-      { role: 'seller', pubKey: seller.pub },
-      { role: 'mediator1', pubKey: mediator1.pub },
-      { role: 'mediator2', pubKey: mediator2.pub },
-      { role: 'mediator3', pubKey: mediator3.pub },
-      { role: 'mediator4', pubKey: mediator4.pub },
-      { role: 'mediator5', pubKey: mediator5.pub }
+      { role: 'buyer', party: buyer, pubKey: buyer.pub },
+      { role: 'seller', party: seller, pubKey: seller.pub },
+      { role: 'mediator1', party: mediator1, pubKey: mediator1.pub },
+      { role: 'mediator2', party: mediator2, pubKey: mediator2.pub },
+      { role: 'mediator3', party: mediator3, pubKey: mediator3.pub },
+      { role: 'mediator4', party: mediator4, pubKey: mediator4.pub },
+      { role: 'mediator5', party: mediator5, pubKey: mediator5.pub }
     ];
 
     for (let index = 0; index < submissions.length; index++) {
       const response = await request(app)
         .post('/api/escrow/pubkey/submit')
+        .set(authHeaderForParty(submissions[index].party))
         .send({
           escrowId: incrementalEscrowId,
           role: submissions[index].role,
@@ -357,12 +384,14 @@ describe('Escrow Routes Integration', () => {
 
     const first = await request(app)
       .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
       .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: buyer.pub });
     expect(first.statusCode).toBe(200);
     expect(first.body.isIdempotent).toBe(false);
 
     const duplicate = await request(app)
       .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
       .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: buyer.pub });
     expect(duplicate.statusCode).toBe(200);
     expect(duplicate.body.isIdempotent).toBe(true);
@@ -376,11 +405,13 @@ describe('Escrow Routes Integration', () => {
 
     const first = await request(app)
       .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
       .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: buyer.pub });
     expect(first.statusCode).toBe(200);
 
     const conflict = await request(app)
       .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
       .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: anotherBuyer.pub });
     expect(conflict.statusCode).toBe(409);
     expect(conflict.body.error).toMatch(/already submitted a different pubkey/i);
@@ -392,6 +423,7 @@ describe('Escrow Routes Integration', () => {
 
     const mismatch = await request(app)
       .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(seller))
       .send({ escrowId: incrementalEscrowId, role: 'seller', pubKey: buyer.pub });
 
     expect(mismatch.statusCode).toBe(400);
@@ -404,6 +436,7 @@ describe('Escrow Routes Integration', () => {
 
     const expired = await request(app)
       .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
       .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: buyer.pub });
 
     expect(expired.statusCode).toBe(410);
@@ -417,6 +450,7 @@ describe('Escrow Routes Integration', () => {
 
     await request(app)
       .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
       .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: buyer.pub });
 
     const nonce = ethers.hexlify(ethers.randomBytes(32));
@@ -424,6 +458,7 @@ describe('Escrow Routes Integration', () => {
 
     const res = await request(app)
       .post('/api/escrow/nonce')
+      .set(authHeaderForParty(buyer))
       .send({
         escrowId: incrementalEscrowId,
         role: 'buyer',

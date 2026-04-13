@@ -53,17 +53,17 @@ function normalizeSession(session, fallbackCreatedAt = Date.now()) {
 		completedActions: Array.isArray(session.completedActions) ? session.completedActions : [],
 		signingRoles: Array.isArray(session.signingRoles) ? session.signingRoles : session.signingRoles || null,
 		signingAction: session.signingAction || null,
-		pubkeyCollectionState: session.pubkeyCollectionState || null,
+		pubKeyCollectionState: session.pubKeyCollectionState || session.pubkeyCollectionState || null,
 		pubKeyCollectionDueAt: Number(session.pubKeyCollectionDueAt || (createdAt + SESSION_TTL_MS)),
-		pubkeyAggregationCompletedAt: session.pubkeyAggregationCompletedAt || null,
+		pubKeyAggregationCompletedAt: session.pubKeyAggregationCompletedAt || session.pubkeyAggregationCompletedAt || null,
 		precomputedPkAgg: session.precomputedPkAgg || null,
 		round2Context: session.round2Context || null,
 		status: session.status || 'INITIALIZED'
 	};
 
 	const summary = syncPubKeyCollectionState(normalized);
-	if (summary.complete && !normalized.pubkeyAggregationCompletedAt) {
-		normalized.pubkeyAggregationCompletedAt = createdAt;
+	if (summary.complete && !normalized.pubKeyAggregationCompletedAt) {
+		normalized.pubKeyAggregationCompletedAt = createdAt;
 	}
 
 	return normalized;

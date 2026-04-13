@@ -6,7 +6,7 @@ import { getSession, saveSession } from '../../lib/storage';
 /**
  * Custom Hook Auto-save và Rehydration tiến trình
  */
-export const useSessionRecovery = (escrowId) => {
+export const useSessionRecovery = (escrowId, walletAddress) => {
   // Cờ báo hiệu quá trình khôi phục đang diễn ra để khóa UI tạm thời
   const [isRecovering, setIsRecovering] = useState(true);
   
@@ -18,9 +18,12 @@ export const useSessionRecovery = (escrowId) => {
   // 1. Giai đoạn Rehydration 
   useEffect(() => {
     const recoverData = async () => {
-      if (!escrowId) return;
+      if (!escrowId || !walletAddress) {
+        setIsRecovering(false);
+        return;
+      }
       
-      const savedSession = await getSession(escrowId);
+      const savedSession = await getSession(escrowId, walletAddress);
       
       if (savedSession) {
         setStatus(savedSession.status);
@@ -37,13 +40,13 @@ export const useSessionRecovery = (escrowId) => {
     };
 
     recoverData();
-  }, [escrowId, setStatus, setProgress, setSignedNodes, addLog]);
+  }, [escrowId, walletAddress, setStatus, setProgress, setSignedNodes, addLog]);
 
   // 2. Giai đoạn Auto-save (Chụp Snapshot)
   // Mỗi khi các State quan trọng thay đổi, tự động lưu một bản sao xuống ổ cứng
   useEffect(() => {
     // Không lưu đè dữ liệu rỗng khi Hook vừa khởi tạo và đang trong quá trình khôi phục
-    if (isRecovering || !escrowId) return; 
+    if (isRecovering || !escrowId || !walletAddress) return; 
     
     const snapshot = { 
       status, 
@@ -52,8 +55,8 @@ export const useSessionRecovery = (escrowId) => {
       timestamp: Date.now() 
     };
     
-    saveSession(escrowId, snapshot);
-  }, [escrowId, isRecovering, status, progress, signedNodes]);
+    saveSession(escrowId, snapshot, walletAddress);
+  }, [escrowId, walletAddress, isRecovering, status, progress, signedNodes]);
 
   return { isRecovering };
 };

@@ -1,23 +1,88 @@
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useConnect, useConnection } from 'wagmi';
 import { injected } from 'wagmi/connectors';
 import { useSIWE } from '../hooks/useSIWE';
+import api from '../lib/api';
+
+function normalizeAddress(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function resolveRoleFromEscrow(escrow, walletAddress) {
+  const normalizedWalletAddress = normalizeAddress(walletAddress);
+  if (!normalizedWalletAddress || !escrow) return null;
+
+  if (normalizeAddress(escrow?.buyer?.walletAddress) === normalizedWalletAddress) {
+    return 'buyer';
+  }
+
+  if (normalizeAddress(escrow?.seller?.walletAddress) === normalizedWalletAddress) {
+    return 'seller';
+  }
+
+  const mediatorRow = (escrow?.escrowMediators || []).find(
+    (row) => normalizeAddress(row?.mediator?.walletAddress) === normalizedWalletAddress,
+  );
+
+  if (mediatorRow?.slot) {
+    return `mediator${mediatorRow.slot}`;
+  }
+
+  return null;
+}
 
 export default function Navbar() {
-  const { connect } = useConnect();
-  const { address, isConnected } = useConnection(); 
+  const connect = useConnect();
+  const { address, isConnected } = useConnection();
   const { login, logout, auth } = useSIWE();
+  
+  // // Lấy Role từ URL để hỗ trợ hiển thị lúc test 3 tab local
+  // const urlParams = new URLSearchParams(window.location.search);
+  // const role = urlParams.get('role');
+  const location = useLocation();
+  const [escrow, setEscrow] = useState(null);
 
-  // Lấy Role từ URL để hỗ trợ hiển thị lúc test 3 tab local
-  const urlParams = new URLSearchParams(window.location.search);
-  const role = urlParams.get('role');
+  const escrowId = useMemo(() => {
+    const match = location.pathname.match(/^\/escrow\/([^/]+)$/);
+    return match?.[1] || null;
+  }, [location.pathname]);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadEscrow = async () => {
+      if (!escrowId) {
+        setEscrow(null);
+        return;
+      }
+
+      try {
+        const { data } = await api.get(`/escrows/${escrowId}`);
+        if (active) setEscrow(data || null);
+      } catch {
+        if (active) setEscrow(null);
+      }
+    };
+
+    loadEscrow();
+
+    return () => {
+      active = false;
+    };
+  }, [escrowId]);
+
+  const role = useMemo(() => {
+    if (!escrowId) return null;
+    return resolveRoleFromEscrow(escrow, address);
+  }, [escrowId, escrow, address]);
 
   const handleConnect = () => {
     if (typeof window.ethereum === 'undefined') {
       alert("⚠️ MetaMask not found! \n\nPlease make sure you are opening this link in a browser with the MetaMask extension INSTALLED.");
       return;
     }
-    connect({ connector: injected() });
+    connect.mutate({ connector: injected() });
   };
 
   const truncateAddress = (addr) => {
@@ -48,7 +113,7 @@ export default function Navbar() {
       {/* VÙNG PHẢI: Chế độ Test, Nút Connect & Auth */}
       <div className="flex items-center gap-6">
         
-        {/* Hiển thị Role (Chỉ hiện nếu trên URL có tham số ?role=) */}
+        {/* Hiển thị Role theo wallet + escrow data */}
         {role && (
           <span className="text-slate-400 text-sm hidden md:block">
             Role: <span className="text-white font-semibold capitalize">{role}</span>

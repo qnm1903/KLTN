@@ -2,6 +2,7 @@ import express from 'express';
 import { deleteSession, getSession, getPubKeyCollectionStatus, hasSession, saveSession } from '../store/session.js';
 import {
   aggregateWhenReady,
+  aggregatePubKeysForRoles,
   PARTICIPANT_ROLES,
   getActionSigners,
   getPubKeyCollectionSummary,
@@ -13,6 +14,7 @@ import {
 import { aggregateNonces, computeChallenge, aggregateZShares } from '../crypto/schnorr.js';
 import { ethers } from 'ethers';
 import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-limit.js';
+import { authMiddleware } from '../middleware/auth.js';
 import prisma from '../lib/prisma.js';
 
 const router = express.Router();
@@ -376,7 +378,7 @@ router.post('/init', escrowInitRateLimiter, async (req, res) => {
   }
 });
 
-router.post('/pubkey/submit', escrowPubKeySubmitRateLimiter, async (req, res) => {
+router.post('/pubkey/submit', authMiddleware, escrowPubKeySubmitRateLimiter, async (req, res) => {
   try {
     const { escrowId, role, pubKey } = req.body;
 
@@ -396,8 +398,8 @@ router.post('/pubkey/submit', escrowPubKeySubmitRateLimiter, async (req, res) =>
     const io = req.app.get('io');
     const summaryBefore = getPubKeyCollectionSummary(session);
     if (summaryBefore.expired) {
-      const wasExpired = session.pubkeyCollectionState === 'EXPIRED';
-      session.pubkeyCollectionState = 'EXPIRED';
+      const wasExpired = session.pubKeyCollectionState === 'EXPIRED' || session.pubkeyCollectionState === 'EXPIRED';
+      session.pubKeyCollectionState = 'EXPIRED';
       await saveSession(escrowId, session);
 
       if (io && !wasExpired) {
@@ -446,6 +448,14 @@ router.post('/pubkey/submit', escrowPubKeySubmitRateLimiter, async (req, res) =>
       return res.status(403).json({ error: `Role '${role}' is not allowed in this escrow` });
     }
 
+    const requesterAddress = normalizeAddress(req.user?.walletAddress);
+    if (requesterAddress !== expectedAddress) {
+      if (io) {
+        io.to(escrowId).emit('pubkey_rejected', { escrowId, role, reason: 'AUTH_ROLE_MISMATCH' });
+      }
+      return res.status(403).json({ error: `Authenticated wallet is not allowed to submit pubKey for role '${role}'` });
+    }
+
     const derivedAddress = ethers.computeAddress(normalizedPubKey).toLowerCase();
 
     if (derivedAddress !== expectedAddress) {
@@ -479,11 +489,11 @@ router.post('/pubkey/submit', escrowPubKeySubmitRateLimiter, async (req, res) =>
 
     session.pubKeys[role] = normalizedPubKey;
     let summary = getPubKeyCollectionSummary(session);
-    session.pubkeyCollectionState = summary.complete ? 'COMPLETE' : 'PARTIAL';
+    session.pubKeyCollectionState = summary.complete ? 'COMPLETE' : 'PARTIAL';
 
-    if (summary.complete && !session.pubkeyAggregationCompletedAt) {
+    if (summary.complete && !session.pubKeyAggregationCompletedAt) {
       session.precomputedPkAgg = aggregateWhenReady(session);
-      session.pubkeyAggregationCompletedAt = Date.now();
+      session.pubKeyAggregationCompletedAt = Date.now();
     }
 
     await saveSession(escrowId, session);
@@ -504,7 +514,7 @@ router.post('/pubkey/submit', escrowPubKeySubmitRateLimiter, async (req, res) =>
           escrowId,
           received: summary.received,
           required: summary.required,
-          completedAt: toIsoTimestamp(session.pubkeyAggregationCompletedAt || Date.now())
+          completedAt: toIsoTimestamp(session.pubKeyAggregationCompletedAt || Date.now())
         });
       }
     }
@@ -535,7 +545,7 @@ router.post('/pubkey/submit', escrowPubKeySubmitRateLimiter, async (req, res) =>
  *
  * Body: { escrowId, role, action, R_x, R_y }
  */
-router.post('/nonce', async (req, res) => {
+router.post('/nonce', authMiddleware, async (req, res) => {
   try {
     const { escrowId, role, action, signerBitmap, R_x, R_y } = req.body;
 
@@ -552,9 +562,20 @@ router.post('/nonce', async (req, res) => {
     const session = await checkSession(escrowId, res);
     if (!session) return;
 
+    const participants = session.participants || session.parties;
+    const expectedAddress = getRoleAddress(participants, role);
+    if (!expectedAddress) {
+      return res.status(403).json({ error: `Role '${role}' is not allowed in this escrow` });
+    }
+
+    const requesterAddress = normalizeAddress(req.user?.walletAddress);
+    if (requesterAddress !== expectedAddress) {
+      return res.status(403).json({ error: `Authenticated wallet is not allowed to submit nonce for role '${role}'` });
+    }
+
     const collection = getPubKeyCollectionSummary(session);
     if (collection.expired) {
-      session.pubkeyCollectionState = 'EXPIRED';
+      session.pubKeyCollectionState = 'EXPIRED';
       await saveSession(escrowId, session);
       return res.status(410).json({
         error: 'Pubkey collection expired',
@@ -661,7 +682,7 @@ router.post('/nonce', async (req, res) => {
  *
  * Body: { escrowId, role, z }
  */
-router.post('/sign', escrowSignRateLimiter, async (req, res) => {
+router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => {
   try {
     const { escrowId, role, signerBitmap, z } = req.body;
 
@@ -674,6 +695,17 @@ router.post('/sign', escrowSignRateLimiter, async (req, res) => {
 
     const session = await checkSession(escrowId, res);
     if (!session) return;
+
+    const participants = session.participants || session.parties;
+    const expectedAddress = getRoleAddress(participants, role);
+    if (!expectedAddress) {
+      return res.status(403).json({ error: `Role '${role}' is not allowed in this escrow` });
+    }
+
+    const requesterAddress = normalizeAddress(req.user?.walletAddress);
+    if (requesterAddress !== expectedAddress) {
+      return res.status(403).json({ error: `Authenticated wallet is not allowed to submit z share for role '${role}'` });
+    }
 
     if (!session.round2Context) {
       return res.status(400).json({ error: 'Round 1 not completed. Submit nonces first.' });
@@ -721,6 +753,42 @@ router.post('/sign', escrowSignRateLimiter, async (req, res) => {
   } catch (error) {
     console.error('Error in /sign:', error.message);
     res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/:id/aggregate-key', async (req, res) => {
+  try {
+    const session = await checkSession(req.params.id, res);
+    if (!session) return;
+
+    const collection = getPubKeyCollectionSummary(session);
+    if (collection.expired) {
+      session.pubKeyCollectionState = 'EXPIRED';
+      await saveSession(req.params.id, session);
+      return res.status(410).json({
+        error: 'Pubkey collection expired',
+        collection: toCollectionPayload(collection)
+      });
+    }
+
+    if (!collection.complete) {
+      return res.status(409).json({
+        error: 'Pubkey collection is incomplete. Submit all participant pubkeys first.',
+        collection: toCollectionPayload(collection)
+      });
+    }
+
+    const pkAgg = aggregatePubKeysForRoles(session.pubKeys, PARTICIPANT_ROLES);
+
+    return res.json({
+      ok: true,
+      pkAgg,
+      pkAggCoords: [pkAgg.x, pkAgg.y],
+      collection: toCollectionPayload(collection)
+    });
+  } catch (error) {
+    console.error('Error in /:id/aggregate-key:', error.message);
+    return res.status(500).json({ error: error.message });
   }
 });
 

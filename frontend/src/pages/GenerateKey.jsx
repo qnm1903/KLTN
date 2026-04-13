@@ -1,26 +1,34 @@
 import React, { useState } from 'react';
-import { savePrivKey } from '../lib/storage'; // Import helper lưu trữ bạn đã tạo
-// Tạm thời comment hàm sinh khóa thật cho đến khi nhánh main cung cấp file
-// import { generateTSSKeyPair } from '../lib/crypto/ecc'; 
+import { useConnection, useSignMessage } from 'wagmi';
+import { hashMessage, recoverPublicKey } from 'viem';
+import { savePubKey } from '../lib/storage';
 
 export default function GenerateKey() {
-  const [keys, setKeys] = useState({ pubKey: '', privKey: '' });
+  const { address } = useConnection();
+  const signMessage = useSignMessage();
+  const [keys, setKeys] = useState({ pubKey: '', proofMessage: '' });
 
-  const handleGenerate = () => {
-    // Khi có file crypto từ nhánh main, bạn mở comment dòng dưới và xóa phần mock
-    // const { privKey, pubKey } = generateTSSKeyPair();
-    
-    // --- MOCK DATA (Giả lập sinh khóa) ---
-    const randomHex = Array.from({length: 40}, () => Math.floor(Math.random()*16).toString(16)).join('');
-    const mockPrivKey = `0x_priv_${randomHex.substring(0, 16)}`;
-    const mockPubKey = `0x_pub_${randomHex}`;
-    // -------------------------------------
+  const handleGenerate = async () => {
+    if (!address) {
+      alert('Please connect your wallet first.');
+      return;
+    }
 
-    // Lưu Private Key vào LocalStorage (Đã xử lý 2 mode qua lib/storage.js)
-    savePrivKey(mockPrivKey);
-    
-    // Hiển thị Public Key ra màn hình
-    setKeys({ pubKey: mockPubKey, privKey: mockPrivKey });
+    try {
+      const message = `Escrow TSS key registration\nAddress: ${address}\nTimestamp: ${Date.now()}`;
+      const signature = await signMessage.mutateAsync({ message });
+      const pubKey = await recoverPublicKey({
+        hash: hashMessage(message),
+        signature
+      });
+
+      savePubKey(pubKey, address);
+      setKeys({ pubKey, proofMessage: message });
+      alert('Public key derived from your wallet signature and saved locally.');
+    } catch (error) {
+      console.error('Generate pubkey error:', error);
+      alert(error?.message || 'Failed to generate public key from wallet signature.');
+    }
   };
 
   const copyToClipboard = () => {
@@ -31,11 +39,10 @@ export default function GenerateKey() {
 
   return (
     <div className="max-w-2xl mx-auto p-6 mt-20">
-      <div className="bg-[#1E293B]/50 backdrop-blur-md border border-white/10 rounded-2xl p-8 shadow-2xl text-center">
+      <div className="bg-surface/50 backdrop-blur-md border border-white/10 rounded-2xl p-8 shadow-2xl text-center">
         <h2 className="text-3xl font-orbitron font-bold mb-4 text-accent">TSS Key Generator</h2>
         <p className="text-gray-400 mb-8">
-          Are you a Seller or Mediator? Generate your Threshold Signature Scheme keys here. 
-          Keep your Private Key secure and send the Public Key to the Buyer.
+          Derive your secp256k1 public key from wallet signature and submit it to incremental DKG flow.
         </p>
 
         <button 
@@ -66,15 +73,15 @@ export default function GenerateKey() {
             </div>
 
             <div>
-              <label className="block text-sm text-gray-400 mb-1">Your Private Key (DO NOT SHARE)</label>
+              <label className="block text-sm text-gray-400 mb-1">Proof Message (for reproducibility)</label>
               <input 
                 type="text" 
                 readOnly 
-                value={keys.privKey} 
-                className="w-full bg-black/30 border border-red-900/50 rounded-lg px-4 py-2 text-red-400 font-mono text-sm"
+                value={keys.proofMessage} 
+                className="w-full bg-black/30 border border-blue-900/50 rounded-lg px-4 py-2 text-blue-300 font-mono text-sm"
               />
-              <p className="text-xs text-red-500 mt-2">
-                * This key is automatically saved securely in your browser's local storage.
+              <p className="text-xs text-blue-400 mt-2">
+                * Private key stays in your wallet. Frontend only stores recovered public key.
               </p>
             </div>
           </div>

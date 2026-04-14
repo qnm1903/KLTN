@@ -8,18 +8,20 @@ import { getSession, saveSession } from '../../lib/storage';
  */
 export const useSessionRecovery = (escrowId, walletAddress) => {
   // Cờ báo hiệu quá trình khôi phục đang diễn ra để khóa UI tạm thời
-  const [isRecovering, setIsRecovering] = useState(true);
+  const [recoveredScope, setRecoveredScope] = useState(null);
   
   const [status, setStatus] = useAtom(escrowStatusAtom);
   const [progress, setProgress] = useAtom(signatureProgressAtom);
   const [signedNodes, setSignedNodes] = useAtom(signedNodesAtom);
   const addLog = useSetAtom(addSystemLogAtom);
+  const recoveryScope = escrowId && walletAddress ? `${escrowId}:${walletAddress}` : null;
+  const isRecovering = recoveryScope !== null && recoveredScope !== recoveryScope;
 
   // 1. Giai đoạn Rehydration 
   useEffect(() => {
     const recoverData = async () => {
-      if (!escrowId || !walletAddress) {
-        setIsRecovering(false);
+      if (!recoveryScope) {
+        setRecoveredScope(null);
         return;
       }
       
@@ -35,12 +37,12 @@ export const useSessionRecovery = (escrowId, walletAddress) => {
           type: 'warning' 
         });
       }
+      setRecoveredScope(recoveryScope);
       // Dù có session hay không cũng phải gỡ cờ để UI render
-      setIsRecovering(false);
     };
 
     recoverData();
-  }, [escrowId, walletAddress, setStatus, setProgress, setSignedNodes, addLog]);
+  }, [escrowId, walletAddress, recoveryScope, setStatus, setProgress, setSignedNodes, addLog]);
 
   // 2. Giai đoạn Auto-save (Chụp Snapshot)
   // Mỗi khi các State quan trọng thay đổi, tự động lưu một bản sao xuống ổ cứng

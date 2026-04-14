@@ -1,7 +1,14 @@
 import jwt from 'jsonwebtoken';
 
-const JWT_SECRET = process.env.JWT_SECRET;
 const ACCESS_TOKEN_TTL = process.env.ACCESS_TOKEN_TTL || '15m';
+
+function getJwtSecret() {
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret) {
+    throw new Error('Missing JWT_SECRET environment variable');
+  }
+  return jwtSecret;
+}
 
 /**
  * Middleware xác thực JWT token.
@@ -15,7 +22,7 @@ export function authMiddleware(req, res, next) {
 
   const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, getJwtSecret());
     req.user = decoded; // { id, walletAddress, role }
     next();
   } catch (err) {
@@ -39,7 +46,7 @@ export function requireRole(...roles) {
 }
 
 export function signToken(payload) {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_TTL });
+  return jwt.sign(payload, getJwtSecret(), { expiresIn: ACCESS_TOKEN_TTL });
 }
 
-export { JWT_SECRET };
+export { getJwtSecret };

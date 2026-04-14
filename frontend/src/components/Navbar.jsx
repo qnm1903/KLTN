@@ -1,57 +1,158 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useConnect, useConnection } from 'wagmi';
 import { injected } from 'wagmi/connectors';
 import { useSIWE } from '../hooks/useSIWE';
+import api from '../lib/api';
+
+function normalizeAddress(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function resolveRoleFromEscrow(escrow, walletAddress) {
+  const normalizedWalletAddress = normalizeAddress(walletAddress);
+  if (!normalizedWalletAddress || !escrow) return null;
+
+  if (normalizeAddress(escrow?.buyer?.walletAddress) === normalizedWalletAddress) {
+    return 'buyer';
+  }
+
+  if (normalizeAddress(escrow?.seller?.walletAddress) === normalizedWalletAddress) {
+    return 'seller';
+  }
+
+  const mediatorRow = (escrow?.escrowMediators || []).find(
+    (row) => normalizeAddress(row?.mediator?.walletAddress) === normalizedWalletAddress,
+  );
+
+  if (mediatorRow?.slot) {
+    return `mediator${mediatorRow.slot}`;
+  }
+
+  return null;
+}
 
 export default function Navbar() {
   const connect = useConnect();
   const { address, isConnected } = useConnection();
   const { login, logout, auth } = useSIWE();
+  
+  // // Lấy Role từ URL để hỗ trợ hiển thị lúc test 3 tab local
+  // const urlParams = new URLSearchParams(window.location.search);
+  // const role = urlParams.get('role');
+  const location = useLocation();
+  const [escrow, setEscrow] = useState(null);
+
+  const escrowId = useMemo(() => {
+    const match = location.pathname.match(/^\/escrow\/([^/]+)$/);
+    return match?.[1] || null;
+  }, [location.pathname]);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadEscrow = async () => {
+      if (!escrowId) {
+        setEscrow(null);
+        return;
+      }
+
+      try {
+        const { data } = await api.get(`/escrows/${escrowId}`);
+        if (active) setEscrow(data || null);
+      } catch {
+        if (active) setEscrow(null);
+      }
+    };
+
+    loadEscrow();
+
+    return () => {
+      active = false;
+    };
+  }, [escrowId]);
+
+  const role = useMemo(() => {
+    if (!escrowId) return null;
+    return resolveRoleFromEscrow(escrow, address);
+  }, [escrowId, escrow, address]);
 
   const handleConnect = () => {
     if (typeof window.ethereum === 'undefined') {
-      alert("⚠️ Không tìm thấy MetaMask! \n\nVui lòng đảm bảo bạn đang mở link này trên trình duyệt ĐÃ CÀI ĐẶT tiện ích MetaMask.");
+      alert("⚠️ MetaMask not found! \n\nPlease make sure you are opening this link in a browser with the MetaMask extension INSTALLED.");
       return;
     }
-    connect.mutateAsync({ connector: injected() });
+    connect.mutate({ connector: injected() });
   };
 
-  const truncateAddress = (addr) => `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+  const truncateAddress = (addr) => {
+    if (!addr) return "";
+    return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+  };
 
   return (
-    // Thay bg-[var(--color-darkBg)] thành bg-darkBg
-    <nav className="flex items-center justify-between p-4 bg-darkBg border-b border-gray-800">
-      {/* Thay text-[var(--color-primary)] và text-[var(--color-accent)] */}
-      <div className="text-2xl font-bold font-orbitron text-primary">
-        Escrow<span className="text-accent">TSS</span>
+    <nav className="fixed top-0 left-0 w-full z-50 flex items-center justify-between px-8 h-20 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 shadow-md">
+      
+      {/* VÙNG TRÁI: Logo và Menu */}
+      <div className="flex items-center gap-8">
+        <div 
+          className="text-2xl font-bold cursor-pointer tracking-wider bg-linear-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent"
+          onClick={() => window.location.href = '/'}
+        >
+          TSS Escrow
+        </div>
+        
+        <a 
+          href="/generate-key" 
+          className="text-sm font-medium text-slate-400 hover:text-white transition-colors"
+        >
+          Key Generator
+        </a>
       </div>
       
-      <div className="flex gap-4">
+      {/* VÙNG PHẢI: Chế độ Test, Nút Connect & Auth */}
+      <div className="flex items-center gap-6">
+        
+        {/* Hiển thị Role theo wallet + escrow data */}
+        {role && (
+          <span className="text-slate-400 text-sm hidden md:block">
+            Role: <span className="text-white font-semibold capitalize">{role}</span>
+          </span>
+        )}
+
         {!isConnected ? (
+          // Trạng thái 1: Chưa kết nối ví
           <button 
             onClick={handleConnect}
-            // Thay bg-[var(--color-primary)] thành bg-primary
-            className="px-6 py-2 bg-primary text-white font-exo rounded hover:bg-blue-700 transition cursor-pointer shadow-lg shadow-blue-900/50"
+            className="px-6 py-2.5 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-500 transition-all cursor-pointer shadow-[0_0_15px_rgba(37,99,235,0.4)]"
           >
-            Kết nối Ví
+            Connect Wallet
           </button>
         ) : !auth?.isAuthenticated ? (
-          <button 
-            onClick={login}
-            // Thay bg-[var(--color-accent)] thành bg-accent
-            className="px-6 py-2 bg-accent text-black font-bold font-exo rounded hover:bg-yellow-500 transition cursor-pointer"
-          >
-            Ký Đăng Nhập
-          </button>
-        ) : (
+          // Trạng thái 2: Đã kết nối ví nhưng chưa đăng nhập (SIWE)
           <div className="flex items-center gap-4">
-            <span className="px-4 py-2 bg-gray-800 border border-gray-600 rounded text-gray-300 font-exo">
+            <span className="px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-slate-300 font-mono text-sm">
+              {truncateAddress(address)}
+            </span>
+            <button 
+              onClick={login}
+              className="px-6 py-2.5 bg-yellow-500 text-slate-900 font-bold rounded-lg hover:bg-yellow-400 transition-all cursor-pointer shadow-[0_0_15px_rgba(234,179,8,0.4)]"
+            >
+              Sign In (SIWE)
+            </button>
+          </div>
+        ) : (
+          // Trạng thái 3: Đã xác thực thành công
+          <div className="flex items-center gap-4">
+            <span className="flex items-center gap-2 px-4 py-2.5 bg-emerald-900/20 border border-emerald-500/30 rounded-lg text-emerald-400 font-mono text-sm shadow-inner">
+              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
               {truncateAddress(address)}
             </span>
             <button 
               onClick={logout}
-              className="px-4 py-2 bg-red-900/80 text-white rounded hover:bg-red-700 transition cursor-pointer"
+              className="px-5 py-2.5 bg-slate-800 border border-slate-700 text-slate-400 rounded-lg hover:bg-red-900/80 hover:text-red-300 hover:border-red-900 transition-colors cursor-pointer"
             >
-              Thoát
+              Sign Out
             </button>
           </div>
         )}

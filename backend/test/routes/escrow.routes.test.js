@@ -1,7 +1,9 @@
 import request from 'supertest';
+import jwt from 'jsonwebtoken';
 import { ethers } from 'ethers';
 import app from '../../src/app.js';
-import { clearSessions } from '../../src/store/session.js';
+import { clearSessions, saveSession } from '../../src/store/session.js';
+import { initIncrementalDKG } from '../../src/crypto/dkg.js';
 import { computeSignatureShare } from '../../src/crypto/schnorr.js';
 
 function buildParty() {
@@ -11,6 +13,25 @@ function buildParty() {
     priv: wallet.privateKey,
     pub: ethers.SigningKey.computePublicKey(wallet.privateKey, false)
   };
+}
+
+function authHeaderForParty(party) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error('JWT_SECRET must be set for auth-protected escrow route tests');
+  }
+
+  const token = jwt.sign(
+    {
+      id: party.addr.toLowerCase(),
+      walletAddress: party.addr.toLowerCase(),
+      role: 'USER'
+    },
+    secret,
+    { expiresIn: '1h' }
+  );
+
+  return { Authorization: `Bearer ${token}` };
 }
 
 describe('Escrow Routes Integration', () => {
@@ -57,7 +78,33 @@ describe('Escrow Routes Integration', () => {
       });
 
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual(expect.objectContaining({ ok: true, contractAddress, chainId }));
+    expect(res.body.ok).toBe(true);
+    expect(res.body.chainId).toBe(chainId);
+    expect(String(res.body.contractAddress).toLowerCase()).toBe(contractAddress.toLowerCase());
+  }
+
+  async function initIncrementalSession(customEscrowId, options = {}) {
+    const participants = {
+      buyer: buyer.addr.toLowerCase(),
+      seller: seller.addr.toLowerCase(),
+      mediators: [
+        mediator1.addr.toLowerCase(),
+        mediator2.addr.toLowerCase(),
+        mediator3.addr.toLowerCase(),
+        mediator4.addr.toLowerCase(),
+        mediator5.addr.toLowerCase()
+      ]
+    };
+
+    const { session } = initIncrementalDKG(customEscrowId, {
+      participants,
+      contractAddress,
+      chainId,
+      dueAtMs: options.dueAtMs || Date.now() + (30 * 60 * 1000)
+    });
+
+    session.parties = participants;
+    await saveSession(customEscrowId, session);
   }
 
   it('rejects /init when pubkey does not match address', async () => {
@@ -100,6 +147,44 @@ describe('Escrow Routes Integration', () => {
     expect(res.body.error).toMatch(/Compressed public keys are not supported/i);
   });
 
+  it('rejects /init when chainId is invalid', async () => {
+    const res = await request(app)
+      .post('/api/escrow/init')
+      .send({
+        escrowId,
+        chainId: 'not-a-chain-id',
+        contractAddress,
+        buyerAddr: buyer.addr,
+        sellerAddr: seller.addr,
+        mediatorAddrs: [mediator1.addr, mediator2.addr, mediator3.addr, mediator4.addr, mediator5.addr],
+        buyerPubKey: buyer.pub,
+        sellerPubKey: seller.pub,
+        mediatorPubKeys: [mediator1.pub, mediator2.pub, mediator3.pub, mediator4.pub, mediator5.pub]
+      });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/invalid chainid/i);
+  });
+
+  it('rejects /init when contractAddress is invalid', async () => {
+    const res = await request(app)
+      .post('/api/escrow/init')
+      .send({
+        escrowId,
+        chainId,
+        contractAddress: 'not-an-address',
+        buyerAddr: buyer.addr,
+        sellerAddr: seller.addr,
+        mediatorAddrs: [mediator1.addr, mediator2.addr, mediator3.addr, mediator4.addr, mediator5.addr],
+        buyerPubKey: buyer.pub,
+        sellerPubKey: seller.pub,
+        mediatorPubKeys: [mediator1.pub, mediator2.pub, mediator3.pub, mediator4.pub, mediator5.pub]
+      });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/invalid contractaddress/i);
+  });
+
   it('rejects role-action mismatch on /nonce', async () => {
     await initSession();
 
@@ -108,6 +193,7 @@ describe('Escrow Routes Integration', () => {
 
     const res = await request(app)
       .post('/api/escrow/nonce')
+      .set(authHeaderForParty(mediator5))
       .send({
         escrowId,
         role: 'mediator5',
@@ -129,6 +215,7 @@ describe('Escrow Routes Integration', () => {
 
     const first = await request(app)
       .post('/api/escrow/nonce')
+      .set(authHeaderForParty(buyer))
       .send({
         escrowId,
         role: 'buyer',
@@ -142,6 +229,7 @@ describe('Escrow Routes Integration', () => {
 
     const second = await request(app)
       .post('/api/escrow/nonce')
+      .set(authHeaderForParty(buyer))
       .send({
         escrowId,
         role: 'buyer',
@@ -160,6 +248,7 @@ describe('Escrow Routes Integration', () => {
 
     const res = await request(app)
       .post('/api/escrow/sign')
+      .set(authHeaderForParty(buyer))
       .send({
         escrowId,
         role: 'buyer',
@@ -193,6 +282,7 @@ describe('Escrow Routes Integration', () => {
     for (let index = 0; index < round1.length; index++) {
       const nonceResponse = await request(app)
         .post('/api/escrow/nonce')
+        .set(authHeaderForParty(round1[index].party))
         .send({
           escrowId,
           role: round1[index].role,
@@ -217,6 +307,7 @@ describe('Escrow Routes Integration', () => {
       const z = computeSignatureShare(round1[index].party.priv, round1[index].nonce, challenge).z;
       const signResponse = await request(app)
         .post('/api/escrow/sign')
+        .set(authHeaderForParty(round1[index].party))
         .send({
           escrowId,
           role: round1[index].role,
@@ -243,5 +334,141 @@ describe('Escrow Routes Integration', () => {
     expect(status.statusCode).toBe(200);
     expect(status.body.completedActions).toContain('release');
     expect(status.body.signingAction).toBeNull();
+  });
+
+  it('collects pubkeys incrementally and marks collection complete after 7 submissions', async () => {
+    const incrementalEscrowId = 'inc-' + ethers.hexlify(ethers.randomBytes(8)).slice(2);
+    await initIncrementalSession(incrementalEscrowId);
+
+    const submissions = [
+      { role: 'buyer', party: buyer, pubKey: buyer.pub },
+      { role: 'seller', party: seller, pubKey: seller.pub },
+      { role: 'mediator1', party: mediator1, pubKey: mediator1.pub },
+      { role: 'mediator2', party: mediator2, pubKey: mediator2.pub },
+      { role: 'mediator3', party: mediator3, pubKey: mediator3.pub },
+      { role: 'mediator4', party: mediator4, pubKey: mediator4.pub },
+      { role: 'mediator5', party: mediator5, pubKey: mediator5.pub }
+    ];
+
+    for (let index = 0; index < submissions.length; index++) {
+      const response = await request(app)
+        .post('/api/escrow/pubkey/submit')
+        .set(authHeaderForParty(submissions[index].party))
+        .send({
+          escrowId: incrementalEscrowId,
+          role: submissions[index].role,
+          pubKey: submissions[index].pubKey
+        });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.body.ok).toBe(true);
+      expect(response.body.isIdempotent).toBe(false);
+
+      if (index < submissions.length - 1) {
+        expect(response.body.state).toBe('PARTIAL');
+      } else {
+        expect(response.body.state).toBe('COMPLETE');
+        expect(response.body.received).toBe(7);
+      }
+    }
+
+    const status = await request(app).get(`/api/escrow/${incrementalEscrowId}/status`);
+    expect(status.statusCode).toBe(200);
+    expect(status.body.pubkeyCollection.state).toBe('COMPLETE');
+    expect(status.body.pubkeyCollection.received).toBe(7);
+  });
+
+  it('treats duplicate submission with same key as idempotent success', async () => {
+    const incrementalEscrowId = 'inc-' + ethers.hexlify(ethers.randomBytes(8)).slice(2);
+    await initIncrementalSession(incrementalEscrowId);
+
+    const first = await request(app)
+      .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
+      .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: buyer.pub });
+    expect(first.statusCode).toBe(200);
+    expect(first.body.isIdempotent).toBe(false);
+
+    const duplicate = await request(app)
+      .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
+      .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: buyer.pub });
+    expect(duplicate.statusCode).toBe(200);
+    expect(duplicate.body.isIdempotent).toBe(true);
+  });
+
+  it('rejects duplicate role submission when pubkey differs', async () => {
+    const incrementalEscrowId = 'inc-' + ethers.hexlify(ethers.randomBytes(8)).slice(2);
+    await initIncrementalSession(incrementalEscrowId);
+
+    const anotherBuyer = buildParty();
+
+    const first = await request(app)
+      .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
+      .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: buyer.pub });
+    expect(first.statusCode).toBe(200);
+
+    const conflict = await request(app)
+      .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
+      .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: anotherBuyer.pub });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.body.error).toMatch(/already submitted a different pubkey/i);
+  });
+
+  it('rejects pubkey submission if key does not match expected role address', async () => {
+    const incrementalEscrowId = 'inc-' + ethers.hexlify(ethers.randomBytes(8)).slice(2);
+    await initIncrementalSession(incrementalEscrowId);
+
+    const mismatch = await request(app)
+      .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(seller))
+      .send({ escrowId: incrementalEscrowId, role: 'seller', pubKey: buyer.pub });
+
+    expect(mismatch.statusCode).toBe(400);
+    expect(mismatch.body.error).toMatch(/does not match expected address/i);
+  });
+
+  it('rejects pubkey submission when collection is expired', async () => {
+    const incrementalEscrowId = 'inc-' + ethers.hexlify(ethers.randomBytes(8)).slice(2);
+    await initIncrementalSession(incrementalEscrowId, { dueAtMs: Date.now() - 1000 });
+
+    const expired = await request(app)
+      .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
+      .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: buyer.pub });
+
+    expect(expired.statusCode).toBe(410);
+    expect(expired.body.error).toMatch(/collection expired/i);
+    expect(expired.body.collection.state).toBe('EXPIRED');
+  });
+
+  it('blocks /nonce until all pubkeys are collected', async () => {
+    const incrementalEscrowId = 'inc-' + ethers.hexlify(ethers.randomBytes(8)).slice(2);
+    await initIncrementalSession(incrementalEscrowId);
+
+    await request(app)
+      .post('/api/escrow/pubkey/submit')
+      .set(authHeaderForParty(buyer))
+      .send({ escrowId: incrementalEscrowId, role: 'buyer', pubKey: buyer.pub });
+
+    const nonce = ethers.hexlify(ethers.randomBytes(32));
+    const share = computeSignatureShare(buyer.priv, nonce, '0x' + '00'.repeat(32));
+
+    const res = await request(app)
+      .post('/api/escrow/nonce')
+      .set(authHeaderForParty(buyer))
+      .send({
+        escrowId: incrementalEscrowId,
+        role: 'buyer',
+        action: 'release',
+        signerBitmap: signerBitmapRelease,
+        R_x: share.R_x,
+        R_y: share.R_y
+      });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/pubkey collection is incomplete/i);
   });
 });

@@ -1,13 +1,13 @@
 {
   "network": "sepolia",
   "chainId": "11155111",
-  "deployedAt": "2026-03-21T15:38:36.174Z",
+  "deployedAt": "2026-04-13T17:39:37.823Z",
   "deployer": "0x6CcC9b052f9A429e9Bf945668de8E5fF7117e028",
   "contracts": {
     "EscrowFactory": {
-      "address": "0x1CB56be434B6A3c678FEDf82A7206e06845D93F0",
-      "txHash": "0xa5523caef94d478dd129bdaf7b4669fc4af73ce1e353d1c664c3f3f71ca4b0c6",
-      "blockNumber": 10491707,
+      "address": "0x54c43Da9C166F8a27Fc8654545EbEEA2A91EC418",
+      "txHash": "0x0c9de27e0195422178b1249a2655e91d140f17e6ae7cb0b04e4518ba57bc5ae4",
+      "blockNumber": 10652525,
       "constructorArgs": []
     }
   }

@@ -15,7 +15,7 @@ export function useSIWE() {
 
   const login = async () => {
     try {
-      if (!address) throw new Error("Vui lòng kết nối ví MetaMask trước!");
+      if (!address) throw new Error("Please connect your MetaMask wallet first!");
 
       // 1. Lấy Nonce từ Backend
       const { data: { nonce } } = await api.get(`/auth/nonce?address=${address}`);
@@ -35,7 +35,7 @@ export function useSIWE() {
 
       return data;
     } catch (error) {
-      console.error('Lỗi đăng nhập:', error);
+      console.error('Login error:', error);
       disconnect.mutate(); // Ngắt kết nối ví nếu xác thực thất bại
       throw error;
     }

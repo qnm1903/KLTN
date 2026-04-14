@@ -4,7 +4,11 @@ import {
   signatureProgressAtom,
   signedNodesAtom,
   addSystemLogAtom,
-  escrowStatusAtom
+  escrowStatusAtom,
+  signingStepAtom, 
+  nonceProgressAtom, 
+  zShareProgressAtom, 
+  finalSignatureAtom 
 } from './escrowStore';
 import api from '../../lib/api';
 import { getStoredAccessToken } from '../../store/authStore';
@@ -33,6 +37,10 @@ export const useEscrowSync = (escrowId) => {
   const [, setSignedNodes] = useAtom(signedNodesAtom);
   const setStatus = useSetAtom(escrowStatusAtom);
   const addLog = useSetAtom(addSystemLogAtom);
+  const setSigningStep = useSetAtom(signingStepAtom);
+  const setNonceProgress = useSetAtom(nonceProgressAtom);
+  const setZShareProgress = useSetAtom(zShareProgressAtom);
+  const setFinalSignature = useSetAtom(finalSignatureAtom);
   const authToken = getStoredAccessToken();
 
   const applyCollectionSnapshot = useCallback((collection) => {
@@ -114,12 +122,19 @@ export const useEscrowSync = (escrowId) => {
       addLog({ message: `Pubkey collection expired at ${data.expiredAt || 'unknown time'}.`, type: 'error' });
     };
 
-    const handleNonceCollected = () => {
-      addLog({ message: 'Nonce round completed. Waiting for z-shares.', type: 'info' });
+    const handleNonceCollected = (data) => {
+      if (data?.escrowId !== escrowId) return;
+      setNonceProgress(7); // Giả định đã thu đủ 7/7 nonce
+      setSigningStep('ROUND_2');
+      addLog({ message: 'Round 1 (Nonce) complete. System switching to Round 2 (Z-Share).', type: 'info' });
     };
 
-    const handleSchnorrComplete = () => {
-      addLog({ message: 'Schnorr signature completed and ready for on-chain execution.', type: 'success' });
+    const handleSchnorrComplete = (data) => {
+      if (data?.escrowId !== escrowId) return;
+      setZShareProgress(5); // Đã thu đủ ngưỡng 5/7
+      setFinalSignature(data?.signature); // Lưu bộ chữ ký { rAddr, z, e, msgHash, vaultContractAddress }
+      setSigningStep('READY_TO_ONCHAIN');
+      addLog({ message: 'Threshold reached! Schnorr signature complete. Ready for On-chain Execution.', type: 'success' });
     };
 
     socket.on('pubkey_received', handlePubKeyReceived);
@@ -169,5 +184,33 @@ export const useEscrowSync = (escrowId) => {
     return data;
   }, [escrowId, addLog, applyCollectionSnapshot]);
 
-  return { submitPubKey };
+  const submitNonce = useCallback(async ({ role, nonce }) => {
+    if (!escrowId || !role || !nonce) throw new Error('Missing parameters for Round 1');
+    addLog({ message: `Submitting Nonce (Round 1) for ${role}...`, type: 'warning' });
+    
+    const { data } = await api.post('/escrow/nonce', {
+      escrowId,
+      role,
+      nonce
+    });
+    addLog({ message: `Nonce accepted for ${role}.`, type: 'success' });
+    return data;
+  }, [escrowId, addLog]);
+
+  const submitZShare = useCallback(async ({ role, zShare }) => {
+    if (!escrowId || !role || !zShare) throw new Error('Missing parameters for Round 2');
+    addLog({ message: `Submitting Z-Share (Round 2) for ${role}...`, type: 'warning' });
+    
+    const { data } = await api.post('/escrow/sign', {
+      escrowId,
+      role,
+      zShare
+    });
+    addLog({ message: `Z-Share accepted for ${role}.`, type: 'success' });
+    return data;
+  }, [escrowId, addLog]);
+
+  return { submitPubKey, submitNonce, submitZShare };
+
+
 };

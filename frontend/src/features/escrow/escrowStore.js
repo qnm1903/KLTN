@@ -38,3 +38,20 @@ export const addSystemLogAtom = atom(
     set(systemLogsAtom, [...currentLogs, logEntry].slice(-50));
   }
 );
+
+// PHASE 1: SIGNING ORCHESTRATION ATOMS
+
+export const signingPhaseAtom = atom(null); // Trạng thái: "nonce", "z-share", "ready", null
+export const selectedActionAtom = atom(null); // Hành động: "release", "refund", "timeoutRelease"
+
+export const nonceRound1Atom = atom(null); // Lưu trữ challenge/context trả về từ Backend sau Round 1
+export const zShareRound2Atom = atom(null); // Lưu trữ dữ liệu z-share do user tính toán
+export const aggregatedSignatureAtom = atom(null); // Bộ chữ ký hoàn chỉnh: { R_addr, z, e, msgHash }
+
+// Quản lý tiến trình chi tiết cho từng Round
+export const signingProgressAtom = atom({
+  round: null,           // 1 hoặc 2
+  submitted: 0,          // Số lượng đã nộp
+  needed: 0,             // Số lượng cần thiết
+  percentage: 0          // % tiến độ
+});

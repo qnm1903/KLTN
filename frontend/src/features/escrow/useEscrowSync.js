@@ -5,10 +5,12 @@ import {
   signedNodesAtom,
   addSystemLogAtom,
   escrowStatusAtom,
-  signingStepAtom, 
-  nonceProgressAtom, 
-  zShareProgressAtom, 
-  finalSignatureAtom 
+  signingPhaseAtom,
+  selectedActionAtom,
+  nonceRound1Atom,
+  zShareRound2Atom,
+  aggregatedSignatureAtom,
+  signingProgressAtom
 } from './escrowStore';
 import api from '../../lib/api';
 import { getStoredAccessToken } from '../../store/authStore';
@@ -37,10 +39,10 @@ export const useEscrowSync = (escrowId) => {
   const [, setSignedNodes] = useAtom(signedNodesAtom);
   const setStatus = useSetAtom(escrowStatusAtom);
   const addLog = useSetAtom(addSystemLogAtom);
-  const setSigningStep = useSetAtom(signingStepAtom);
-  const setNonceProgress = useSetAtom(nonceProgressAtom);
-  const setZShareProgress = useSetAtom(zShareProgressAtom);
-  const setFinalSignature = useSetAtom(finalSignatureAtom);
+  const setSigningPhase = useSetAtom(signingPhaseAtom);
+  const setNonceRound1 = useSetAtom(nonceRound1Atom);
+  const setAggregatedSignature = useSetAtom(aggregatedSignatureAtom);
+  const setSigningProgress = useSetAtom(signingProgressAtom);
   const authToken = getStoredAccessToken();
 
   const applyCollectionSnapshot = useCallback((collection) => {
@@ -122,26 +124,56 @@ export const useEscrowSync = (escrowId) => {
       addLog({ message: `Pubkey collection expired at ${data.expiredAt || 'unknown time'}.`, type: 'error' });
     };
 
+    // Round 1 Progress
+    const handleNonceReceived = (data) => {
+      if (data?.escrowId !== escrowId) return;
+      setSigningProgress({
+        round: 1,
+        submitted: data.count,
+        needed: data.needed,
+        percentage: Math.round((data.count / data.needed) * 100)
+      });
+      addLog({ message: `Nonce submission: ${data.count}/${data.needed}`, type: 'info' });
+    };
+
+    // Round 1 Complete
     const handleNonceCollected = (data) => {
       if (data?.escrowId !== escrowId) return;
-      setNonceProgress(7); // Giả định đã thu đủ 7/7 nonce
-      setSigningStep('ROUND_2');
-      addLog({ message: 'Round 1 (Nonce) complete. System switching to Round 2 (Z-Share).', type: 'info' });
+      setSigningPhase("z-share");
+      setNonceRound1(data); // Lưu data (R_addr, challenge, msgHash...) để tính z ở Round 2
+      addLog({ message: 'Round 1 complete! Challenge computed. Start Round 2 now.', type: 'success' });
     };
 
+    // Round 2 Progress
+    const handleZReceived = (data) => {
+      if (data?.escrowId !== escrowId) return;
+      setSigningProgress({
+        round: 2,
+        submitted: data.count,
+        needed: data.needed,
+        percentage: Math.round((data.count / data.needed) * 100)
+      });
+      addLog({ message: `Z-share submission: ${data.count}/${data.needed}`, type: 'info' });
+    };
+
+    // Round 2 Complete
     const handleSchnorrComplete = (data) => {
       if (data?.escrowId !== escrowId) return;
-      setZShareProgress(5); // Đã thu đủ ngưỡng 5/7
-      setFinalSignature(data?.signature); // Lưu bộ chữ ký { rAddr, z, e, msgHash, vaultContractAddress }
-      setSigningStep('READY_TO_ONCHAIN');
-      addLog({ message: 'Threshold reached! Schnorr signature complete. Ready for On-chain Execution.', type: 'success' });
+      setSigningPhase("ready");
+      setAggregatedSignature(data); // { R_addr, z, e, msgHash }
+      addLog({ message: 'Signature aggregated! Ready for contract call.', type: 'success' });
     };
 
+    // --- Cập nhật Đăng ký và Hủy đăng ký Socket ---
     socket.on('pubkey_received', handlePubKeyReceived);
     socket.on('pubkey_rejected', handlePubKeyRejected);
     socket.on('pubkey_collection_complete', handleCollectionComplete);
     socket.on('pubkey_collection_expired', handleCollectionExpired);
+    
+    // Thêm 4 event mới
+    socket.on('nonce_received', handleNonceReceived);
     socket.on('nonce_collected', handleNonceCollected);
+    socket.on('z_received', handleZReceived);
     socket.on('schnorr_complete', handleSchnorrComplete);
 
     return () => {
@@ -150,8 +182,13 @@ export const useEscrowSync = (escrowId) => {
       socket.off('pubkey_rejected', handlePubKeyRejected);
       socket.off('pubkey_collection_complete', handleCollectionComplete);
       socket.off('pubkey_collection_expired', handleCollectionExpired);
+      
+      // Hủy 4 event mới
+      socket.off('nonce_received', handleNonceReceived);
       socket.off('nonce_collected', handleNonceCollected);
+      socket.off('z_received', handleZReceived);
       socket.off('schnorr_complete', handleSchnorrComplete);
+      
       socket.emit('leave_escrow', escrowId);
     };
   }, [escrowId, authToken, setProgress, setSignedNodes, setStatus, addLog, applyCollectionSnapshot]);
@@ -184,33 +221,31 @@ export const useEscrowSync = (escrowId) => {
     return data;
   }, [escrowId, addLog, applyCollectionSnapshot]);
 
-  const submitNonce = useCallback(async ({ role, nonce }) => {
-    if (!escrowId || !role || !nonce) throw new Error('Missing parameters for Round 1');
-    addLog({ message: `Submitting Nonce (Round 1) for ${role}...`, type: 'warning' });
+  const submitNonce = useCallback(async (escrowId, role, action, signerBitmap, R_x, R_y) => {
+    addLog({ message: `Submitting Nonce for action: ${action}...`, type: 'warning' });
     
-    const { data } = await api.post('/escrow/nonce', {
+    const { data } = await api.post(`/escrow/${escrowId}/nonce`, {
       escrowId,
       role,
-      nonce
+      action,
+      signerBitmap,
+      R_x,
+      R_y
     });
-    addLog({ message: `Nonce accepted for ${role}.`, type: 'success' });
     return data;
-  }, [escrowId, addLog]);
+  }, [addLog]);
 
-  const submitZShare = useCallback(async ({ role, zShare }) => {
-    if (!escrowId || !role || !zShare) throw new Error('Missing parameters for Round 2');
-    addLog({ message: `Submitting Z-Share (Round 2) for ${role}...`, type: 'warning' });
+  const submitZShare = useCallback(async (escrowId, role, signerBitmap, z) => {
+    addLog({ message: `Submitting Z-Share...`, type: 'warning' });
     
-    const { data } = await api.post('/escrow/sign', {
+    const { data } = await api.post(`/escrow/${escrowId}/sign`, {
       escrowId,
       role,
-      zShare
+      signerBitmap,
+      z
     });
-    addLog({ message: `Z-Share accepted for ${role}.`, type: 'success' });
     return data;
-  }, [escrowId, addLog]);
+  }, [addLog]);
 
   return { submitPubKey, submitNonce, submitZShare };
-
-
 };

@@ -9,10 +9,15 @@ import {
   escrowStatusAtom,
   signatureProgressAtom,
   systemLogsAtom,
-  signedNodesAtom
+  signedNodesAtom,
+  signingPhaseAtom,
+  signingProgressAtom,
+  aggregatedSignatureAtom,
+  selectedActionAtom
 } from '../features/escrow/escrowStore';
 import { useEscrowSync } from '../features/escrow/useEscrowSync';
 import { useSessionRecovery } from '../features/escrow/useSessionRecovery';
+import { useContractCall } from '../features/escrow/useContractCall'; // Tích hợp Phase 4
 
 // --- IMPORT API & STORAGE ---
 import api from '../lib/api';
@@ -26,21 +31,14 @@ function resolveRoleFromEscrow(escrow, walletAddress) {
   const normalizedWalletAddress = normalizeAddress(walletAddress);
   if (!normalizedWalletAddress || !escrow) return 'Unknown';
 
-  if (normalizeAddress(escrow?.buyer?.walletAddress) === normalizedWalletAddress) {
-    return 'buyer';
-  }
-
-  if (normalizeAddress(escrow?.seller?.walletAddress) === normalizedWalletAddress) {
-    return 'seller';
-  }
+  if (normalizeAddress(escrow?.buyer?.walletAddress) === normalizedWalletAddress) return 'buyer';
+  if (normalizeAddress(escrow?.seller?.walletAddress) === normalizedWalletAddress) return 'seller';
 
   const mediatorRow = (escrow?.escrowMediators || []).find(
     (row) => normalizeAddress(row?.mediator?.walletAddress) === normalizedWalletAddress
   );
 
-  if (mediatorRow?.slot) {
-    return `mediator${mediatorRow.slot}`;
-  }
+  if (mediatorRow?.slot) return `mediator${mediatorRow.slot}`;
 
   return 'Unknown';
 }
@@ -62,13 +60,19 @@ export default function EscrowDetail() {
 
   // 2. Khởi tạo Logic Chạy ngầm
   const { isRecovering } = useSessionRecovery(escrowId, address);
-  const { submitPubKey } = useEscrowSync(escrowId);
+  const { submitPubKey, submitNonce, submitZShare } = useEscrowSync(escrowId);
+  const { executeRelease, isPending, isConfirming, isConfirmed } = useContractCall(); // Hook gọi Smart Contract
 
   // 3. Đọc State từ Jotai để render UI
   const status = useAtomValue(escrowStatusAtom);
   const progress = useAtomValue(signatureProgressAtom);
   const logs = useAtomValue(systemLogsAtom);
   const signedNodes = useAtomValue(signedNodesAtom);
+  const signingPhase = useAtomValue(signingPhaseAtom);
+  const signingProgress = useAtomValue(signingProgressAtom);
+  const aggregatedSignature = useAtomValue(aggregatedSignatureAtom);
+  const selectedAction = useAtomValue(selectedActionAtom);
+  const setSelectedAction = useSetAtom(selectedActionAtom);
 
   const activeRole = useMemo(() => {
     return resolveRoleFromEscrow(escrow, address);
@@ -103,32 +107,58 @@ export default function EscrowDetail() {
     };
 
     fetchEscrowDetail();
-
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, [escrowId, addLog]);
 
-  // --- HÀM XỬ LÝ: GỬI PUBKEY CỦA ROLE HIỆN TẠI ---
+  // --- CÁC HÀM XỬ LÝ HÀNH ĐỘNG ---
   const handleSubmitMyPubKey = async () => {
-    if (activeRole === 'Unknown') {
-      alert('Cannot resolve your escrow role. Please reload and ensure your wallet is a participant.');
-      return;
-    }
-
-    if (!localPubKey) {
-      alert('Public key not found. Please generate your key first on /generate-key.');
-      return;
-    }
+    if (activeRole === 'Unknown') return alert('Cannot resolve your escrow role.');
+    if (!localPubKey) return alert('Public key not found. Please generate your key first.');
 
     setIsSubmittingKey(true);
     try {
       await submitPubKey({ role: activeRole, pubKey: localPubKey });
     } catch (error) {
-      console.error('Submit pubkey error:', error);
       alert(error.response ? `Backend Error: ${JSON.stringify(error.response.data)}` : `Error: ${error.message}`);
     } finally {
       setIsSubmittingKey(false);
+    }
+  };
+
+  const handleStartRelease = async () => {
+    setSelectedAction('release');
+    try {
+      const dummySignerBitmap = 127;
+      const dummyRx = "0x" + "1".repeat(64);
+      const dummyRy = "0x" + "2".repeat(64);
+      await submitNonce(escrowId, activeRole, 'release', dummySignerBitmap, dummyRx, dummyRy);
+    } catch (error) {
+      addLog({ message: `Failed to start release: ${error.message}`, type: 'error' });
+    }
+  };
+
+  const handleStartRefund = async () => {
+    setSelectedAction('refund');
+    // Implement tương tự release trong tương lai
+  };
+
+  const handleSubmitZShareMock = async () => {
+    try {
+      const dummySignerBitmap = 127;
+      const dummyZ = "0x" + "3".repeat(64);
+      await submitZShare(escrowId, activeRole, dummySignerBitmap, dummyZ);
+    } catch (error) {
+      addLog({ message: `Failed to submit Z-Share: ${error.message}`, type: 'error' });
+    }
+  };
+
+  // Hàm gọi Smart Contract sau khi có bộ chữ ký tổng hợp
+  const handleExecuteOnChain = async () => {
+    try {
+      if (!aggregatedSignature) throw new Error("Missing aggregated signature");
+      await executeRelease(aggregatedSignature);
+    } catch (error) {
+      addLog({ message: `On-chain execution failed: ${error.message}`, type: 'error' });
     }
   };
 
@@ -241,7 +271,7 @@ export default function EscrowDetail() {
           </div>
         </section>
 
-        {/* KHỐI 4: CỤM NÚT HÀNH ĐỘNG */}
+        {/* KHỐI 4: CỤM NÚT HÀNH ĐỘNG PUBKEY */}
         <section className="flex gap-6 justify-center mt-4">
           <button 
             onClick={handleSubmitMyPubKey}
@@ -265,16 +295,76 @@ export default function EscrowDetail() {
           </a>
         </section>
 
-        {!localPubKey && (
-          <p className="text-center text-amber-300 text-sm -mt-2">
-            No local public key found for this wallet. Click "Generate / Rotate Key" first.
-          </p>
+        {/* KHỐI 5: LUỒNG KÝ ĐA PHẦN (TSS SIGNING ORCHESTRATION) */}
+        {progress >= 7 && (
+          <section className="bg-slate-800 p-8 rounded-2xl border border-blue-500/30 shadow-[0_0_30px_rgba(59,130,246,0.1)] mt-8">
+            <h3 className="text-xl font-bold mb-6 text-blue-400 border-b border-slate-700 pb-4">TSS Signing Orchestration</h3>
+            
+            {/* TRẠNG THÁI 0: CHỌN HÀNH ĐỘNG */}
+            {!signingPhase && (
+              <div className="flex gap-4">
+                <button onClick={handleStartRelease} className="flex-1 bg-emerald-600 hover:bg-emerald-500 py-3 rounded-lg font-bold text-white shadow-lg">
+                  Start Release (Giải ngân)
+                </button>
+                <button onClick={handleStartRefund} className="flex-1 bg-amber-600 hover:bg-amber-500 py-3 rounded-lg font-bold text-white shadow-lg">
+                  Start Refund (Hoàn tiền)
+                </button>
+              </div>
+            )}
+
+            {/* TRẠNG THÁI 1: ROUND 1 (NONCE) */}
+            {signingPhase === 'nonce' && (
+              <div className="flex flex-col gap-4">
+                <div className="flex justify-between items-center text-sm text-slate-300">
+                  <span>Round 1: Nonce Commitment</span>
+                  <span className="font-mono bg-slate-900 px-2 py-1 rounded">{signingProgress.percentage || 0}%</span>
+                </div>
+                <div className="w-full bg-slate-900 rounded-full h-2">
+                  <div className="bg-blue-500 h-2 rounded-full transition-all duration-500" style={{ width: `${signingProgress.percentage || 0}%` }}></div>
+                </div>
+                <button disabled className="w-full bg-blue-600/50 py-3 rounded-lg font-bold text-white/50 cursor-wait">
+                  Waiting for other nodes ({signingProgress.submitted || 0}/{signingProgress.needed || 7})...
+                </button>
+              </div>
+            )}
+
+            {/* TRẠNG THÁI 2: ROUND 2 (Z-SHARE) */}
+            {signingPhase === 'z-share' && (
+              <div className="flex flex-col gap-4">
+                <div className="flex justify-between items-center text-sm text-slate-300">
+                  <span>Round 2: Partial Signature (Z-Share)</span>
+                  <span className="font-mono bg-slate-900 px-2 py-1 rounded">{signingProgress.percentage || 0}%</span>
+                </div>
+                <div className="w-full bg-slate-900 rounded-full h-2">
+                  <div className="bg-emerald-500 h-2 rounded-full transition-all duration-500" style={{ width: `${signingProgress.percentage || 0}%` }}></div>
+                </div>
+                <button onClick={handleSubmitZShareMock} className="w-full bg-emerald-600 hover:bg-emerald-500 py-3 rounded-lg font-bold text-white shadow-lg">
+                  Compute & Submit Z-Share
+                </button>
+              </div>
+            )}
+
+            {/* TRẠNG THÁI 3: READY TO EXECUTE */}
+            {signingPhase === 'ready' && aggregatedSignature && (
+              <div className="flex flex-col gap-4 bg-emerald-900/20 border border-emerald-500/30 p-4 rounded-xl">
+                <p className="text-emerald-400 font-bold text-center">✓ Signature Aggregated Successfully</p>
+                <button 
+                  onClick={handleExecuteOnChain}
+                  disabled={isPending || isConfirming || isConfirmed}
+                  className={`w-full py-4 rounded-lg font-bold text-white shadow-[0_0_20px_rgba(16,185,129,0.3)] text-lg transition-all duration-300
+                    ${isConfirmed ? 'bg-emerald-600 cursor-not-allowed' : 
+                      isPending || isConfirming ? 'bg-amber-600 cursor-wait animate-pulse' : 
+                      'bg-linear-to-r from-blue-600 to-emerald-600 hover:from-blue-500 hover:to-emerald-500 transform hover:scale-[1.02]'}`}
+                >
+                  {isPending ? 'Confirming in Wallet...' : 
+                   isConfirming ? 'Waiting for Block Confirmation...' : 
+                   isConfirmed ? 'Executed Successfully ✓' : 
+                   'Execute On-Chain Transaction'}
+                </button>
+              </div>
+            )}
+          </section>
         )}
-
-        <div className="p-4 border border-amber-500/30 bg-amber-900/20 text-amber-300 rounded-xl text-sm">
-          Key collection is running in incremental mode. After 7/7 keys are collected, buyer can proceed to on-chain deployment and signing flow.
-        </div>
-
       </main>
     </div>
   );

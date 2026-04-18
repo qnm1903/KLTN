@@ -1,11 +1,11 @@
 /**
- * Kiến trúc Web Worker xử lý Mật mã học TSS (Threshold Signature Scheme)
- * Mục đích học thuật: Offload tính toán ECC nặng khỏi Main Thread, chống UI blocking.
+ * Kiến trúc Web Worker xử lý Mật mã học TSS 5-of-7
+ * Mục đích học thuật: Offload tính toán đường cong Elliptic nặng khỏi Main Thread của React,
+ * tránh tình trạng Freeze UI trong quá trình ký.
  */
 
-// Hàm giả lập thuật toán mã hóa đường cong elip (ECC) sinh tải nặng cho CPU
-// Trong thực tế, đây là nơi tích hợp thư viện 'elliptic' hoặc 'ethers.js'
-const simulateHeavyECC = (complexity = 10000000) => {
+// Hàm giả lập tính toán nặng (Mô phỏng phép nhân điểm trên secp256k1)
+const simulateHeavyECC = (complexity = 15000000) => {
   let result = 0;
   for (let i = 0; i < complexity; i++) {
     result += Math.sqrt(i) * Math.sin(i);
@@ -13,56 +13,62 @@ const simulateHeavyECC = (complexity = 10000000) => {
   return result;
 };
 
-// Lắng nghe thông điệp từ Main Thread (React)
+// Hàm sinh mã Hex ngẫu nhiên (Mock dữ liệu thực tế)
+const generateMockHex = (length = 64) => {
+  return "0x" + Array.from({ length }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+};
+
 self.onmessage = async (event) => {
-  const { action, taskId } = event.data;
+  const { action, taskId, payload } = event.data;
 
   try {
     switch (action) {
-      case 'INIT_DKG': {
-        // Giai đoạn 1: Distributed Key Generation (Tạo khóa phân tán)
-        self.postMessage({ taskId, status: 'computing', log: 'Starting ECC Key Generation...' });
-
-        // Giả lập tính toán nặng mất khoảng 2-3 giây
-        simulateHeavyECC(30000000);
-
-        const mockPkAggCoords = "0x" + Math.random().toString(16).slice(2, 66); // Fake 32-byte hex
+      case 'COMPUTE_NONCE': {
+        // Round 1: Sinh số ngẫu nhiên k (Cryptographic Nonce) và tính R = k * G
+        self.postMessage({ taskId, status: 'computing', log: 'Đang sinh số ngẫu nhiên k và tính toán Nonce R = k*G...' });
+        
+        simulateHeavyECC(10000000); // Mô phỏng trễ
+        
+        // Theo chuẩn DTO của nhánh Main, backend cần R_x và R_y (Tọa độ của điểm R)
+        const R_x = generateMockHex(64);
+        const R_y = generateMockHex(64);
 
         self.postMessage({
           taskId,
           status: 'success',
-          result: { pkAggCoords: mockPkAggCoords },
-          log: 'DKG Completed successfully.'
+          result: { R_x, R_y },
+          log: 'Đã hoàn tất tính toán Nonce (Round 1).'
         });
         break;
       }
 
-      case 'GENERATE_SIGNATURE_SHARE': {
-        // Giai đoạn 2: Tạo mảnh chữ ký (Signature Share)
-        self.postMessage({ taskId, status: 'computing', log: 'Calculating Schnorr signature share...' });
+      case 'COMPUTE_Z_SHARE': {
+        // Round 2: Tính toán Z-Share dựa trên k_i (lưu cục bộ), x_i (khóa riêng), e (challenge) và R_agg
+        self.postMessage({ taskId, status: 'computing', log: 'Đang giải phương trình Schnorr: z_i = k_i + e * x_i...' });
+        
+        simulateHeavyECC(15000000); // Mô phỏng trễ
 
-        simulateHeavyECC(15000000); // Tính toán nhẹ hơn DKG một chút
-
-        const mockSignatureShare = "0x" + Math.random().toString(16).slice(2, 66);
+        // Theo chuẩn DTO, backend cần mảnh z_i
+        const z = generateMockHex(64);
 
         self.postMessage({
           taskId,
           status: 'success',
-          result: { signatureShare: mockSignatureShare },
-          log: 'Signature share generated.'
+          result: { z },
+          log: 'Đã hoàn tất tính toán Partial Signature (Z-Share - Round 2).'
         });
         break;
       }
 
       default:
-        throw new Error('Unknown action specified for TSS Worker');
+        throw new Error(`Unknown action specified for TSS Worker: ${action}`);
     }
   } catch (error) {
     self.postMessage({
       taskId,
       status: 'error',
       error: error.message,
-      log: `Error: ${error.message}`
+      log: `Worker Error: ${error.message}`
     });
   }
 };

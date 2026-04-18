@@ -140,9 +140,20 @@ export default function EscrowDetail() {
     }
   };
 
-  const handleStartRefund = async () => {
+const handleStartRefund = async () => {
     setSelectedAction('refund');
-    // Tương lai sẽ gọi worker tương tự release
+    try {
+      // Offload tính toán ECC sang Web Worker giống hệt luồng Release
+      const { R_x, R_y } = await computeNonce();
+      
+      const dummySignerBitmap = 127; // Tạm thời giữ nguyên bitmap theo yêu cầu DTO
+      
+      // Gọi API với action là 'refund'
+      await submitNonce(escrowId, activeRole, 'refund', dummySignerBitmap, R_x, R_y);
+      addLog({ message: `Đã khởi tạo tiến trình Hoàn tiền. Đang chờ các node khác...`, type: 'info' });
+    } catch (error) {
+      addLog({ message: `Failed to start refund: ${error.message}`, type: 'error' });
+    }
   };
 
   const handleSubmitZShare = async () => {

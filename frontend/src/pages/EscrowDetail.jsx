@@ -17,7 +17,8 @@ import {
 } from '../features/escrow/escrowStore';
 import { useEscrowSync } from '../features/escrow/useEscrowSync';
 import { useSessionRecovery } from '../features/escrow/useSessionRecovery';
-import { useContractCall } from '../features/escrow/useContractCall'; // Tích hợp Phase 4
+import { useContractCall } from '../features/escrow/useContractCall'; 
+import { useTssWorker } from '../features/escrow/useTssWorker'; // Tích hợp Phase 5: Web Worker
 
 // --- IMPORT API & STORAGE ---
 import api from '../lib/api';
@@ -61,7 +62,8 @@ export default function EscrowDetail() {
   // 2. Khởi tạo Logic Chạy ngầm
   const { isRecovering } = useSessionRecovery(escrowId, address);
   const { submitPubKey, submitNonce, submitZShare } = useEscrowSync(escrowId);
-  const { executeRelease, isPending, isConfirming, isConfirmed } = useContractCall(); // Hook gọi Smart Contract
+  const { executeRelease, isPending, isConfirming, isConfirmed } = useContractCall();
+  const { computeNonce, computeZShare } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
   const status = useAtomValue(escrowStatusAtom);
@@ -128,10 +130,11 @@ export default function EscrowDetail() {
   const handleStartRelease = async () => {
     setSelectedAction('release');
     try {
-      const dummySignerBitmap = 127;
-      const dummyRx = "0x" + "1".repeat(64);
-      const dummyRy = "0x" + "2".repeat(64);
-      await submitNonce(escrowId, activeRole, 'release', dummySignerBitmap, dummyRx, dummyRy);
+      // Offload tính toán ECC sang Web Worker
+      const { R_x, R_y } = await computeNonce();
+      
+      const dummySignerBitmap = 127; // Tạm thời giữ nguyên bitmap theo yêu cầu DTO
+      await submitNonce(escrowId, activeRole, 'release', dummySignerBitmap, R_x, R_y);
     } catch (error) {
       addLog({ message: `Failed to start release: ${error.message}`, type: 'error' });
     }
@@ -139,14 +142,16 @@ export default function EscrowDetail() {
 
   const handleStartRefund = async () => {
     setSelectedAction('refund');
-    // Implement tương tự release trong tương lai
+    // Tương lai sẽ gọi worker tương tự release
   };
 
-  const handleSubmitZShareMock = async () => {
+  const handleSubmitZShare = async () => {
     try {
+      // Offload tính toán phương trình Schnorr sang Web Worker
+      const { z } = await computeZShare();
+      
       const dummySignerBitmap = 127;
-      const dummyZ = "0x" + "3".repeat(64);
-      await submitZShare(escrowId, activeRole, dummySignerBitmap, dummyZ);
+      await submitZShare(escrowId, activeRole, dummySignerBitmap, z);
     } catch (error) {
       addLog({ message: `Failed to submit Z-Share: ${error.message}`, type: 'error' });
     }
@@ -338,7 +343,7 @@ export default function EscrowDetail() {
                 <div className="w-full bg-slate-900 rounded-full h-2">
                   <div className="bg-emerald-500 h-2 rounded-full transition-all duration-500" style={{ width: `${signingProgress.percentage || 0}%` }}></div>
                 </div>
-                <button onClick={handleSubmitZShareMock} className="w-full bg-emerald-600 hover:bg-emerald-500 py-3 rounded-lg font-bold text-white shadow-lg">
+                <button onClick={handleSubmitZShare} className="w-full bg-emerald-600 hover:bg-emerald-500 py-3 rounded-lg font-bold text-white shadow-lg">
                   Compute & Submit Z-Share
                 </button>
               </div>

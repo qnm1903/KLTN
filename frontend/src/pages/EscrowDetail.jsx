@@ -62,7 +62,7 @@ export default function EscrowDetail() {
   // 2. Khởi tạo Logic Chạy ngầm
   const { isRecovering } = useSessionRecovery(escrowId, address);
   const { submitPubKey, submitNonce, submitZShare } = useEscrowSync(escrowId);
-  const { executeRelease, isPending, isConfirming, isConfirmed } = useContractCall();
+  const { executeTssAction, isPending, isConfirming, isConfirmed } = useContractCall();
   const { computeNonce, computeZShare } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
@@ -172,7 +172,10 @@ const handleStartRefund = async () => {
   const handleExecuteOnChain = async () => {
     try {
       if (!aggregatedSignature) throw new Error("Missing aggregated signature");
-      await executeRelease(aggregatedSignature);
+      
+      // Truyền selectedAction (có giá trị 'release' hoặc 'refund') vào hàm
+      await executeTssAction(selectedAction, aggregatedSignature);
+      
     } catch (error) {
       addLog({ message: `On-chain execution failed: ${error.message}`, type: 'error' });
     }

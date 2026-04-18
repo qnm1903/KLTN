@@ -1,4 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
+import { useSetAtom } from 'jotai';
+import { addSystemLogAtom } from './escrowStore';
 
 /**
  * Custom Hook quản lý vòng đời và giao tiếp với TSS Web Worker
@@ -7,6 +9,7 @@ export const useTssWorker = () => {
   // Dùng useRef để giữ instance của worker không bị re-create mỗi khi component render lại
   const workerRef = useRef(null);
   const taskResolvers = useRef({});
+  const addLog = useSetAtom(addSystemLogAtom); // Lấy hàm ghi log lên Terminal UI
 
   // Khởi tạo Worker khi component mount
   useEffect(() => {
@@ -19,8 +22,13 @@ export const useTssWorker = () => {
     workerRef.current.onmessage = (event) => {
       const { taskId, status, result, error, log } = event.data;
 
-      // In log ra console để GVHD thấy quá trình chạy ngầm
-      if (log) console.log(`[TSS Worker Log]: ${log}`);
+      // In log ra UI Terminal 
+      if (log) {
+        addLog({ 
+          message: `[TSS Worker] ${log}`, 
+          type: status === 'error' ? 'error' : 'info' 
+        });
+      }
 
       if (taskResolvers.current[taskId]) {
         if (status === 'success') {
@@ -30,15 +38,14 @@ export const useTssWorker = () => {
           taskResolvers.current[taskId].reject(new Error(error));
           delete taskResolvers.current[taskId];
         }
-        // Nếu status là 'computing', ta có thể bỏ qua hoặc bắn event update UI progress
       }
     };
 
-    // Dọn dẹp Worker khi component unmount (Chống rò rỉ bộ nhớ - Memory Leak)
+    // Dọn dẹp Worker khi component unmount
     return () => {
       workerRef.current?.terminate();
     };
-  }, []);
+  }, [addLog]); // Thêm addLog vào dependency array
 
   // Hàm gọi Worker dưới dạng Promise để dùng dễ dàng với async/await trong React
   const executeWorkerTask = useCallback((action, payload) => {
@@ -58,9 +65,8 @@ export const useTssWorker = () => {
   }, []);
 
   return {
-    // Expose các hàm chức năng cụ thể ra ngoài
-    initDkg: (mediators) => executeWorkerTask('INIT_DKG', { mediators }),
-    generateSignatureShare: (escrowId, privateKeyShare) => 
-      executeWorkerTask('GENERATE_SIGNATURE_SHARE', { escrowId, privateKeyShare })
+    // Chuẩn hóa hàm export đúng Signing Happy Path 
+    computeNonce: () => executeWorkerTask('COMPUTE_NONCE', {}),
+    computeZShare: () => executeWorkerTask('COMPUTE_Z_SHARE', {})
   };
 };

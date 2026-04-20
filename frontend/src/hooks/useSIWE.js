@@ -3,10 +3,6 @@ import { useAtom } from 'jotai';
 import { authAtom, clearSession, setSession } from '../store/authStore';
 import api from '../lib/api';
 
-/**
- * Hook xử lý SIWE (Sign-In With Ethereum) - Phase Auth
- * Đảm bảo đồng bộ hóa tuyệt đối giữa Chữ ký của ví và Session của Backend.
- */
 export function useSIWE() {
   const { address } = useAccount();
   const { signMessageAsync } = useSignMessage();
@@ -15,54 +11,57 @@ export function useSIWE() {
 
   const login = async () => {
     try {
-      if (!address) throw new Error("Chưa kết nối ví MetaMask!");
+      if (!address) throw new Error("Vui lòng kết nối ví MetaMask trước!");
 
-      console.log("🚦 [SIWE Step 1]: Đang lấy Nonce cho:", address);
-      const nonceRes = await api.get(`/auth/nonce?address=${address.toLowerCase()}`);
+      const normalizedAddress = address.toLowerCase();
+      
+      console.log("🚦 [SIWE Step 1]: Lấy Nonce...");
+      const nonceRes = await api.get(`/auth/nonce?address=${normalizedAddress}`);
       const nonce = nonceRes.data?.nonce || nonceRes.data;
+      if (!nonce) throw new Error("Backend không trả về Nonce!");
 
-      // ĐỊNH DẠNG TIN NHẮN (Phải khớp 100% với logic Verify của Backend)
+      // Chuỗi thông điệp bắt buộc phải khớp 100% với Backend
       const message = `Sign this message to authenticate with Escrow TSS DApp.\n\nNonce: ${nonce}`;
 
-      console.log("🚦 [SIWE Step 3]: Yêu cầu ký MetaMask...");
+      console.log("🚦 [SIWE Step 3]: Chờ ký MetaMask...");
       const signature = await signMessageAsync({ message });
-      console.log("🚦 [SIWE Step 4]: Ký thành công. Đang gửi xác thực...");
 
-      // STEP 5: Gửi đầy đủ Payload để Backend recover địa chỉ
+      console.log("🚦 [SIWE Step 5]: Gửi Payload (Address, Signature, Message) lên Verify...");
       const { data } = await api.post('/auth/verify', { 
-        address: address.toLowerCase(), 
+        address: normalizedAddress, 
         signature,
-        message // Bổ sung message để Backend ethers.verifyMessage
+        message 
       });
 
-      console.log("🚦 [SIWE Step 6]: Backend xác thực thành công!");
-
-      // Lưu Session vào LocalStorage và State
+      // Lưu Token vào LocalStorage (Đồng bộ với DB mới của nhánh main)
+      const validToken = data.accessToken || data.token;
       setSession({
-        accessToken: data.accessToken || data.token,
+        accessToken: validToken,
         user: data.user,
       });
 
       setAuth({ isAuthenticated: true, user: data.user });
+      console.log("✅ [SIWE]: Trạng thái đăng nhập THÀNH CÔNG!");
       return data;
 
     } catch (error) {
-      const errorDetail = error.response?.data?.error || error.message;
+      const errorDetail = error.response?.data?.error || error.response?.data || error.message;
       console.error('❌ [SIWE FAILED]:', errorDetail);
       clearSession();
-      throw new Error(errorDetail);
+      // Không gọi disconnectAsync() ở đây để giữ UX mượt mà
+      throw new Error(typeof errorDetail === 'string' ? errorDetail : "Xác thực thất bại");
     }
   };
 
   const logout = async () => {
     try {
       await api.post('/auth/logout');
-    } catch (e) {
-      console.warn("Logout Backend fail, clearing local anyway.");
+    } catch (error) {
+      console.warn("Logout Backend failed, clearing local session.");
     } finally {
       clearSession();
       setAuth({ isAuthenticated: false, user: null });
-      await disconnectAsync();
+      if (disconnectAsync) await disconnectAsync();
     }
   };
 

@@ -1,9 +1,6 @@
 import axios from 'axios';
 import { getStoredAccessToken, clearSession } from '../store/authStore';
 
-/**
- * Cấu hình Axios Instance với cơ chế tự động tiêm JWT Token vào Header.
- */
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api',
   withCredentials: true,
@@ -12,30 +9,29 @@ const api = axios.create({
   },
 });
 
-// REQUEST INTERCEPTOR: Gắn Token vào mọi yêu cầu đi tới Backend
+// REQUEST INTERCEPTOR: Tiêm JWT Token tự động (Implicit Token Injection)
 api.interceptors.request.use((config) => {
   const token = getStoredAccessToken();
   
   if (token && token !== 'null' && token !== 'undefined') {
-    // Sử dụng headers.set để đảm bảo tính tương thích với Axios v1.x
     if (config.headers && typeof config.headers.set === 'function') {
       config.headers.set('Authorization', `Bearer ${token}`);
     } else {
       config.headers.Authorization = `Bearer ${token}`;
     }
-    console.log(`📡 [API Call]: ${config.method?.toUpperCase()} ${config.url} (Token Injected)`);
+    console.log(`📡 [API Call]: ${config.method?.toUpperCase()} ${config.url} (Secured)`);
   }
   
   return config;
 }, (error) => Promise.reject(error));
 
-// RESPONSE INTERCEPTOR: Xử lý khi Token hết hạn (401)
+// RESPONSE INTERCEPTOR: Circuit Breaker cho lỗi 401
 api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      console.warn("🚨 [401 Unauthorized]: Phiên đăng nhập hết hạn hoặc Token không hợp lệ.");
-      clearSession(); // Xóa sạch LocalStorage để bắt user login lại
+      console.warn("🚨 [401 Unauthorized]: Phiên hết hạn. Đang làm sạch State...");
+      clearSession();
     }
     return Promise.reject(error);
   }

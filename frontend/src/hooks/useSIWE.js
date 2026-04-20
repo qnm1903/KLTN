@@ -3,6 +3,10 @@ import { useAtom } from 'jotai';
 import { authAtom, clearSession, setSession } from '../store/authStore';
 import api from '../lib/api';
 
+/**
+ * Hook xử lý xác thực SIWE (Sign-In With Ethereum)
+ * Đảm bảo tính nhất quán giữa chữ ký người dùng và xác thực phía Server.
+ */
 export function useSIWE() {
   const { address } = useAccount();
   const { signMessageAsync } = useSignMessage();
@@ -11,45 +15,57 @@ export function useSIWE() {
 
   const login = async () => {
     try {
-      if (!address) throw new Error("Wallet not connected");
+      if (!address) throw new Error("Please connect your MetaMask wallet first!");
 
-      // Step 1: Lấy Nonce
+      // 1. Lấy Nonce từ Backend
       const nonceRes = await api.get(`/auth/nonce?address=${address.toLowerCase()}`);
       const nonce = nonceRes.data?.nonce || nonceRes.data;
+      if (!nonce) throw new Error("Backend returned empty nonce!");
 
-      // Step 2: Định dạng Message (Theo đúng yêu cầu của nhánh main)
+      // 2. Yêu cầu MetaMask ký thông điệp (Format chuẩn của nhánh main)
       const message = `Sign this message to authenticate with Escrow TSS DApp.\n\nNonce: ${nonce}`;
-
-      // Step 3: Ký
+      
+      console.log("🚦 [SIWE] Requesting signature for message:", message);
       const signature = await signMessageAsync({ message });
 
-      // Step 4: Verify (Quan trọng: Normalize address trước khi gửi)
-      const verifyRes = await api.post('/auth/verify', { 
+      // 3. Gửi chữ ký lên Backend (BỔ SUNG THAM SỐ MESSAGE ĐỂ FIX LỖI 400)
+      const { data } = await api.post('/auth/verify', { 
         address: address.toLowerCase(), 
-        signature 
+        signature,
+        message // Nhánh main cần message này để recover address
       });
 
-      // Step 5: Lưu session
-      const { accessToken, user } = verifyRes.data;
-      setSession({ accessToken: accessToken || verifyRes.data.token, user });
-      setAuth({ isAuthenticated: true, user });
+      // 4. Lưu Session và cập nhật Auth State
+      const accessToken = data.accessToken || data.token;
+      setSession({
+        accessToken,
+        user: data.user,
+      });
 
-      console.log("✅ SIWE Authenticated!");
-      return verifyRes.data;
+      setAuth({ isAuthenticated: true, user: data.user });
+      
+      console.log("✅ [SIWE] Authentication successful. Token stored.");
+      return data;
 
     } catch (error) {
-      console.error('❌ SIWE Error:', error.response?.data || error.message);
+      console.error('❌ [SIWE Error]:', error.response?.data || error.message);
       clearSession();
-      if (disconnectAsync) await disconnectAsync();
+      // CHỈ disconnect nếu lỗi nghiêm trọng, không tự động ngắt kết nối khi chỉ là lỗi verify
+      // giúp user có thể nhấn Sign In lại dễ dàng.
       throw error;
     }
   };
 
   const logout = async () => {
-    await api.post('/auth/logout').catch(() => {});
-    clearSession();
-    setAuth({ isAuthenticated: false, user: null });
-    if (disconnectAsync) await disconnectAsync();
+    try {
+      await api.post('/auth/logout');
+    } catch (error) {
+      console.warn('Logout request failed:', error);
+    } finally {
+      clearSession();
+      setAuth({ isAuthenticated: false, user: null });
+      await disconnectAsync();
+    }
   };
 
   return { login, logout, auth };

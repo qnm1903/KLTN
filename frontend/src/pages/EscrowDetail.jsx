@@ -59,10 +59,10 @@ export default function EscrowDetail() {
   const [isSubmittingKey, setIsSubmittingKey] = useState(false);
   const addLog = useSetAtom(addSystemLogAtom);
 
-  // 2. Khởi tạo Logic Chạy ngầm
+  // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm fundEscrow)
   const { isRecovering } = useSessionRecovery(escrowId, address);
   const { submitPubKey, submitNonce, submitZShare } = useEscrowSync(escrowId);
-  const { executeTssAction, isPending, isConfirming, isConfirmed } = useContractCall();
+  const { executeTssAction, fundEscrow, isPending, isConfirming, isConfirmed } = useContractCall(); 
   const { computeNonce, computeZShare } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
@@ -83,8 +83,10 @@ export default function EscrowDetail() {
   const hasSubmitted = activeRole !== 'Unknown' && signedNodes.includes(activeRole);
   const localPubKey = getPubKey(address);
 
-  // Auto-scroll cho Terminal
+  // Auto-scroll cho Terminal & Biến cờ Auto-Submit (Phase 1)
   const logsEndRef = useRef(null);
+  const autoSubmitAttempted = useRef(false);
+
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
@@ -127,6 +129,37 @@ export default function EscrowDetail() {
     }
   };
 
+  // --- BẢN VÁ PHASE 1: LUỒNG AUTO-SUBMIT KEY ---
+  useEffect(() => {
+    if (
+      activeRole !== 'Unknown' &&
+      localPubKey &&
+      !hasSubmitted &&
+      !isSubmittingKey &&
+      progress < 7 &&
+      !autoSubmitAttempted.current
+    ) {
+      autoSubmitAttempted.current = true;
+      addLog({ message: 'Auto-submitting local Public Key...', type: 'info' });
+      handleSubmitMyPubKey();
+    }
+  }, [activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey, addLog]);
+
+  // --- BẢN VÁ PHASE 2: LUỒNG NẠP TIỀN CHO BUYER ---
+  const handleDepositFunds = async () => {
+    try {
+      // Fallback: API Contract Address -> API Vault Address -> Local ENV
+      const vaultAddress = escrow?.contractAddress || escrow?.vaultAddress || import.meta.env.VITE_ESCROW_CONTRACT_ADDRESS; 
+      if (!vaultAddress) {
+         addLog({ message: "Smart Contract address is missing. Please setup VITE_ESCROW_CONTRACT_ADDRESS in .env", type: 'error' });
+         return;
+      }
+      await fundEscrow(vaultAddress, escrow?.amount);
+    } catch (error) {
+      addLog({ message: `Deposit action failed: ${error.message}`, type: 'error' });
+    }
+  };
+
   const handleStartRelease = async () => {
     setSelectedAction('release');
     try {
@@ -140,7 +173,7 @@ export default function EscrowDetail() {
     }
   };
 
-const handleStartRefund = async () => {
+  const handleStartRefund = async () => {
     setSelectedAction('refund');
     try {
       // Offload tính toán ECC sang Web Worker giống hệt luồng Release
@@ -211,7 +244,40 @@ const handleStartRefund = async () => {
       </nav>
 
       <main className="max-w-4xl mx-auto mt-10 flex flex-col gap-8 px-6">
+        {/* --- BẮT ĐẦU BẢNG DEBUG (SAU KHI FIX XONG SẼ XÓA) --- */}
+        <div className="bg-red-900 text-yellow-300 p-6 rounded-xl font-mono text-sm border-2 border-yellow-500 shadow-2xl mb-4">
+          <h3 className="text-xl font-bold text-white mb-4 border-b border-red-700 pb-2">🔍 X-RAY DEBUG PANEL</h3>
+          <div className="grid grid-cols-2 gap-2">
+            <p>1. Tiến trình DKG (progress): <span className="text-white">{progress}/7</span></p>
+            <p>2. Vai trò hiện tại (activeRole): <span className="text-white px-2 bg-black/50">{activeRole}</span></p>
+            <p>3. Ví đang kết nối (address): <span className="text-white">{address || 'Chưa kết nối'}</span></p>
+            <p>4. Ví Buyer trên DB (escrow.buyer): <span className="text-white">{escrow?.buyer?.walletAddress || 'Đang tải...'}</span></p>
+            <p>5. Trạng thái DB (escrow.status): <span className="text-white">{escrow?.status || 'Đang tải...'}</span></p>
+            <p>6. Đã xác nhận Tx (isConfirmed): <span className="text-white">{String(isConfirmed)}</span></p>
+          </div>
+          <div className="mt-4 pt-4 border-t border-red-700 text-lg">
+            <p>=&gt; Nút Deposit có được phép hiện không?: 
+              <span className={progress >= 7 && activeRole === 'buyer' && !isConfirmed && escrow?.status !== 'FUNDED' ? "text-green-400 ml-2 font-bold" : "text-red-400 ml-2 font-bold"}>
+                {String(progress >= 7 && activeRole === 'buyer' && !isConfirmed && escrow?.status !== 'FUNDED')}
+              </span>
+            </p>
+          </div>
+        </div>
+        {/* --- KẾT THÚC BẢNG DEBUG --- */}
         
+        {/* BẢN VÁ PHASE 1: CẢNH BÁO THIẾU KEY (Rất quan trọng cho E2E Testing) */}
+        {!localPubKey && address && (
+          <div className="bg-red-900/50 border-2 border-red-500 p-6 rounded-xl shadow-[0_0_20px_rgba(239,68,68,0.3)] flex flex-col items-center gap-3">
+            <h3 className="text-red-400 font-bold text-xl uppercase tracking-widest">⚠️ Missing Local Keypair</h3>
+            <p className="text-red-200 text-center">
+              Profile trình duyệt này chưa được khởi tạo Private/Public Key. Bạn không thể tham gia mạng lưới TSS.
+            </p>
+            <a href="/generate-key" className="mt-2 px-8 py-3 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg transition-colors">
+              Go to Key Generator
+            </a>
+          </div>
+        )}
+
         {/* KHỐI 1: THÔNG TIN KÝ QUỸ */}
         <section className="bg-slate-800 p-8 rounded-2xl border border-slate-700 flex flex-col gap-4 shadow-xl">
           <div className="flex justify-between items-center border-b border-slate-700 pb-4">
@@ -291,31 +357,61 @@ const handleStartRefund = async () => {
         </section>
 
         {/* KHỐI 4: CỤM NÚT HÀNH ĐỘNG PUBKEY */}
-        <section className="flex gap-6 justify-center mt-4">
-          <button 
-            onClick={handleSubmitMyPubKey}
-            disabled={hasSubmitted || isSubmittingKey || progress >= 7 || activeRole === 'Unknown' || !localPubKey}
-            className={`px-8 py-4 rounded-xl font-bold transition-all duration-300 w-56 flex items-center justify-center gap-2
-              ${hasSubmitted || progress >= 7 || activeRole === 'Unknown' || !localPubKey
-                ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed' 
-                : isSubmittingKey 
-                  ? 'bg-blue-600/50 cursor-wait border border-blue-500/50' 
-                  : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/25 border border-blue-500'}`}
-          >
-            {isSubmittingKey && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}
-            {isSubmittingKey ? 'Submitting...' : hasSubmitted ? 'Pubkey Submitted ✓' : !localPubKey ? 'Generate Key First' : 'Submit My Pubkey'}
-          </button>
+        {progress < 7 && (
+          <section className="flex gap-6 justify-center mt-4">
+            <button 
+              onClick={handleSubmitMyPubKey}
+              disabled={hasSubmitted || isSubmittingKey || progress >= 7 || activeRole === 'Unknown' || !localPubKey}
+              className={`px-8 py-4 rounded-xl font-bold transition-all duration-300 w-56 flex items-center justify-center gap-2
+                ${hasSubmitted || progress >= 7 || activeRole === 'Unknown' || !localPubKey
+                  ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed' 
+                  : isSubmittingKey 
+                    ? 'bg-blue-600/50 cursor-wait border border-blue-500/50' 
+                    : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/25 border border-blue-500'}`}
+            >
+              {isSubmittingKey && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}
+              {isSubmittingKey ? 'Submitting...' : hasSubmitted ? 'Pubkey Submitted ✓' : !localPubKey ? 'Generate Key First' : 'Submit My Pubkey'}
+            </button>
 
-          <a
-            href="/generate-key"
-            className="px-8 py-4 rounded-xl font-bold transition-all duration-300 w-64 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white shadow-[0_0_30px_rgba(16,185,129,0.4)] border border-emerald-500"
-          >
-            Generate / Rotate Key
-          </a>
-        </section>
+            <a
+              href="/generate-key"
+              className="px-8 py-4 rounded-xl font-bold transition-all duration-300 w-64 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white shadow-[0_0_30px_rgba(16,185,129,0.4)] border border-emerald-500"
+            >
+              Generate / Rotate Key
+            </a>
+          </section>
+        )}
+
+        {/* BẢN VÁ PHASE 2: KHỐI 4.5 - NẠP TIỀN ON-CHAIN (CHỈ HIỂN THỊ KHI CHƯA XÁC NHẬN NẠP) */}
+        {progress >= 7 && activeRole === 'buyer' && !isConfirmed && escrow?.status !== 'FUNDED' && (
+          <section className="bg-slate-800 p-8 rounded-2xl border border-emerald-500/50 shadow-[0_0_30px_rgba(16,185,129,0.15)] mt-8 relative overflow-hidden">
+            <div className="absolute top-0 right-0 p-4 opacity-10">
+              <span className="text-8xl">💎</span>
+            </div>
+            <h3 className="text-2xl font-bold mb-4 text-emerald-400 border-b border-slate-700 pb-4 relative z-10">
+              Phase 2: Lock Funds On-chain
+            </h3>
+            <p className="text-slate-300 mb-6 text-lg relative z-10">
+              Mạng lưới đã khởi tạo Khóa tổng hợp (Aggregated Address) thành công. Là Người Mua (Buyer), bạn cần nạp <strong>{normalizeDisplayAmount(escrow?.amount)} ETH</strong> vào Smart Contract để quỹ được khóa an toàn trước khi có thể kích hoạt tiến trình giải ngân.
+            </p>
+            <button 
+              onClick={handleDepositFunds}
+              disabled={isPending || isConfirming}
+              className={`w-full py-4 rounded-xl font-bold text-white text-xl transition-all shadow-xl relative z-10
+                ${isPending || isConfirming 
+                  ? 'bg-emerald-600/50 cursor-wait animate-pulse border border-emerald-500/50' 
+                  : 'bg-linear-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 transform hover:-translate-y-1'}`}
+            >
+              {isPending ? 'Confirming in MetaMask...' : 
+               isConfirming ? 'Mining Block on Ethereum...' : 
+               `Deposit ${normalizeDisplayAmount(escrow?.amount)} ETH Now`}
+            </button>
+          </section>
+        )}
 
         {/* KHỐI 5: LUỒNG KÝ ĐA PHẦN (TSS SIGNING ORCHESTRATION) */}
-        {progress >= 7 && (
+        {/* Điều kiện: Các Role khác sẽ thấy ngay. Riêng Buyer chỉ thấy khi isConfirmed = true HOẶC db đã báo FUNDED */}
+        {progress >= 7 && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'FUNDED') && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-blue-500/30 shadow-[0_0_30px_rgba(59,130,246,0.1)] mt-8">
             <h3 className="text-xl font-bold mb-6 text-blue-400 border-b border-slate-700 pb-4">TSS Signing Orchestration</h3>
             

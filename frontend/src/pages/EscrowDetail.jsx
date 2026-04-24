@@ -59,10 +59,10 @@ export default function EscrowDetail() {
   const [isSubmittingKey, setIsSubmittingKey] = useState(false);
   const addLog = useSetAtom(addSystemLogAtom);
 
-  // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm fundEscrow)
+  // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm deployEscrowVault)
   const { isRecovering } = useSessionRecovery(escrowId, address);
   const { submitPubKey, submitNonce, submitZShare } = useEscrowSync(escrowId);
-  const { executeTssAction, fundEscrow, isPending, isConfirming, isConfirmed } = useContractCall(); 
+  const { deployEscrowVault, executeTssAction, fundEscrow, isPending, isConfirming, isConfirmed } = useContractCall(); 
   const { computeNonce, computeZShare } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
@@ -82,6 +82,9 @@ export default function EscrowDetail() {
 
   const hasSubmitted = activeRole !== 'Unknown' && signedNodes.includes(activeRole);
   const localPubKey = getPubKey(address);
+  
+  // Cờ kiểm tra tính độc quyền UI (Mutually Exclusive)
+  const hasVaultAddress = Boolean(escrow?.contractAddress || escrow?.vaultAddress);
 
   // Auto-scroll cho Terminal & Biến cờ Auto-Submit (Phase 1)
   const logsEndRef = useRef(null);
@@ -145,15 +148,48 @@ export default function EscrowDetail() {
     }
   }, [activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey, addLog]);
 
+  // --- BẢN VÁ PHASE 1.5 TỪ MAIN: AUTO-TRIGGER DEPLOY KHI ĐẠT 7/7 ---
+  useEffect(() => {
+    // Kiểm tra tiến trình DKG (progress >= 7), Role là Buyer, và DB chưa có địa chỉ Vault
+    if (progress >= 7 && activeRole === 'buyer' && !hasVaultAddress) {
+      addLog({ message: "DKG Complete! Auto-triggering Backend to deploy Vault Contract...", type: 'info' });
+      
+      api.post('/escrow/deploy-vault', { escrowId })
+        .then(res => {
+          addLog({ message: `Deployment TX submitted by Backend! Hash: ${res.data.txHash}. Waiting for 12 block confirmations (~3 mins)...`, type: 'warning' });
+        })
+        .catch(err => {
+          if (err.response?.status === 410) {
+             addLog({ message: "SESSION EXPIRED (410). Vui lòng tạo Escrow mới để test luồng Deploy.", type: 'error' });
+          } else {
+             addLog({ message: `Backend Deploy failed: ${err.response?.data?.error || err.message}`, type: 'error' });
+          }
+        });
+    }
+  }, [progress, activeRole, hasVaultAddress, escrowId, addLog]);
+
+  // Lắng nghe sự kiện vault_deployed từ WebSocket
+  useEffect(() => {
+    // Do hệ thống có cơ chế setInterval(fetchEscrowDetail, 5000) ở trên, 
+    // địa chỉ contractAddress sẽ tự động được cập nhật vào State sau khi DB thay đổi.
+    // Nếu bạn có hook socket chuyên dụng, có thể bind thêm socket.on('vault_deployed') tại đây.
+  }, [escrowId]);
+
   // --- BẢN VÁ PHASE 2: LUỒNG NẠP TIỀN CHO BUYER ---
   const handleDepositFunds = async () => {
     try {
-      // Fallback: API Contract Address -> API Vault Address -> Local ENV
-      const vaultAddress = escrow?.contractAddress || escrow?.vaultAddress || import.meta.env.VITE_ESCROW_CONTRACT_ADDRESS; 
+      // ÉP BUỘC LẤY ĐỊA CHỈ TỪ DATABASE (Loại bỏ cái bẫy .env)
+      const vaultAddress = escrow?.contractAddress || escrow?.vaultAddress; 
+      
       if (!vaultAddress) {
-         addLog({ message: "Smart Contract address is missing. Please setup VITE_ESCROW_CONTRACT_ADDRESS in .env", type: 'error' });
+         addLog({ 
+           message: "CRITICAL: Escrow chưa được gán địa chỉ Smart Contract. Vui lòng F5 tải lại trang.", 
+           type: 'error' 
+         });
          return;
       }
+      
+      addLog({ message: `Đang gọi Smart Contract đích: ${vaultAddress}`, type: 'info' });
       await fundEscrow(vaultAddress, escrow?.amount);
     } catch (error) {
       addLog({ message: `Deposit action failed: ${error.message}`, type: 'error' });
@@ -183,7 +219,7 @@ export default function EscrowDetail() {
       
       // Gọi API với action là 'refund'
       await submitNonce(escrowId, activeRole, 'refund', dummySignerBitmap, R_x, R_y);
-      addLog({ message: `Đã khởi tạo tiến trình Hoàn tiền. Đang chờ các node khác...`, type: 'info' });
+      addLog({ message: `Refund process initiated. Waiting for other nodes...`, type: 'info' });
     } catch (error) {
       addLog({ message: `Failed to start refund: ${error.message}`, type: 'error' });
     }
@@ -244,33 +280,38 @@ export default function EscrowDetail() {
       </nav>
 
       <main className="max-w-4xl mx-auto mt-10 flex flex-col gap-8 px-6">
-        {/* --- BẮT ĐẦU BẢNG DEBUG (SAU KHI FIX XONG SẼ XÓA) --- */}
+        {/* --- START DEBUG PANEL --- */}
         <div className="bg-red-900 text-yellow-300 p-6 rounded-xl font-mono text-sm border-2 border-yellow-500 shadow-2xl mb-4">
           <h3 className="text-xl font-bold text-white mb-4 border-b border-red-700 pb-2">🔍 X-RAY DEBUG PANEL</h3>
           <div className="grid grid-cols-2 gap-2">
-            <p>1. Tiến trình DKG (progress): <span className="text-white">{progress}/7</span></p>
-            <p>2. Vai trò hiện tại (activeRole): <span className="text-white px-2 bg-black/50">{activeRole}</span></p>
-            <p>3. Ví đang kết nối (address): <span className="text-white">{address || 'Chưa kết nối'}</span></p>
-            <p>4. Ví Buyer trên DB (escrow.buyer): <span className="text-white">{escrow?.buyer?.walletAddress || 'Đang tải...'}</span></p>
-            <p>5. Trạng thái DB (escrow.status): <span className="text-white">{escrow?.status || 'Đang tải...'}</span></p>
-            <p>6. Đã xác nhận Tx (isConfirmed): <span className="text-white">{String(isConfirmed)}</span></p>
+            <p>1. DKG Progress: <span className="text-white">{progress}/7</span></p>
+            <p>2. Active Role: <span className="text-white px-2 bg-black/50">{activeRole}</span></p>
+            <p>3. Connected Wallet: <span className="text-white">{address || 'Not connected'}</span></p>
+            <p>4. Buyer in DB: <span className="text-white">{escrow?.buyer?.walletAddress || 'Loading...'}</span></p>
+            <p>5. DB Status: <span className="text-white">{escrow?.status || 'Loading...'}</span></p>
+            <p>6. Tx Confirmed: <span className="text-white">{String(isConfirmed)}</span></p>
+            <p>7. Vault Deployed (hasVaultAddress): <span className="text-white">{String(hasVaultAddress)}</span></p>
           </div>
-          <div className="mt-4 pt-4 border-t border-red-700 text-lg">
-            <p>=&gt; Nút Deposit có được phép hiện không?: 
-              <span className={progress >= 7 && activeRole === 'buyer' && !isConfirmed && escrow?.status !== 'FUNDED' ? "text-green-400 ml-2 font-bold" : "text-red-400 ml-2 font-bold"}>
-                {String(progress >= 7 && activeRole === 'buyer' && !isConfirmed && escrow?.status !== 'FUNDED')}
+          <div className="mt-4 pt-4 border-t border-red-700 text-lg flex flex-col gap-2">
+            <p>=&gt; Show Deploy Button?: 
+              <span className={progress >= 7 && activeRole === 'buyer' && !hasVaultAddress ? "text-green-400 ml-2 font-bold" : "text-red-400 ml-2 font-bold"}>
+                {String(progress >= 7 && activeRole === 'buyer' && !hasVaultAddress)}
+              </span>
+            </p>
+            <p>=&gt; Show Deposit Button?: 
+              <span className={progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED' ? "text-green-400 ml-2 font-bold" : "text-red-400 ml-2 font-bold"}>
+                {String(progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED')}
               </span>
             </p>
           </div>
         </div>
-        {/* --- KẾT THÚC BẢNG DEBUG --- */}
+        {/* --- END DEBUG PANEL --- */}
         
-        {/* BẢN VÁ PHASE 1: CẢNH BÁO THIẾU KEY (Rất quan trọng cho E2E Testing) */}
         {!localPubKey && address && (
           <div className="bg-red-900/50 border-2 border-red-500 p-6 rounded-xl shadow-[0_0_20px_rgba(239,68,68,0.3)] flex flex-col items-center gap-3">
             <h3 className="text-red-400 font-bold text-xl uppercase tracking-widest">⚠️ Missing Local Keypair</h3>
             <p className="text-red-200 text-center">
-              Profile trình duyệt này chưa được khởi tạo Private/Public Key. Bạn không thể tham gia mạng lưới TSS.
+              This browser profile has not initialized a Private/Public Keypair. You cannot participate in the TSS network.
             </p>
             <a href="/generate-key" className="mt-2 px-8 py-3 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg transition-colors">
               Go to Key Generator
@@ -382,8 +423,8 @@ export default function EscrowDetail() {
           </section>
         )}
 
-        {/* BẢN VÁ PHASE 2: KHỐI 4.5 - NẠP TIỀN ON-CHAIN (CHỈ HIỂN THỊ KHI CHƯA XÁC NHẬN NẠP) */}
-        {progress >= 7 && activeRole === 'buyer' && !isConfirmed && escrow?.status !== 'FUNDED' && (
+        {/* KHỐI 4.5 (PHASE 2): ĐỘC QUYỀN HIỂN THỊ NÚT DEPOSIT CHỈ KHI ĐÃ CÓ VAULT ADDRESS */}
+        {progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED' && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-emerald-500/50 shadow-[0_0_30px_rgba(16,185,129,0.15)] mt-8 relative overflow-hidden">
             <div className="absolute top-0 right-0 p-4 opacity-10">
               <span className="text-8xl">💎</span>
@@ -392,7 +433,7 @@ export default function EscrowDetail() {
               Phase 2: Lock Funds On-chain
             </h3>
             <p className="text-slate-300 mb-6 text-lg relative z-10">
-              Mạng lưới đã khởi tạo Khóa tổng hợp (Aggregated Address) thành công. Là Người Mua (Buyer), bạn cần nạp <strong>{normalizeDisplayAmount(escrow?.amount)} ETH</strong> vào Smart Contract để quỹ được khóa an toàn trước khi có thể kích hoạt tiến trình giải ngân.
+              The network has successfully generated the Aggregated Public Key. As the Buyer, you need to deposit <strong>{normalizeDisplayAmount(escrow?.amount)} ETH</strong> into the Smart Contract to securely lock the funds before the execution process can be activated.
             </p>
             <button 
               onClick={handleDepositFunds}
@@ -410,19 +451,19 @@ export default function EscrowDetail() {
         )}
 
         {/* KHỐI 5: LUỒNG KÝ ĐA PHẦN (TSS SIGNING ORCHESTRATION) */}
-        {/* Điều kiện: Các Role khác sẽ thấy ngay. Riêng Buyer chỉ thấy khi isConfirmed = true HOẶC db đã báo FUNDED */}
-        {progress >= 7 && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'FUNDED') && (
+        {/* Điều kiện: Đã có Vault và (Các Role khác sẽ thấy ngay. Riêng Buyer chỉ thấy khi isConfirmed = true HOẶC db đã báo FUNDED) */}
+        {progress >= 7 && hasVaultAddress && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'FUNDED') && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-blue-500/30 shadow-[0_0_30px_rgba(59,130,246,0.1)] mt-8">
             <h3 className="text-xl font-bold mb-6 text-blue-400 border-b border-slate-700 pb-4">TSS Signing Orchestration</h3>
             
-            {/* TRẠNG THÁI 0: CHỌN HÀNH ĐỘNG */}
+            {/* STATE 0: SELECT ACTION */}
             {!signingPhase && (
               <div className="flex gap-4">
                 <button onClick={handleStartRelease} className="flex-1 bg-emerald-600 hover:bg-emerald-500 py-3 rounded-lg font-bold text-white shadow-lg">
-                  Start Release (Giải ngân)
+                  Start Release
                 </button>
                 <button onClick={handleStartRefund} className="flex-1 bg-amber-600 hover:bg-amber-500 py-3 rounded-lg font-bold text-white shadow-lg">
-                  Start Refund (Hoàn tiền)
+                  Start Refund
                 </button>
               </div>
             )}

@@ -17,6 +17,10 @@ import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-l
 import { authMiddleware } from '../middleware/auth.js';
 import prisma from '../lib/prisma.js';
 
+const factoryAbi = [
+  'function createEscrow(address seller, address[5] calldata mediators, uint256[2] calldata pkAggCoords, uint256 amount, uint256 confirmDays, uint256 timeoutDays) external returns (address)'
+];
+
 const router = express.Router();
 const { escrowInitMax, escrowSignMax, escrowPubKeySubmitMax } = getRateLimitConfig();
 
@@ -810,4 +814,60 @@ router.get('/:id/status', async (req, res) => {
   });
 });
 
+router.post('/deploy-vault', authMiddleware, async (req, res) => {
+  try {
+    const { escrowId } = req.body;
+    const session = await getSession(escrowId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    // Chỉ buyer mới được deploy
+    if (normalizeAddress(req.user.walletAddress) !== normalizeAddress(session.parties.buyer)) {
+      return res.status(403).json({ error: 'Only buyer can deploy vault' });
+    }
+
+    if (session.contractAddress) {
+      return res.json({ alreadyDeployed: true, contractAddress: session.contractAddress });
+    }
+
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    const adminWallet = new ethers.Wallet(process.env.ADMIN_PRIVATE_KEY, provider);
+    const factory = new ethers.Contract(process.env.FACTORY_ADDRESS, factoryAbi, adminWallet);
+
+    const tx = await factory.createEscrow(
+      session.parties.seller,
+      session.parties.mediators,
+      [session.precomputedPkAgg.x, session.precomputedPkAgg.y],
+      session.amount,
+      7,
+      14
+    );
+
+    const receipt = await tx.wait(12); // Chờ 12 confirmations để tránh reorg
+    const vaultAddress = receipt.contractAddress || receipt.logs[0].address; // Lấy địa chỉ Vault
+
+    // Update DB trước khi emit
+    await prisma.escrow.update({
+      where: { id: escrowId },
+      data: { contractAddress: vaultAddress }
+    });
+
+    session.contractAddress = vaultAddress;
+    await saveSession(escrowId, session);
+
+    // Emit WebSocket
+    const io = req.app.get('io');
+    if (io) {
+      io.to(escrowId).emit('vault_deployed', {
+        escrowId,
+        contractAddress: vaultAddress,
+        txHash: tx.hash
+      });
+    }
+
+    res.json({ contractAddress: vaultAddress, txHash: tx.hash });
+  } catch (error) {
+    console.error('Error in /deploy-vault:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 export default router;

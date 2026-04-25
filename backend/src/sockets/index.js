@@ -160,10 +160,10 @@ export function setupSockets(server) {
 //   'pubkey_rejected'           — { escrowId, role, reason }
 //   'pubkey_collection_complete'— { escrowId, received, required, completedAt }
 //   'pubkey_collection_expired' — { escrowId, dueAt, expiredAt }
-//   'nonce_received'   — { count, needed }  khi nhận được 1 nonce
-//   'nonce_collected'  — { R_addr, challenge, msgHash, pkAgg }  khi đủ 2 nonces
-//   'z_received'       — { count, needed }  khi nhận được 1 z share
-//   'schnorr_complete' — { R_addr, z, e, msgHash }  chữ ký cuối — dùng để gọi contract
+//   'nonce_received'   — { escrowId, count, needed }  khi nhận được 1 nonce
+//   'nonce_collected'  — { escrowId, R_addr, challenge, msgHash, pkAgg, signerBitmap }  khi đủ 2 nonces
+//   'z_received'       — { escrowId, count, needed }  khi nhận được 1 z share
+//   'schnorr_complete' — { escrowId, vaultContractAddress, R_addr, z, e, msgHash, signerBitmap }  chữ ký cuối — dùng để gọi contract
 // Events dispute từ routes/escrows.js và routes/evidence.js:
 //   'dispute-opened'         — khi escrow chuyển sang DISPUTED
 //   'dispute-phase-changed'  — khi phase dispute thay đổi

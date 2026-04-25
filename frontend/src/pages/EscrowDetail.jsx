@@ -148,24 +148,38 @@ export default function EscrowDetail() {
     }
   }, [activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey, addLog]);
 
-  // --- BẢN VÁ PHASE 1.5 TỪ MAIN: AUTO-TRIGGER DEPLOY KHI ĐẠT 7/7 ---
+  // --- BẢN VÁ PHASE 1.5 TỪ MAIN: AUTO-TRIGGER DEPLOY (ASYNC/AWAIT CHUẨN) ---
   useEffect(() => {
-    // Kiểm tra tiến trình DKG (progress >= 7), Role là Buyer, và DB chưa có địa chỉ Vault
-    if (progress >= 7 && activeRole === 'buyer' && !hasVaultAddress) {
-      addLog({ message: "DKG Complete! Auto-triggering Backend to deploy Vault Contract...", type: 'info' });
-      
-      api.post('/escrow/deploy-vault', { escrowId })
-        .then(res => {
-          addLog({ message: `Deployment TX submitted by Backend! Hash: ${res.data.txHash}. Waiting for 12 block confirmations (~3 mins)...`, type: 'warning' });
-        })
-        .catch(err => {
+    let isMounted = true; 
+
+    const triggerDeploy = async () => {
+      try {
+        addLog({ message: "DKG Complete! Auto-triggering Backend to deploy Vault Contract...", type: 'info' });
+        
+        // Gọi API không dùng .then() để chặn lỗi
+        const res = await api.post('/escrow/deploy-vault', { escrowId });
+        
+        if (isMounted && res && res.data) {
+          addLog({ message: `Deployment TX submitted by Backend! Hash: ${res.data.txHash}. Chờ Backend update Database...`, type: 'warning' });
+        }
+      } catch (err) {
+        if (isMounted) {
+          console.error("Chi tiết lỗi Deploy:", err);
           if (err.response?.status === 410) {
-             addLog({ message: "SESSION EXPIRED (410). Vui lòng tạo Escrow mới để test luồng Deploy.", type: 'error' });
+             addLog({ message: "SESSION EXPIRED (410). RAM Backend đã tự hủy. Vui lòng tạo Escrow mới.", type: 'error' });
           } else {
-             addLog({ message: `Backend Deploy failed: ${err.response?.data?.error || err.message}`, type: 'error' });
+             const errorMsg = err.response?.data?.error || err.message || 'Unknown Error';
+             addLog({ message: `Backend Deploy failed: ${errorMsg}`, type: 'error' });
           }
-        });
+        }
+      }
+    };
+
+    if (progress >= 7 && activeRole === 'buyer' && !hasVaultAddress) {
+      triggerDeploy();
     }
+
+    return () => { isMounted = false; };
   }, [progress, activeRole, hasVaultAddress, escrowId, addLog]);
 
   // Lắng nghe sự kiện vault_deployed từ WebSocket
@@ -174,6 +188,23 @@ export default function EscrowDetail() {
     // địa chỉ contractAddress sẽ tự động được cập nhật vào State sau khi DB thay đổi.
     // Nếu bạn có hook socket chuyên dụng, có thể bind thêm socket.on('vault_deployed') tại đây.
   }, [escrowId]);
+
+  // --- BẢN VÁ PHASE 2.5: ĐỒNG BỘ TRẠNG THÁI FUNDED LÊN DATABASE ---
+  useEffect(() => {
+    if (isConfirmed && escrow?.status !== 'FUNDED' && !selectedAction) {
+      addLog({ message: "Deposit On-chain confirmed! Syncing 'FUNDED' status to Database...", type: 'info' });
+      
+      api.patch(`/escrow/${escrowId}/status`, { status: 'FUNDED' })
+        .then(() => {
+          addLog({ message: "Database updated to FUNDED! You can now safely F5 without losing progress.", type: 'success' });
+          setEscrow(prev => ({ ...prev, status: 'FUNDED' }));
+        })
+        .catch(err => {
+          console.error("Lỗi đồng bộ DB:", err);
+          addLog({ message: "Lỗi đồng bộ DB, nhưng tiền đã vào Smart Contract.", type: 'warning' });
+        });
+    }
+  }, [isConfirmed, escrow?.status, selectedAction, escrowId, addLog]);
 
   // --- BẢN VÁ PHASE 2: LUỒNG NẠP TIỀN CHO BUYER ---
   const handleDepositFunds = async () => {
@@ -196,32 +227,60 @@ export default function EscrowDetail() {
     }
   };
 
+  // --- BẢN VÁ TSS CHUẨN MỰC: TÔN TRỌNG ĐỐI TƯỢNG BIGNUMBER ---
+  const extractTrueHex = (val) => {
+    if (!val) return null;
+    let hex = '';
+
+    // Nếu nó là đối tượng BigNumber (BN.js hoặc Ethers.js)
+    if (typeof val === 'object') {
+      if (typeof val.toHexString === 'function') {
+        hex = val.toHexString(); // ethers.js
+      } else if (typeof val.toString === 'function') {
+        hex = val.toString(16);  // BN.js: BẮT BUỘC TRUYỀN SỐ 16 ĐỂ LẤY HEX
+      }
+    } 
+    // Nếu nó là BigInt của JS
+    else if (typeof val === 'bigint' || typeof val === 'number') {
+      hex = val.toString(16);
+    } 
+    // Nếu nó đã là chuỗi
+    else if (typeof val === 'string') {
+      hex = val;
+    }
+
+    // Làm sạch và đệm đủ 64 ký tự chuẩn 32-bytes
+    hex = hex.replace(/^0x/i, '').toLowerCase();
+    return '0x' + hex.padStart(64, '0');
+  };
+
   const handleStartRelease = async () => {
     setSelectedAction('release');
     try {
-      // Offload tính toán ECC sang Web Worker
       const { R_x, R_y } = await computeNonce();
       
-      const dummySignerBitmap = 127; // Tạm thời giữ nguyên bitmap theo yêu cầu DTO
-      await submitNonce(escrowId, activeRole, 'release', dummySignerBitmap, R_x, R_y);
+      const safe_R_x = extractTrueHex(R_x);
+      const safe_R_y = extractTrueHex(R_y);
+
+      await submitNonce(escrowId, activeRole, 'release', 31, safe_R_x, safe_R_y);
     } catch (error) {
-      addLog({ message: `Failed to start release: ${error.message}`, type: 'error' });
+      const exactError = error.response?.data?.error || error.message;
+      addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
     }
   };
 
   const handleStartRefund = async () => {
     setSelectedAction('refund');
     try {
-      // Offload tính toán ECC sang Web Worker giống hệt luồng Release
       const { R_x, R_y } = await computeNonce();
       
-      const dummySignerBitmap = 127; // Tạm thời giữ nguyên bitmap theo yêu cầu DTO
-      
-      // Gọi API với action là 'refund'
-      await submitNonce(escrowId, activeRole, 'refund', dummySignerBitmap, R_x, R_y);
-      addLog({ message: `Refund process initiated. Waiting for other nodes...`, type: 'info' });
+      const safe_R_x = extractTrueHex(R_x);
+      const safe_R_y = extractTrueHex(R_y);
+
+      await submitNonce(escrowId, activeRole, 'refund', 31, safe_R_x, safe_R_y);
     } catch (error) {
-      addLog({ message: `Failed to start refund: ${error.message}`, type: 'error' });
+      const exactError = error.response?.data?.error || error.message;
+      addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
     }
   };
 
@@ -230,7 +289,7 @@ export default function EscrowDetail() {
       // Offload tính toán phương trình Schnorr sang Web Worker
       const { z } = await computeZShare();
       
-      const dummySignerBitmap = 127;
+      const dummySignerBitmap = 31;
       await submitZShare(escrowId, activeRole, dummySignerBitmap, z);
     } catch (error) {
       addLog({ message: `Failed to submit Z-Share: ${error.message}`, type: 'error' });
@@ -239,16 +298,19 @@ export default function EscrowDetail() {
 
   // Hàm gọi Smart Contract sau khi có bộ chữ ký tổng hợp
   const handleExecuteOnChain = async () => {
-    try {
-      if (!aggregatedSignature) throw new Error("Missing aggregated signature");
-      
-      // Truyền selectedAction (có giá trị 'release' hoặc 'refund') vào hàm
-      await executeTssAction(selectedAction, aggregatedSignature);
-      
-    } catch (error) {
-      addLog({ message: `On-chain execution failed: ${error.message}`, type: 'error' });
-    }
-  };
+  try {
+    if (!aggregatedSignature) throw new Error("Missing aggregated signature");
+
+    // Lấy địa chỉ từ state escrow của trang web làm phương án dự phòng
+    const backupAddress = escrow?.contractAddress || escrow?.vaultAddress;
+
+    // Truyền thêm backupAddress vào hàm gọi
+    await executeTssAction(selectedAction, aggregatedSignature, backupAddress);
+
+  } catch (error) {
+    addLog({ message: `On-chain execution failed: ${error.message}`, type: 'error' });
+  }
+};
 
   // --- RENDER LUỒNG RECOVERY ---
   if (isRecovering || isEscrowLoading) {

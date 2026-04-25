@@ -25,11 +25,11 @@ const ORDER = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8C
 // ─── Internal helpers ──────────────────────────────────────────────────────────
 
 function normalize64(hex) {
-  return hex.replace('0x', '').padStart(64, '0');
+  return String(hex || '').replace(/^0x/i, '').padStart(64, '0');
 }
 
 function normalizePubKey(hex) {
-  const clean = hex.replace('0x', '');
+  const clean = String(hex || '').replace(/^0x/i, '');
   if (clean.startsWith('04')) {
     return clean;
   }
@@ -83,18 +83,52 @@ export function aggregatePublicKeys(pubKeyHexArray) {
  *
  * @param {{ R_x: string, R_y: string }[]} nonces
  * @returns {{ R_x: string, R_y: string, R_addr: string }}
+ * @throws {Error} Nếu điểm không thỏa y² = x³ + 7 (curve equation)
  */
 export function aggregateNonces(nonces) {
-  let R = ec.curve.point(normalize64(nonces[0].R_x), normalize64(nonces[0].R_y));
-  for (let i = 1; i < nonces.length; i++) {
-    const pt = ec.curve.point(normalize64(nonces[i].R_x), normalize64(nonces[i].R_y));
-    R = R.add(pt);
+  if (!nonces || nonces.length === 0) {
+    throw new Error('aggregateNonces: nonces array is empty or null');
   }
 
-  const R_x = '0x' + R.getX().toString(16).padStart(64, '0');
-  const R_y = '0x' + R.getY().toString(16).padStart(64, '0');
-  const R_addr = pointToAddress(R_x, R_y);
-  return { R_x, R_y, R_addr };
+  // Hàm validate và create point với error handling tốt hơn
+  const createAndValidatePoint = (idx, R_x, R_y) => {
+    try {
+      const x = normalize64(R_x);
+      const y = normalize64(R_y);
+      
+      // Validate: kiểm tra x, y có phải hex hợp lệ 64 ký tự
+      if (!/^[0-9a-f]{64}$/i.test(x)) {
+        throw new Error(`Invalid R_x format at index ${idx}: expected 64-char hex, got '${x}'`);
+      }
+      if (!/^[0-9a-f]{64}$/i.test(y)) {
+        throw new Error(`Invalid R_y format at index ${idx}: expected 64-char hex, got '${y}'`);
+      }
+
+      // Cố tạo point — elliptic.js sẽ validate curve equation
+      const pt = ec.keyFromPublic({ x: x, y: y }, 'hex').getPublic();
+      return pt;
+    } catch (error) {
+      // Chi tiết error: nếu là "bad point: equation left != right" nghĩa là y² ≠ x³ + 7
+      throw new Error(`Point validation failed at index ${idx}: ${error.message}. Received R_x='${R_x}', R_y='${R_y}'`);
+    }
+  };
+
+  try {
+    let R = createAndValidatePoint(0, nonces[0].R_x, nonces[0].R_y);
+    
+    for (let i = 1; i < nonces.length; i++) {
+      const pt = createAndValidatePoint(i, nonces[i].R_x, nonces[i].R_y);
+      R = R.add(pt);
+    }
+
+    const R_x = '0x' + R.getX().toString(16).padStart(64, '0');
+    const R_y = '0x' + R.getY().toString(16).padStart(64, '0');
+    const R_addr = pointToAddress(R_x, R_y);
+    return { R_x, R_y, R_addr };
+  } catch (error) {
+    // Re-throw với context đầy đủ cho debugging
+    throw new Error(`aggregateNonces failed: ${error.message}`);
+  }
 }
 
 /**

@@ -31,9 +31,6 @@ function submittedRolesFromCollection(collection) {
   return PARTICIPANT_ROLES.filter((role) => !missing.has(role));
 }
 
-/**
- * Custom Hook xử lý realtime pubkey collection theo luồng incremental.
- */
 export const useEscrowSync = (escrowId) => {
   const [, setProgress] = useAtom(signatureProgressAtom);
   const [, setSignedNodes] = useAtom(signedNodesAtom);
@@ -43,11 +40,9 @@ export const useEscrowSync = (escrowId) => {
   const setNonceRound1 = useSetAtom(nonceRound1Atom);
   const setAggregatedSignature = useSetAtom(aggregatedSignatureAtom);
   const setSigningProgress = useSetAtom(signingProgressAtom);
-  const authToken = getStoredAccessToken();
 
   const applyCollectionSnapshot = useCallback((collection) => {
     if (!collection) return;
-
     setProgress(Number(collection.received || 0));
     setSignedNodes(submittedRolesFromCollection(collection));
     setStatus(toStatusState(collection.state));
@@ -57,7 +52,9 @@ export const useEscrowSync = (escrowId) => {
     if (!escrowId) return;
 
     let isMounted = true;
-    const token = authToken;
+    
+    // FIX CORE: Lấy token trực tiếp bên trong Effect để đảm bảo tính Freshness sau khi SIWE
+    const currentToken = getStoredAccessToken();
 
     const bootstrapCollection = async () => {
       try {
@@ -71,18 +68,16 @@ export const useEscrowSync = (escrowId) => {
 
     bootstrapCollection();
 
-    if (!token) {
-      addLog({ message: 'Socket realtime requires login token.', type: 'warning' });
-      return () => {
-        isMounted = false;
-      };
+    if (!currentToken) {
+      addLog({ message: 'Waiting for SIWE authentication to join Socket Room...', type: 'warning' });
+      return () => { isMounted = false; };
     }
 
     if (!socket.connected) {
       socket.connect();
     }
 
-    socket.emit('join_escrow', { escrowId, token }, (response) => {
+    socket.emit('join_escrow', { escrowId, token: currentToken }, (response) => {
       if (response?.ok) {
         addLog({ message: `Joined secure room for Escrow #${escrowId}`, type: 'success' });
         return;
@@ -92,16 +87,13 @@ export const useEscrowSync = (escrowId) => {
 
     const handlePubKeyReceived = (data) => {
       if (data?.escrowId !== escrowId) return;
-
       setSignedNodes((prev) => {
         if (prev.includes(data.role)) return prev;
         return [...prev, data.role];
       });
-
       if (Number.isFinite(data?.received)) {
         setProgress(data.received);
       }
-
       addLog({ message: `Received pubkey from ${data.role}. (${data.received || 0}/7)`, type: 'info' });
     };
 
@@ -115,7 +107,7 @@ export const useEscrowSync = (escrowId) => {
       setProgress(Number(data.received || 7));
       setSignedNodes(PARTICIPANT_ROLES);
       setStatus('completed');
-      addLog({ message: `All pubkeys collected (${data.received || 7}/7).`, type: 'success' });
+      addLog({ message: `All pubkeys collected (${data.received || 7}/7). DKG Complete!`, type: 'success' });
     };
 
     const handleCollectionExpired = (data) => {
@@ -124,53 +116,36 @@ export const useEscrowSync = (escrowId) => {
       addLog({ message: `Pubkey collection expired at ${data.expiredAt || 'unknown time'}.`, type: 'error' });
     };
 
-    // Round 1 Progress
     const handleNonceReceived = (data) => {
       if (data?.escrowId !== escrowId) return;
-      setSigningProgress({
-        round: 1,
-        submitted: data.count,
-        needed: data.needed,
-        percentage: Math.round((data.count / data.needed) * 100)
-      });
+      setSigningProgress({ round: 1, submitted: data.count, needed: data.needed, percentage: Math.round((data.count / data.needed) * 100) });
       addLog({ message: `Nonce submission: ${data.count}/${data.needed}`, type: 'info' });
     };
 
-    // Round 1 Complete
     const handleNonceCollected = (data) => {
       if (data?.escrowId !== escrowId) return;
       setSigningPhase("z-share");
-      setNonceRound1(data); // Lưu data (R_addr, challenge, msgHash...) để tính z ở Round 2
+      setNonceRound1(data);
       addLog({ message: 'Round 1 complete! Challenge computed. Start Round 2 now.', type: 'success' });
     };
 
-    // Round 2 Progress
     const handleZReceived = (data) => {
       if (data?.escrowId !== escrowId) return;
-      setSigningProgress({
-        round: 2,
-        submitted: data.count,
-        needed: data.needed,
-        percentage: Math.round((data.count / data.needed) * 100)
-      });
+      setSigningProgress({ round: 2, submitted: data.count, needed: data.needed, percentage: Math.round((data.count / data.needed) * 100) });
       addLog({ message: `Z-share submission: ${data.count}/${data.needed}`, type: 'info' });
     };
 
-    // Round 2 Complete
     const handleSchnorrComplete = (data) => {
       if (data?.escrowId !== escrowId) return;
       setSigningPhase("ready");
-      setAggregatedSignature(data); // { R_addr, z, e, msgHash }
+      setAggregatedSignature(data);
       addLog({ message: 'Signature aggregated! Ready for contract call.', type: 'success' });
     };
 
-    // --- Cập nhật Đăng ký và Hủy đăng ký Socket ---
     socket.on('pubkey_received', handlePubKeyReceived);
     socket.on('pubkey_rejected', handlePubKeyRejected);
     socket.on('pubkey_collection_complete', handleCollectionComplete);
     socket.on('pubkey_collection_expired', handleCollectionExpired);
-    
-    // Thêm 4 event mới
     socket.on('nonce_received', handleNonceReceived);
     socket.on('nonce_collected', handleNonceCollected);
     socket.on('z_received', handleZReceived);
@@ -182,34 +157,21 @@ export const useEscrowSync = (escrowId) => {
       socket.off('pubkey_rejected', handlePubKeyRejected);
       socket.off('pubkey_collection_complete', handleCollectionComplete);
       socket.off('pubkey_collection_expired', handleCollectionExpired);
-      
-      // Hủy 4 event mới
       socket.off('nonce_received', handleNonceReceived);
       socket.off('nonce_collected', handleNonceCollected);
       socket.off('z_received', handleZReceived);
       socket.off('schnorr_complete', handleSchnorrComplete);
-      
       socket.emit('leave_escrow', escrowId);
     };
-  }, [escrowId, authToken, setProgress, setSignedNodes, setStatus, addLog, applyCollectionSnapshot]);
+  }, [escrowId, setProgress, setSignedNodes, setStatus, addLog, applyCollectionSnapshot]);
 
   const submitPubKey = useCallback(async ({ role, pubKey }) => {
-    if (!escrowId) {
-      throw new Error('Escrow id is required');
-    }
-
-    if (!role || !pubKey) {
-      throw new Error('role and pubKey are required');
-    }
+    if (!escrowId) throw new Error('Escrow id is required');
+    if (!role || !pubKey) throw new Error('role and pubKey are required');
 
     addLog({ message: `Submitting pubkey for role ${role}...`, type: 'warning' });
 
-    const { data } = await api.post('/escrow/pubkey/submit', {
-      escrowId,
-      role,
-      pubKey
-    });
-
+    const { data } = await api.post('/escrow/pubkey/submit', { escrowId, role, pubKey });
     applyCollectionSnapshot(data?.collection);
 
     if (data?.isIdempotent) {
@@ -217,33 +179,18 @@ export const useEscrowSync = (escrowId) => {
     } else {
       addLog({ message: `Pubkey accepted for role ${role}.`, type: 'success' });
     }
-
     return data;
   }, [escrowId, addLog, applyCollectionSnapshot]);
 
   const submitNonce = useCallback(async (escrowId, role, action, signerBitmap, R_x, R_y) => {
     addLog({ message: `Submitting Nonce for action: ${action}...`, type: 'warning' });
-    
-    const { data } = await api.post(`/escrow/${escrowId}/nonce`, {
-      escrowId,
-      role,
-      action,
-      signerBitmap,
-      R_x,
-      R_y
-    });
+    const { data } = await api.post(`/escrow/nonce`, { escrowId, role, action, signerBitmap, R_x, R_y });
     return data;
   }, [addLog]);
 
   const submitZShare = useCallback(async (escrowId, role, signerBitmap, z) => {
     addLog({ message: `Submitting Z-Share...`, type: 'warning' });
-    
-    const { data } = await api.post(`/escrow/${escrowId}/sign`, {
-      escrowId,
-      role,
-      signerBitmap,
-      z
-    });
+    const { data } = await api.post(`/escrow/sign`, { escrowId, role, signerBitmap, z });
     return data;
   }, [addLog]);
 

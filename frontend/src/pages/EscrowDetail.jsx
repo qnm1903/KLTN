@@ -24,6 +24,7 @@ import { useTssWorker } from '../features/escrow/useTssWorker'; // Tích hợp P
 // --- IMPORT API & STORAGE ---
 import api from '../lib/api';
 import { clearPrivKey, getPubKey, getPrivKey, unlockEncryptedPrivKey } from '../lib/storage';
+import { socket } from '../lib/socket';
 
 function normalizeAddress(value) {
   return String(value || '').trim().toLowerCase();
@@ -218,20 +219,40 @@ export default function EscrowDetail() {
 
   // Lắng nghe sự kiện vault_deployed từ WebSocket
   useEffect(() => {
-    // Do hệ thống có cơ chế setInterval(fetchEscrowDetail, 5000) ở trên, 
-    // địa chỉ contractAddress sẽ tự động được cập nhật vào State sau khi DB thay đổi.
-    // Nếu bạn có hook socket chuyên dụng, có thể bind thêm socket.on('vault_deployed') tại đây.
-  }, [escrowId]);
+    if (!escrowId) return;
 
-  // --- BẢN VÁ PHASE 2.5: ĐỒNG BỘ TRẠNG THÁI FUNDED LÊN DATABASE ---
-  useEffect(() => {
-    if (isConfirmed && escrow?.status !== 'FUNDED' && !selectedAction) {
-      addLog({ message: "Deposit On-chain confirmed! Syncing 'FUNDED' status to Database...", type: 'info' });
+    const handleVaultDeployed = (data) => {
+      if (data?.escrowId !== escrowId) return;
       
-      api.patch(`/escrow/${escrowId}/status`, { status: 'FUNDED' })
+      addLog({ 
+        message: `Vault deployed! Address: ${data.contractAddress}. Block: ${data.blockNumber}`, 
+        type: 'success' 
+      });
+      
+      // Update escrow state with contract address
+      setEscrow(prev => ({ 
+        ...prev, 
+        contractAddress: data.contractAddress,
+        status: data.status || 'INITIALIZED'
+      }));
+    };
+
+    socket.on('vault_deployed', handleVaultDeployed);
+    
+    return () => {
+      socket.off('vault_deployed', handleVaultDeployed);
+    };
+  }, [escrowId, addLog]);
+
+  // --- BẢN VÁ PHASE 2.5: ĐỒNG BỘ TRẠNG THÁI LOCKED LÊN DATABASE ---
+  useEffect(() => {
+    if (isConfirmed && escrow?.status !== 'LOCKED' && !selectedAction) {
+      addLog({ message: "Deposit On-chain confirmed! Syncing 'LOCKED' status to Database...", type: 'info' });
+      
+      api.patch(`/escrows/${escrowId}/status`, { status: 'LOCKED' })
         .then(() => {
-          addLog({ message: "Database updated to FUNDED! You can now safely F5 without losing progress.", type: 'success' });
-          setEscrow(prev => ({ ...prev, status: 'FUNDED' }));
+          addLog({ message: "Database updated to LOCKED! You can now safely F5 without losing progress.", type: 'success' });
+          setEscrow(prev => ({ ...prev, status: 'LOCKED' }));
         })
         .catch(err => {
           console.error("Lỗi đồng bộ DB:", err);
@@ -249,7 +270,7 @@ export default function EscrowDetail() {
 
     addLog({ message: `Execution confirmed! Syncing '${nextStatus}' status to Database...`, type: 'info' });
 
-    api.patch(`/escrow/${escrowId}/status`, { status: nextStatus })
+    api.patch(`/escrows/${escrowId}/status`, { status: nextStatus })
       .then(() => {
         addLog({ message: `Database updated to ${nextStatus}. Signing flow is now closed.`, type: 'success' });
         setEscrow(prev => ({ ...prev, status: nextStatus }));
@@ -473,8 +494,8 @@ export default function EscrowDetail() {
               </span>
             </p>
             <p>=&gt; Show Deposit Button?: 
-              <span className={progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED' && !isVaultLockedOnChain ? "text-green-400 ml-2 font-bold" : "text-red-400 ml-2 font-bold"}>
-                {String(progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED' && !isVaultLockedOnChain)}
+              <span className={progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'LOCKED' && !isVaultLockedOnChain ? "text-green-400 ml-2 font-bold" : "text-red-400 ml-2 font-bold"}>
+                {String(progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'LOCKED' && !isVaultLockedOnChain)}
               </span>
             </p>
           </div>
@@ -598,7 +619,7 @@ export default function EscrowDetail() {
         )}
 
         {/* KHỐI 4.5 (PHASE 2): ĐỘC QUYỀN HIỂN THỊ NÚT DEPOSIT CHỈ KHI ĐÃ CÓ VAULT ADDRESS */}
-        {progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED' && !isVaultLockedOnChain && (
+        {progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'LOCKED' && !isVaultLockedOnChain && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-emerald-500/50 shadow-[0_0_30px_rgba(16,185,129,0.15)] mt-8 relative overflow-hidden">
             <div className="absolute top-0 right-0 p-4 opacity-10">
               <span className="text-8xl">💎</span>
@@ -625,8 +646,8 @@ export default function EscrowDetail() {
         )}
 
         {/* KHỐI 5: LUỒNG KÝ ĐA PHẦN (TSS SIGNING ORCHESTRATION) */}
-        {/* Điều kiện: Đã có Vault và (Các Role khác sẽ thấy ngay. Riêng Buyer chỉ thấy khi isConfirmed = true HOẶC db đã báo FUNDED) */}
-        {progress >= 7 && hasVaultAddress && !isSigningFlowClosed && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'FUNDED' || isVaultLockedOnChain) && (
+        {/* Điều kiện: Đã có Vault và (Các Role khác sẽ thấy ngay. Riêng Buyer chỉ thấy khi isConfirmed = true HOẶC db đã báo LOCKED) */}
+        {progress >= 7 && hasVaultAddress && !isSigningFlowClosed && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'LOCKED' || isVaultLockedOnChain) && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-blue-500/30 shadow-[0_0_30px_rgba(59,130,246,0.1)] mt-8">
             <h3 className="text-xl font-bold mb-6 text-blue-400 border-b border-slate-700 pb-4">TSS Signing Orchestration</h3>
             

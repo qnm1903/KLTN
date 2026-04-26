@@ -4,6 +4,7 @@ node_modules
 
 # Local database files
 dev.db
+dev.db.backup
 dev.db-journal
 *.db
 *.db-journal

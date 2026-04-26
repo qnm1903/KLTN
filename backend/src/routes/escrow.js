@@ -16,6 +16,7 @@ import { ethers } from 'ethers';
 import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-limit.js';
 import { authMiddleware } from '../middleware/auth.js';
 import prisma from '../lib/prisma.js';
+import { emitToEscrow } from '../lib/socket-emitter.js';
 
 // Import ABI chuẩn từ file abi.js mà chúng ta đã tạo
 import { factoryAbi } from '../abi.js';
@@ -523,14 +524,26 @@ router.post('/deploy-vault', authMiddleware, async (req, res) => {
     (async () => {
       try {
         if (tx && typeof tx.wait === 'function') {
-          await tx.wait(1);
-          console.log(`[Deploy] 8. Block đã xác nhận! Hash: ${tx.hash}`);
+          const receipt = await tx.wait(1);
+          console.log(`[Deploy] 8. Block đã xác nhận! Hash: ${tx.hash}, Block: ${receipt.blockNumber}`);
 
           console.log(`[Deploy] 9. Đang lưu Vault Address vào Database...`);
           await prisma.escrow.update({
             where: { id: escrowId },
             data: { contractAddress: expectedVaultAddress }
           });
+
+          // Emit socket event to notify all clients in the escrow room
+          const io = req.app.get('io');
+          io.to(escrowId).emit('vault_deployed', {
+            escrowId,
+            contractAddress: expectedVaultAddress,
+            txHash: tx.hash,
+            blockNumber: receipt.blockNumber,
+            status: 'INITIALIZED'
+          });
+          console.log(`[Deploy] 9b. Socket event 'vault_deployed' emitted to room: ${escrowId}`);
+
           console.log(`[Deploy] 10. HOÀN TẤT 100%! Frontend có thể nhấn F5 để tiếp tục.`);
           console.log("------------------------------------------------\n");
         }

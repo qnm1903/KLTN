@@ -36,12 +36,8 @@ function getParticipantRole(escrow, userId) {
   return null;
 }
 
-function canParticipantPatchStatus(role, nextStatus, allowTerminalPatch) {
+function canParticipantPatchStatus(role, nextStatus) {
   if (!role || !nextStatus) return false;
-
-  if ((nextStatus === 'RELEASED' || nextStatus === 'REFUNDED') && !allowTerminalPatch) {
-    return false;
-  }
 
   if (nextStatus === 'INITIALIZED' || nextStatus === 'LOCKED') {
     return role === 'buyer';
@@ -335,7 +331,7 @@ router.patch('/:id/status', authMiddleware, async (req, res) => {
 
       const participantRole = getParticipantRole(escrow, userId);
       if (nextStatus) {
-        if (!canParticipantPatchStatus(participantRole, nextStatus, allowParticipantTerminalPatch)) {
+        if (!canParticipantPatchStatus(participantRole, nextStatus)) {
           const roleError = new Error(`Role '${participantRole}' cannot set escrow status to '${nextStatus}'`);
           roleError.statusCode = 403;
           throw roleError;

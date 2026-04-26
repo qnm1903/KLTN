@@ -14,6 +14,7 @@ contract EscrowVault {
     error InvalidAmount();
     error InvalidDeadline();
     error NotBuyer();
+    error NotAuthorized();
     error IncorrectValue();
     error InvalidStatus();
     error InvalidMsgHash();
@@ -104,7 +105,7 @@ contract EscrowVault {
     }
 
     function dispute() external {
-        if (msg.sender != buyer) revert NotBuyer();
+        if (msg.sender != buyer && msg.sender != seller) revert NotAuthorized();
         if (status != Status.LOCKED) revert InvalidStatus();
 
         status = Status.DISPUTED;

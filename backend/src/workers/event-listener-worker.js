@@ -8,7 +8,7 @@ const FACTORY_ABI = [
 const VAULT_ABI = [
   'event EscrowCreated(bytes32 indexed escrowId, address indexed buyer, address indexed seller, uint256 amount)',
   'event FundsLocked(bytes32 indexed escrowId, uint256 amount)',
-  'event FundsReleased(bytes32 indexed escrowId, address indexed recipient)',
+  'event FundsReleased(bytes32 indexed escrowId, address indexed recipient, uint8 signerBitmap, string action)',
   'event DisputeOpened(bytes32 indexed escrowId)'
 ];
 
@@ -225,7 +225,7 @@ async function handleVaultEvent({ prisma, parsedLog, contractAddress }) {
 
 export function startEventListenerWorker({ prisma, logger = console, config = {} }) {
   const rpcUrl = config.rpcUrl ?? process.env.RPC_URL;
-  const factoryAddressRaw = config.factoryAddress ?? process.env.FACTORY_ADDRESS ?? process.env.CONTRACT_ADDRESS;
+  const factoryAddressRaw = config.factoryAddress ?? process.env.FACTORY_ADDRESS;
   const confirmations = Number(config.confirmations ?? process.env.LISTENER_CONFIRMATIONS ?? 6);
   const pollIntervalMs = Number(config.pollIntervalMs ?? process.env.LISTENER_POLL_INTERVAL_MS ?? 12_000);
   const blockBatchSize = Number(config.blockBatchSize ?? process.env.LISTENER_BLOCK_BATCH_SIZE ?? 1000);
@@ -234,7 +234,7 @@ export function startEventListenerWorker({ prisma, logger = console, config = {}
   const startBlock = Number(config.startBlock ?? process.env.LISTENER_START_BLOCK ?? 0);
 
   if (!rpcUrl || !factoryAddressRaw) {
-    throw new Error('RPC_URL and CONTRACT_ADDRESS are required to run event listener worker.');
+    throw new Error('RPC_URL and FACTORY_ADDRESS are required to run event listener worker.');
   }
 
   const factoryAddress = normalizeAddress(factoryAddressRaw);

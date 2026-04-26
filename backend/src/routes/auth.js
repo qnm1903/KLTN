@@ -11,6 +11,7 @@ const NONCE_TTL = 5 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS = Number.parseInt(process.env.REFRESH_TOKEN_TTL_MS || '', 10) || 7 * 24 * 60 * 60 * 1000;
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const REFRESH_COOKIE_SAME_SITE = IS_PRODUCTION ? 'strict' : 'lax';
+const NONCE_CLEANUP_SAMPLE_RATE = Number.parseFloat(process.env.NONCE_CLEANUP_SAMPLE_RATE || '0.05');
 const { authNonceMax, authVerifyMax } = getRateLimitConfig();
 const authNonceRateLimiter = createRouteRateLimiter({
   max: authNonceMax,
@@ -49,6 +50,30 @@ function clearRefreshCookie(res) {
 
 function getRefreshTokenFromCookie(req) {
   return req.cookies?.['refresh_token'] || null;
+}
+
+function isPrismaTimeoutError(error) {
+  const message = String(error?.message ?? '').toLowerCase();
+  return error?.code === 'P1008' || message.includes('operation has timed out');
+}
+
+async function withPrismaTimeoutRetry(task, maxAttempts = 3, baseDelayMs = 150) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await task();
+    } catch (error) {
+      lastError = error;
+      if (!isPrismaTimeoutError(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, baseDelayMs * attempt));
+    }
+  }
+
+  throw lastError;
 }
 
 async function issueSessionTokens(user) {
@@ -102,7 +127,7 @@ router.get('/nonce', authNonceRateLimiter, async (req, res) => {
     const addr = address.toLowerCase();
     const nonce = crypto.randomBytes(32).toString('hex');
 
-    await prisma.authNonce.upsert({
+    await withPrismaTimeoutRetry(() => prisma.authNonce.upsert({
       where: { address: addr },
       update: {
         nonce,
@@ -113,12 +138,17 @@ router.get('/nonce', authNonceRateLimiter, async (req, res) => {
         nonce,
         expiresAt: new Date(Date.now() + NONCE_TTL)
       }
-    });
+    }));
 
-    // Cleanup expired nonces để giữ store gọn.
-    await prisma.authNonce.deleteMany({
-      where: { expiresAt: { lt: new Date() } }
-    });
+    // Opportunistic cleanup to avoid writing on every nonce request.
+    if (Math.random() < NONCE_CLEANUP_SAMPLE_RATE) {
+      withPrismaTimeoutRetry(() => prisma.authNonce.deleteMany({
+        where: { expiresAt: { lt: new Date() } }
+      }))
+        .catch((cleanupError) => {
+          console.warn('Auth nonce cleanup skipped due to transient DB error:', cleanupError?.message || cleanupError);
+        });
+    }
 
     res.json({ nonce });
   } catch (error) {

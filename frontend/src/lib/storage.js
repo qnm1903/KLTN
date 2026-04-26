@@ -54,20 +54,146 @@ function migrateLegacyRoleScopedLocalStorageItem(key, walletAddress) {
   return legacyValue;
 }
 
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+const ENCRYPTED_PRIVKEY_KEY = 'encrypted_tss_priv_key';
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+}
+
+function base64ToBytes(base64Value) {
+  const binary = atob(base64Value);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return bytes;
+}
+
+async function deriveEncryptionKey(passphrase, salt) {
+  const material = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(passphrase),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt,
+      iterations: 210000,
+      hash: 'SHA-256',
+    },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+function getEncryptedPrivKeyStorageKey(walletAddress) {
+  return getStorageKey(ENCRYPTED_PRIVKEY_KEY, walletAddress);
+}
+
+async function readEncryptedPrivKeyRecord(walletAddress) {
+  if (typeof window === 'undefined') return null;
+  return escrowDB.getItem(getEncryptedPrivKeyStorageKey(walletAddress));
+}
+
+async function writeEncryptedPrivKeyRecord(walletAddress, record) {
+  if (typeof window === 'undefined') return;
+  await escrowDB.setItem(getEncryptedPrivKeyStorageKey(walletAddress), record);
+}
+
 export const getStorageKey = (key, walletAddress) => {
   const scope = resolveStorageScope(walletAddress);
   return `${scope}_${key}`;
 };
 
 export const savePrivKey = (privKey, walletAddress) => {
-  if (typeof window === 'undefined' || !window.localStorage) return;
-  window.localStorage.setItem(getStorageKey('tss_priv_key', walletAddress), privKey);
+  if (typeof window === 'undefined' || !window.sessionStorage) return;
+  window.sessionStorage.setItem(getStorageKey('tss_priv_key', walletAddress), privKey);
+};
+
+export const saveEncryptedPrivKey = async (privKey, walletAddress, passphrase) => {
+  if (typeof window === 'undefined' || !window.crypto?.subtle) {
+    throw new Error('Crypto API is not available in this browser');
+  }
+
+  if (!privKey) throw new Error('Private share is required');
+  if (!passphrase) throw new Error('Passphrase is required');
+
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveEncryptionKey(passphrase, salt);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    encoder.encode(privKey)
+  );
+
+  await writeEncryptedPrivKeyRecord(walletAddress, {
+    version: 1,
+    salt: bytesToBase64(salt),
+    iv: bytesToBase64(iv),
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
+  });
+
+  savePrivKey(privKey, walletAddress);
+};
+
+export const unlockEncryptedPrivKey = async (walletAddress, passphrase) => {
+  if (typeof window === 'undefined' || !window.crypto?.subtle) {
+    throw new Error('Crypto API is not available in this browser');
+  }
+
+  if (!passphrase) throw new Error('Passphrase is required');
+
+  const record = await readEncryptedPrivKeyRecord(walletAddress);
+  if (!record) return null;
+
+  const key = await deriveEncryptionKey(passphrase, base64ToBytes(record.salt));
+  const plaintext = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: base64ToBytes(record.iv) },
+    key,
+    base64ToBytes(record.ciphertext)
+  );
+
+  const privKey = decoder.decode(plaintext);
+  savePrivKey(privKey, walletAddress);
+  return privKey;
+};
+
+export const clearPrivKey = (walletAddress) => {
+  if (typeof window === 'undefined') return;
+  if (window.sessionStorage) {
+    window.sessionStorage.removeItem(getStorageKey('tss_priv_key', walletAddress));
+  }
+};
+
+export const clearEncryptedPrivKey = async (walletAddress) => {
+  if (typeof window === 'undefined') return;
+  await escrowDB.removeItem(getEncryptedPrivKeyStorageKey(walletAddress));
+};
+
+export const hasEncryptedPrivKey = async (walletAddress) => {
+  const record = await readEncryptedPrivKeyRecord(walletAddress);
+  return Boolean(record);
 };
 
 export const getPrivKey = (walletAddress) => {
-  if (typeof window === 'undefined' || !window.localStorage) return null;
+  if (typeof window === 'undefined') return null;
 
-  const scopedValue = window.localStorage.getItem(getStorageKey('tss_priv_key', walletAddress));
+  const scopedValue = window.sessionStorage?.getItem(getStorageKey('tss_priv_key', walletAddress));
   if (scopedValue) return scopedValue;
 
   return migrateLegacyRoleScopedLocalStorageItem('tss_priv_key', walletAddress);

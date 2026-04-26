@@ -1,14 +1,13 @@
 /**
- * Kiến trúc Web Worker xử lý Mật mã học TSS 5-of-7 (REAL CRYPTO)
+ * Kiến trúc Web Worker xử lý Mật mã học TSS 5-of-7
  */
 
-// Import thư viện elliptic (Giả định Frontend của bạn đã cài npm install elliptic)
 import * as elliptic from 'elliptic';
 const ec = new elliptic.ec('secp256k1');
 const ORDER = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
 
-// Biến lưu trữ tạm thời k_i trên RAM của Worker (Dùng để nối Round 1 và Round 2)
-let current_k = null;
+// Lưu nonce scalar theo khóa ngữ cảnh: escrowId:action:role
+const nonceByKey = new Map();
 
 self.onmessage = async (event) => {
   const { action, taskId, payload } = event.data;
@@ -17,10 +16,16 @@ self.onmessage = async (event) => {
     switch (action) {
       case 'COMPUTE_NONCE': {
         self.postMessage({ taskId, status: 'computing', log: 'Đang sinh số ngẫu nhiên k và tính toán Nonce R = k*G...' });
+
+        if (!payload?.nonceKey) {
+          throw new Error('❌ COMPUTE_NONCE: nonceKey is required (escrowId:action:role)');
+        }
         
         // 1. Sinh ngẫu nhiên k (Private Scalar)
         const keyPair = ec.genKeyPair();
-        current_k = BigInt('0x' + keyPair.getPrivate('hex')); 
+        const current_k = BigInt('0x' + keyPair.getPrivate('hex'));
+        const nonceHex = '0x' + current_k.toString(16).padStart(64, '0');
+        nonceByKey.set(payload.nonceKey, current_k);
 
         // 2. Tính điểm R = k * G
         const pubPoint = keyPair.getPublic();
@@ -30,7 +35,7 @@ self.onmessage = async (event) => {
         self.postMessage({
           taskId,
           status: 'success',
-          result: { R_x, R_y },
+          result: { R_x, R_y, nonceHex },
           log: 'Đã hoàn tất tính toán Nonce (Round 1) - Điểm chuẩn Elliptic.'
         });
         break;
@@ -39,20 +44,41 @@ self.onmessage = async (event) => {
       case 'COMPUTE_Z_SHARE': {
         self.postMessage({ taskId, status: 'computing', log: 'Đang giải phương trình Schnorr: z_i = k_i + e * x_i...' });
         
-        // Cần truyền khóa riêng x_i và challenge e từ payload của hàm gọi
-        // Nếu Frontend chưa truyền, phần này dùng khóa tạm để test cho qua Backend
-        const privateKeyHex = payload?.privateKeyHex || ec.genKeyPair().getPrivate('hex'); 
-        const challengeHex = payload?.challengeHex || "0x0000000000000000000000000000000000000000000000000000000000000001";
+        // FIX_1: MANDATORY: privateKeyHex và challenge e PHẢI được truyền từ Frontend
+        if (!payload?.privateKeyHex) {
+          throw new Error('❌ COMPUTE_Z_SHARE: privateKeyHex is required - cannot compute signature without private key');
+        }
+        if (!payload?.challengeHex) {
+          throw new Error('❌ COMPUTE_Z_SHARE: challengeHex (challenge e) is required - cannot compute signature without challenge');
+        }
+        if (!payload?.nonceKey) {
+          throw new Error('❌ COMPUTE_Z_SHARE: nonceKey is required (escrowId:action:role)');
+        }
+        
+        const privateKeyHex = payload.privateKeyHex;
+        const challengeHex = payload.challengeHex;
+        const nonceKey = payload.nonceKey;
+        const nonceHex = payload.nonceHex;
 
         const x_i = BigInt(privateKeyHex.startsWith('0x') ? privateKeyHex : '0x' + privateKeyHex);
         const e = BigInt(challengeHex.startsWith('0x') ? challengeHex : '0x' + challengeHex);
         
-        // Khôi phục k_i (nếu bị mất do restart worker, tự sinh lại 1 cái để tránh crash)
-        const k_i = current_k || BigInt('0x' + ec.genKeyPair().getPrivate('hex'));
+        // FIX_2: KHÔNG được fallback random k_i, vì sẽ làm chữ ký sai và gây InvalidSignature on-chain
+        const restoredNonce =
+          typeof nonceHex === 'string' && nonceHex.length > 0
+            ? BigInt(nonceHex.startsWith('0x') ? nonceHex : '0x' + nonceHex)
+            : undefined;
+        const k_i = restoredNonce ?? nonceByKey.get(nonceKey);
+        if (k_i === undefined) {
+          throw new Error(`Round 1 nonce not found for key '${nonceKey}'. Please run Round 1 again before Round 2.`);
+        }
 
         // 3. Tính z_i = (k_i + e * x_i) mod ORDER
         const z = (k_i + (e * x_i)) % ORDER;
         const zHex = '0x' + z.toString(16).padStart(64, '0');
+
+        // Xóa nonce ngay sau khi dùng để tránh reuse nonce giữa các phiên ký
+        nonceByKey.delete(nonceKey);
 
         self.postMessage({
           taskId,

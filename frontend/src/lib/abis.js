@@ -13,6 +13,22 @@ export const factoryAbi = parseAbi([
 
 // 2. ABI của Vault 
 export const vaultAbi = parseAbi([
+  // Custom errors (for proper revert decoding in viem/wagmi)
+  'error ZeroAddress()',
+  'error ParticipantConflict()',
+  'error DuplicateMediator()',
+  'error InvalidAmount()',
+  'error InvalidDeadline()',
+  'error NotBuyer()',
+  'error IncorrectValue()',
+  'error InvalidStatus()',
+  'error InvalidMsgHash()',
+  'error InvalidSignature()',
+  'error InvalidSignerBitmap()',
+  'error InvalidAggregateKey()',
+  'error NotTimedOut()',
+  'error TransferFailed()',
+
   // State accessors
   'function escrowId() external view returns (bytes32)',
   'function buyer() external view returns (address)',

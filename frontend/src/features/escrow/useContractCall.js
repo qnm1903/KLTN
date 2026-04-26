@@ -1,17 +1,52 @@
-import { useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
-import { parseEther } from 'viem'; // Chuyển đổi ETH sang Wei
-import { vaultAbi, factoryAbi } from '../../lib/abis'; // Đã thêm factoryAbi
+﻿import { useAccount, usePublicClient, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { parseEther } from 'viem';
+import { vaultAbi, factoryAbi } from '../../lib/abis';
 import { useSetAtom } from 'jotai';
 import { addSystemLogAtom } from './escrowStore';
-import { useEffect } from 'react';
+import { useCallback, useEffect } from 'react';
+
+const VAULT_STATUS = Object.freeze({
+  CREATED: 0,
+  LOCKED: 1,
+  RELEASED: 2,
+  REFUNDED: 3,
+  DISPUTED: 4
+});
+
+const VAULT_STATUS_LABELS = Object.freeze({
+  [VAULT_STATUS.CREATED]: 'CREATED',
+  [VAULT_STATUS.LOCKED]: 'LOCKED',
+  [VAULT_STATUS.RELEASED]: 'RELEASED',
+  [VAULT_STATUS.REFUNDED]: 'REFUNDED',
+  [VAULT_STATUS.DISPUTED]: 'DISPUTED'
+});
+
+function getVaultStatusLabel(status) {
+  return VAULT_STATUS_LABELS[Number(status)] || `UNKNOWN(${status})`;
+}
+
+function extractViemReason(error) {
+  if (!error) return 'Unknown error';
+
+  if (typeof error.walk === 'function') {
+    const revertError = error.walk((e) => e.name === 'ContractFunctionRevertedError');
+    if (revertError) {
+      return revertError.data?.errorName || revertError.reason || revertError.shortMessage || 'Revert without message';
+    }
+  }
+
+  return error.shortMessage || error.message || 'Unknown error';
+}
 
 export const useContractCall = () => {
   const addLog = useSetAtom(addSystemLogAtom);
-  
+  const publicClient = usePublicClient();
+  const { address: walletAddress } = useAccount();
+
   const { writeContractAsync, data: hash, isPending, error: writeError } = useWriteContract();
 
-  const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ 
-    hash 
+  const { isLoading: isConfirming, isSuccess: isConfirmed, error: receiptError } = useWaitForTransactionReceipt({
+    hash
   });
 
   useEffect(() => {
@@ -26,114 +61,177 @@ export const useContractCall = () => {
     }
   }, [writeError, addLog]);
 
-  // --- BẢN VÁ PHASE 1.5: HÀM KHỞI TẠO VAULT TỪ FACTORY ---
+  useEffect(() => {
+    if (receiptError) {
+      const receiptMsg = receiptError?.shortMessage || receiptError?.message || 'Transaction reverted on-chain';
+      addLog({ message: `Transaction mined but reverted: ${receiptMsg.split('\n')[0]}`, type: 'error' });
+    }
+  }, [receiptError, addLog]);
+
+  // Deploy vault via factory contract
   const deployEscrowVault = async (factoryAddress, sellerAddr, mediatorAddrs, pkAggCoords, amountEth) => {
-    if (!factoryAddress) throw new Error("Missing VITE_ESCROW_CONTRACT_ADDRESS in .env");
-    
-    addLog({ message: `Requesting MetaMask to deploy new Vault Contract...`, type: 'warning' });
-    
+    if (!factoryAddress) throw new Error('Missing VITE_ESCROW_CONTRACT_ADDRESS in .env');
+
+    addLog({ message: 'Requesting MetaMask to deploy new Vault Contract...', type: 'warning' });
+
     await writeContractAsync({
       address: factoryAddress,
       abi: factoryAbi,
       functionName: 'createEscrow',
       args: [
         sellerAddr,
-        mediatorAddrs, 
-        pkAggCoords,   
-        parseEther(amountEth.toString()), 
-        BigInt(7),     
-        BigInt(14)     
+        mediatorAddrs,
+        pkAggCoords,
+        parseEther(amountEth.toString()),
+        BigInt(7),
+        BigInt(14)
       ]
     });
   };
 
-  // --- BẢN VÁ PHASE 2: HÀM NẠP TIỀN CHO BUYER ---
-  const fundEscrow = async (vaultContractAddress, amountEth) => {
-    if (!vaultContractAddress) throw new Error("Vault Contract Address is missing. Please check VITE_ESCROW_CONTRACT_ADDRESS.");
-    if (!amountEth || isNaN(amountEth)) throw new Error("Invalid amount.");
+  const getVaultStatus = useCallback(async (vaultContractAddress) => {
+    if (!vaultContractAddress) {
+      throw new Error('Vault Contract Address is missing.');
+    }
 
-    addLog({ message: `Requesting MetaMask to lock ${amountEth} ETH on-chain...`, type: 'warning' });
-    
-    // Gọi hàm lockFunds (payable) trên Smart Contract
-    await writeContractAsync({
+    if (!publicClient) {
+      throw new Error('Cannot read on-chain vault status right now. Please check wallet/RPC connection.');
+    }
+
+    const rawStatus = await publicClient.readContract({
       address: vaultContractAddress,
       abi: vaultAbi,
-      functionName: 'lockFunds', // Đã sửa chuẩn theo ABI main
-      value: parseEther(amountEth.toString()), 
+      functionName: 'status'
     });
-  };
 
- const executeTssAction = async (actionType, signatureData) => {
-    // 1. Kiểm tra đầu vào cơ bản
-    if (!['release', 'refund'].includes(actionType)) {
-      addLog({ message: `Lỗi Code: Sai actionType ${actionType}`, type: 'error' });
-      return;
+    return Number(rawStatus);
+  }, [publicClient]);
+
+  const simulateTssAction = useCallback(async (actionType, targetAddress, signatureData) => {
+    if (!publicClient || !walletAddress) {
+      return null;
     }
-
-    const targetAddress = signatureData?.vaultContractAddress;
-    if (!targetAddress) {
-      addLog({ message: "Lỗi Code: Thiếu Vault Contract Address từ Backend!", type: 'error' });
-      return;
-    }
-
-    addLog({ message: `Đang gửi lệnh ${actionType} tới Contract: ${targetAddress}...`, type: 'info' });
 
     try {
-      // 2. Thực thi lệnh
-      await writeContractAsync({
+      await publicClient.simulateContract({
+        account: walletAddress,
         address: targetAddress,
         abi: vaultAbi,
-        functionName: actionType, 
+        functionName: actionType,
         args: [
           signatureData.R_addr,
           signatureData.z,
           signatureData.e,
           signatureData.msgHash,
-          signatureData.signerBitmap || 31 // Giữ số 31 (5 người) hoặc tùy logic của bạn
-        ]
+          signatureData.signerBitmap || 31
+        ],
+        gas: 500000n
       });
-      
-    } catch (error) {
-      // =====================================================================
-      // 3. MÁY QUÉT LỖI XUYÊN THẤU CỦA VIEM (BẮT ĐÚNG TÊN LỖI TRONG SOLIDITY)
-      // =====================================================================
-      console.error("🛑 [LOG GỐC] Toàn bộ Object Lỗi:", error);
-      
-      let exactReason = "Không xác định (Hãy xem Console log gốc)";
 
-      // Viem giấu lỗi thật dưới nhiều lớp, dùng hàm .walk() để đào xuống
-      if (typeof error.walk === 'function') {
-        const revertError = error.walk((e) => e.name === 'ContractFunctionRevertedError');
-        
-        if (revertError) {
-          // Trích xuất tên lỗi (Ví dụ: InvalidSignature, NotParticipant...)
-          exactReason = revertError.data?.errorName || revertError.reason || revertError.shortMessage || "Revert không có thông điệp";
-          
-          console.error("🚨 [TÌM THẤY] Lỗi gốc từ Smart Contract:", exactReason);
-          addLog({ 
-            message: `❌ SMART CONTRACT TỪ CHỐI! Lý do thật: ${exactReason}`, 
-            type: 'error' 
-          });
-          // Bật luôn Alert để đập vào mắt, không cần mở Console cũng thấy
-          alert(`Smart Contract đá văng giao dịch!\nLý do: ${exactReason}`);
-          return;
-        }
+      return null;
+    } catch (error) {
+      return extractViemReason(error);
+    }
+  }, [publicClient, walletAddress]);
+
+  // Buyer deposit flow
+  const fundEscrow = async (vaultContractAddress, amountEth) => {
+    if (!vaultContractAddress) throw new Error('Vault Contract Address is missing. Please check VITE_ESCROW_CONTRACT_ADDRESS.');
+    if (!amountEth || isNaN(amountEth)) throw new Error('Invalid amount.');
+
+    let onChainStatus;
+    try {
+      onChainStatus = await getVaultStatus(vaultContractAddress);
+    } catch (error) {
+      const statusError = error?.shortMessage || error?.message || 'Unknown error while reading vault status';
+      addLog({ message: `Cannot verify on-chain vault status: ${statusError}`, type: 'warning' });
+      throw new Error('Cannot verify on-chain vault status. Please retry.');
+    }
+
+    if (onChainStatus !== VAULT_STATUS.CREATED) {
+      const statusLabel = getVaultStatusLabel(onChainStatus);
+      addLog({ message: `Vault is already ${statusLabel} on-chain. Skip duplicate deposit.`, type: 'warning' });
+      throw new Error(`Vault already ${statusLabel} on-chain.`);
+    }
+
+    addLog({ message: `Requesting MetaMask to lock ${amountEth} ETH on-chain...`, type: 'warning' });
+
+    await writeContractAsync({
+      address: vaultContractAddress,
+      abi: vaultAbi,
+      functionName: 'lockFunds',
+      value: parseEther(amountEth.toString())
+    });
+  };
+
+  const executeTssAction = async (actionType, signatureData, fallbackAddress) => {
+    if (!['release', 'refund'].includes(actionType)) {
+      const invalidActionMessage = `Code error: invalid actionType ${actionType}`;
+      addLog({ message: invalidActionMessage, type: 'error' });
+      throw new Error(invalidActionMessage);
+    }
+
+    const targetAddress = signatureData?.vaultContractAddress || fallbackAddress;
+    if (!targetAddress) {
+      const missingAddressMessage = 'Code error: missing vault contract address from backend!';
+      addLog({ message: missingAddressMessage, type: 'error' });
+      throw new Error(missingAddressMessage);
+    }
+
+    addLog({
+      message: `Sending ${actionType} to contract: ${targetAddress} (source: ${signatureData?.vaultContractAddress ? 'backend-signature' : 'fallback-ui'})...`,
+      type: 'info'
+    });
+
+    try {
+      const simulatedReason = await simulateTssAction(actionType, targetAddress, signatureData);
+      if (simulatedReason) {
+        addLog({
+          message: `Preflight on-chain check failed: ${simulatedReason}`,
+          type: 'error'
+        });
+        throw new Error(`Preflight failed: ${simulatedReason}`);
       }
 
-      // Nếu không phải lỗi Revert (ví dụ: người dùng ấn Hủy trên MetaMask)
-      exactReason = error.shortMessage || error.message;
-      console.error("⚠️ [LỖI NGOÀI] Người dùng hủy hoặc lỗi mạng:", exactReason);
-      addLog({ message: `⚠️ Lỗi: ${exactReason}`, type: 'warning' });
+      await writeContractAsync({
+        address: targetAddress,
+        abi: vaultAbi,
+        functionName: actionType,
+        args: [
+          signatureData.R_addr,
+          signatureData.z,
+          signatureData.e,
+          signatureData.msgHash,
+          signatureData.signerBitmap || 31
+        ],
+        // Avoid unreliable wallet/provider gas estimation that can throw
+        // spurious "gas limit too high" for this heavy signature verification call.
+        gas: 500000n
+      });
+    } catch (error) {
+      console.error('[RAW ERROR] Full object:', error);
+
+      const exactReason = extractViemReason(error);
+      console.error('[SMART CONTRACT ERROR] Root reason:', exactReason);
+      addLog({
+        message: `Smart contract rejected transaction. Real reason: ${exactReason}`,
+        type: 'error'
+      });
+      alert(`Smart contract rejected transaction.\nReason: ${exactReason}`);
+      console.error('[NON-REVERT ERROR] Wallet cancelled or network issue:', exactReason);
+      addLog({ message: `Warning: ${exactReason}`, type: 'warning' });
+      throw new Error(exactReason);
     }
   };
 
   return {
-    deployEscrowVault, // Export hàm deploy (Fix lỗi is not defined)
-    fundEscrow,        // Export hàm nạp tiền
-    executeTssAction,  // Export hàm chạy TSS
-    isPending,    
-    isConfirming,  
-    isConfirmed,   
+    deployEscrowVault,
+    fundEscrow,
+    getVaultStatus,
+    executeTssAction,
+    isPending,
+    isConfirming,
+    isConfirmed,
     hash
   };
 };

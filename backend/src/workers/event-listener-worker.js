@@ -17,6 +17,39 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const CONFIRM_DEADLINE_DAYS = Number(process.env.CONFIRM_DEADLINE_DAYS ?? 7);
 const TIMEOUT_DEADLINE_DAYS = Number(process.env.TIMEOUT_DEADLINE_DAYS ?? 14);
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isDbTimeoutError(error) {
+  const message = String(error?.message ?? '').toLowerCase();
+  return error?.code === 'P1008' || message.includes('operation has timed out');
+}
+
+async function updateSyncStateWithRetry(prisma, lastProcessedBlock, logger, maxAttempts = 3) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await prisma.eventSyncState.update({
+        where: { key: SYNC_STATE_KEY },
+        data: { lastProcessedBlock }
+      });
+    } catch (error) {
+      lastError = error;
+      if (!isDbTimeoutError(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+
+      const backoffMs = attempt * 300;
+      logger.warn?.(`[listener] eventSyncState.update timeout (attempt ${attempt}/${maxAttempts}), retrying in ${backoffMs}ms`);
+      await sleep(backoffMs);
+    }
+  }
+
+  throw lastError;
+}
+
 function buildDeadlineFromNow(days) {
   if (!Number.isFinite(days) || days <= 0) return null;
   return new Date(Date.now() + Math.floor(days) * MS_PER_DAY);
@@ -192,10 +225,12 @@ async function handleVaultEvent({ prisma, parsedLog, contractAddress }) {
 
 export function startEventListenerWorker({ prisma, logger = console, config = {} }) {
   const rpcUrl = config.rpcUrl ?? process.env.RPC_URL;
-  const factoryAddressRaw = config.factoryAddress ?? process.env.CONTRACT_ADDRESS;
+  const factoryAddressRaw = config.factoryAddress ?? process.env.FACTORY_ADDRESS ?? process.env.CONTRACT_ADDRESS;
   const confirmations = Number(config.confirmations ?? process.env.LISTENER_CONFIRMATIONS ?? 6);
   const pollIntervalMs = Number(config.pollIntervalMs ?? process.env.LISTENER_POLL_INTERVAL_MS ?? 12_000);
   const blockBatchSize = Number(config.blockBatchSize ?? process.env.LISTENER_BLOCK_BATCH_SIZE ?? 1000);
+  const providerMaxBlockRange = Number(config.providerMaxBlockRange ?? process.env.LISTENER_PROVIDER_MAX_BLOCK_RANGE ?? 10);
+  const syncCheckpointInterval = Number(config.syncCheckpointInterval ?? process.env.LISTENER_SYNC_CHECKPOINT_INTERVAL ?? 5);
   const startBlock = Number(config.startBlock ?? process.env.LISTENER_START_BLOCK ?? 0);
 
   if (!rpcUrl || !factoryAddressRaw) {
@@ -207,6 +242,7 @@ export function startEventListenerWorker({ prisma, logger = console, config = {}
   const factoryInterface = new ethers.Interface(FACTORY_ABI);
   const vaultInterface = new ethers.Interface(VAULT_ABI);
   const knownVaults = new Set();
+  const effectiveBlockBatchSize = Math.max(1, Math.min(blockBatchSize, providerMaxBlockRange));
 
   let running = true;
   let loopPromise;
@@ -331,16 +367,28 @@ export function startEventListenerWorker({ prisma, logger = console, config = {}
 
         const fromBlock = syncState.lastProcessedBlock + 1;
         const toBlock = Math.min(fromBlock + blockBatchSize - 1, safeBlock);
+        let chunkCount = 0;
+        let checkpointBlock = syncState.lastProcessedBlock;
 
-        await processFactoryLogs(fromBlock, toBlock);
-        await processVaultLogs(fromBlock, toBlock);
+        for (let batchFrom = fromBlock; batchFrom <= toBlock; batchFrom += effectiveBlockBatchSize) {
+          const batchTo = Math.min(batchFrom + effectiveBlockBatchSize - 1, toBlock);
 
-        syncState = await prisma.eventSyncState.update({
-          where: { key: SYNC_STATE_KEY },
-          data: { lastProcessedBlock: toBlock }
-        });
+          await processFactoryLogs(batchFrom, batchTo);
+          await processVaultLogs(batchFrom, batchTo);
 
-        logger.info?.(`[listener] Synced blocks ${fromBlock}-${toBlock}, vaults=${knownVaults.size}`);
+          checkpointBlock = batchTo;
+          chunkCount += 1;
+
+          if (chunkCount % Math.max(1, syncCheckpointInterval) === 0) {
+            syncState = await updateSyncStateWithRetry(prisma, checkpointBlock, logger);
+          }
+
+          logger.info?.(`[listener] Synced blocks ${batchFrom}-${batchTo}, vaults=${knownVaults.size}`);
+        }
+
+        if (checkpointBlock > syncState.lastProcessedBlock) {
+          syncState = await updateSyncStateWithRetry(prisma, checkpointBlock, logger);
+        }
       } catch (error) {
         logger.error?.('[listener] Sync error:', error.message);
       }

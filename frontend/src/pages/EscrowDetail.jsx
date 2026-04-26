@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAtomValue, useSetAtom } from 'jotai';
 import { useConnection } from 'wagmi';
@@ -13,7 +13,8 @@ import {
   signingPhaseAtom,
   signingProgressAtom,
   aggregatedSignatureAtom,
-  selectedActionAtom
+  selectedActionAtom,
+  nonceRound1Atom
 } from '../features/escrow/escrowStore';
 import { useEscrowSync } from '../features/escrow/useEscrowSync';
 import { useSessionRecovery } from '../features/escrow/useSessionRecovery';
@@ -22,7 +23,7 @@ import { useTssWorker } from '../features/escrow/useTssWorker'; // Tích hợp P
 
 // --- IMPORT API & STORAGE ---
 import api from '../lib/api';
-import { getPubKey } from '../lib/storage';
+import { clearPrivKey, getPubKey, getPrivKey, unlockEncryptedPrivKey } from '../lib/storage';
 
 function normalizeAddress(value) {
   return String(value || '').trim().toLowerCase();
@@ -57,12 +58,13 @@ export default function EscrowDetail() {
   const [escrow, setEscrow] = useState(null);
   const [isEscrowLoading, setIsEscrowLoading] = useState(true);
   const [isSubmittingKey, setIsSubmittingKey] = useState(false);
+  const [onChainVaultStatus, setOnChainVaultStatus] = useState(null);
   const addLog = useSetAtom(addSystemLogAtom);
 
   // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm deployEscrowVault)
   const { isRecovering } = useSessionRecovery(escrowId, address);
   const { submitPubKey, submitNonce, submitZShare } = useEscrowSync(escrowId);
-  const { deployEscrowVault, executeTssAction, fundEscrow, isPending, isConfirming, isConfirmed } = useContractCall(); 
+  const { executeTssAction, fundEscrow, getVaultStatus, isPending, isConfirming, isConfirmed } = useContractCall(); 
   const { computeNonce, computeZShare } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
@@ -74,6 +76,7 @@ export default function EscrowDetail() {
   const signingProgress = useAtomValue(signingProgressAtom);
   const aggregatedSignature = useAtomValue(aggregatedSignatureAtom);
   const selectedAction = useAtomValue(selectedActionAtom);
+  const nonceRound1 = useAtomValue(nonceRound1Atom);
   const setSelectedAction = useSetAtom(selectedActionAtom);
 
   const activeRole = useMemo(() => {
@@ -82,6 +85,10 @@ export default function EscrowDetail() {
 
   const hasSubmitted = activeRole !== 'Unknown' && signedNodes.includes(activeRole);
   const localPubKey = getPubKey(address);
+  const isVaultLockedOnChain = onChainVaultStatus !== null && Number(onChainVaultStatus) >= 1;
+  const isVaultTerminalOnChain = onChainVaultStatus !== null && [2, 3].includes(Number(onChainVaultStatus));
+  const isEscrowTerminal = ['RELEASED', 'REFUNDED'].includes(String(escrow?.status || '').toUpperCase());
+  const isSigningFlowClosed = isVaultTerminalOnChain || isEscrowTerminal;
   
   // Cờ kiểm tra tính độc quyền UI (Mutually Exclusive)
   const hasVaultAddress = Boolean(escrow?.contractAddress || escrow?.vaultAddress);
@@ -117,8 +124,35 @@ export default function EscrowDetail() {
     return () => { active = false; };
   }, [escrowId, addLog]);
 
+  useEffect(() => {
+    let active = true;
+
+    const checkOnChainStatus = async () => {
+      const vaultAddress = escrow?.contractAddress || escrow?.vaultAddress;
+      if (!vaultAddress) {
+        if (active) setOnChainVaultStatus(null);
+        return;
+      }
+
+      try {
+        const statusValue = await getVaultStatus(vaultAddress);
+        if (!active) return;
+        setOnChainVaultStatus(Number(statusValue));
+      } catch (error) {
+        if (!active) return;
+        const errorMessage = error?.shortMessage || error?.message || 'Unknown error';
+        addLog({ message: `Cannot read on-chain vault status: ${errorMessage}`, type: 'warning' });
+      }
+    };
+
+    checkOnChainStatus();
+    return () => {
+      active = false;
+    };
+  }, [escrow?.contractAddress, escrow?.vaultAddress, getVaultStatus, addLog]);
+
   // --- CÁC HÀM XỬ LÝ HÀNH ĐỘNG ---
-  const handleSubmitMyPubKey = async () => {
+  const handleSubmitMyPubKey = useCallback(async () => {
     if (activeRole === 'Unknown') return alert('Cannot resolve your escrow role.');
     if (!localPubKey) return alert('Public key not found. Please generate your key first.');
 
@@ -130,7 +164,7 @@ export default function EscrowDetail() {
     } finally {
       setIsSubmittingKey(false);
     }
-  };
+  }, [activeRole, localPubKey, submitPubKey]);
 
   // --- BẢN VÁ PHASE 1: LUỒNG AUTO-SUBMIT KEY ---
   useEffect(() => {
@@ -146,7 +180,7 @@ export default function EscrowDetail() {
       addLog({ message: 'Auto-submitting local Public Key...', type: 'info' });
       handleSubmitMyPubKey();
     }
-  }, [activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey, addLog]);
+  }, [activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey, addLog, handleSubmitMyPubKey]);
 
   // --- BẢN VÁ PHASE 1.5 TỪ MAIN: AUTO-TRIGGER DEPLOY (ASYNC/AWAIT CHUẨN) ---
   useEffect(() => {
@@ -206,6 +240,26 @@ export default function EscrowDetail() {
     }
   }, [isConfirmed, escrow?.status, selectedAction, escrowId, addLog]);
 
+  useEffect(() => {
+    if (!isConfirmed || !selectedAction) return;
+    if (selectedAction !== 'release' && selectedAction !== 'refund') return;
+
+    const nextStatus = selectedAction === 'release' ? 'RELEASED' : 'REFUNDED';
+    if (escrow?.status === nextStatus) return;
+
+    addLog({ message: `Execution confirmed! Syncing '${nextStatus}' status to Database...`, type: 'info' });
+
+    api.patch(`/escrow/${escrowId}/status`, { status: nextStatus })
+      .then(() => {
+        addLog({ message: `Database updated to ${nextStatus}. Signing flow is now closed.`, type: 'success' });
+        setEscrow(prev => ({ ...prev, status: nextStatus }));
+      })
+      .catch((err) => {
+        const errorMsg = err.response?.data?.error || err.message || 'Unknown error';
+        addLog({ message: `Cannot sync ${nextStatus} to Database: ${errorMsg}`, type: 'warning' });
+      });
+  }, [isConfirmed, selectedAction, escrow?.status, escrowId, addLog]);
+
   // --- BẢN VÁ PHASE 2: LUỒNG NẠP TIỀN CHO BUYER ---
   const handleDepositFunds = async () => {
     try {
@@ -254,15 +308,28 @@ export default function EscrowDetail() {
     return '0x' + hex.padStart(64, '0');
   };
 
+  const buildNonceKey = useCallback((action) => {
+    if (!escrowId || !action || !activeRole || activeRole === 'Unknown') return null;
+    return `${escrowId}:${action}:${activeRole}`;
+  }, [escrowId, activeRole]);
+
   const handleStartRelease = async () => {
-    setSelectedAction('release');
+    if (isSigningFlowClosed) {
+      addLog({ message: 'Release flow is closed because this vault is already finalized.', type: 'warning' });
+      return;
+    }
+    const action = 'release';
+    setSelectedAction(action);
     try {
-      const { R_x, R_y } = await computeNonce();
+      const nonceKey = buildNonceKey(action);
+      if (!nonceKey) throw new Error('Cannot start Round 1: unresolved escrow/action/role context');
+
+      const { R_x, R_y } = await computeNonce(nonceKey);
       
       const safe_R_x = extractTrueHex(R_x);
       const safe_R_y = extractTrueHex(R_y);
 
-      await submitNonce(escrowId, activeRole, 'release', 31, safe_R_x, safe_R_y);
+      await submitNonce(escrowId, activeRole, action, 31, safe_R_x, safe_R_y);
     } catch (error) {
       const exactError = error.response?.data?.error || error.message;
       addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
@@ -270,14 +337,22 @@ export default function EscrowDetail() {
   };
 
   const handleStartRefund = async () => {
-    setSelectedAction('refund');
+    if (isSigningFlowClosed) {
+      addLog({ message: 'Refund flow is closed because this vault is already finalized.', type: 'warning' });
+      return;
+    }
+    const action = 'refund';
+    setSelectedAction(action);
     try {
-      const { R_x, R_y } = await computeNonce();
+      const nonceKey = buildNonceKey(action);
+      if (!nonceKey) throw new Error('Cannot start Round 1: unresolved escrow/action/role context');
+
+      const { R_x, R_y } = await computeNonce(nonceKey);
       
       const safe_R_x = extractTrueHex(R_x);
       const safe_R_y = extractTrueHex(R_y);
 
-      await submitNonce(escrowId, activeRole, 'refund', 31, safe_R_x, safe_R_y);
+      await submitNonce(escrowId, activeRole, action, 31, safe_R_x, safe_R_y);
     } catch (error) {
       const exactError = error.response?.data?.error || error.message;
       addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
@@ -286,19 +361,55 @@ export default function EscrowDetail() {
 
   const handleSubmitZShare = async () => {
     try {
-      // Offload tính toán phương trình Schnorr sang Web Worker
-      const { z } = await computeZShare();
+      if (isSigningFlowClosed) {
+        throw new Error('Signing flow is closed because this vault is already finalized');
+      }
+      // Step 1: Lấy Round 1 response từ Backend (đã lưu trong atom)
+      if (!nonceRound1?.challenge) {
+        throw new Error('❌ Missing Round 1 challenge from backend - please run Round 1 first');
+      }
+      
+      // Step 2: Lấy private share từ session storage hoặc unlock từ bản mã hóa
+      let privateKeyHex = getPrivKey(address);
+      if (!privateKeyHex) {
+        const passphrase = window.prompt('Enter the passphrase to unlock your encrypted private share');
+        if (passphrase) {
+          privateKeyHex = await unlockEncryptedPrivKey(address, passphrase.trim());
+        }
+      }
+
+      if (!privateKeyHex) {
+        throw new Error('❌ Missing private share in this browser session - import and unlock it first');
+      }
+      
+      // Step 3: Truyền REAL crypto data vào Worker (không còn fallback values)
+      const challengeHex = nonceRound1.challenge;
+      const nonceKey = buildNonceKey(selectedAction);
+      if (!nonceKey) throw new Error('Cannot start Round 2: action/role context is missing');
+
+      const { z } = await computeZShare(privateKeyHex, challengeHex, nonceKey);
+
+      clearPrivKey(address);
+      
+      addLog({ message: `✅ Round 2 Z-Share computed successfully with real challenge: ${challengeHex}`, type: 'info' });
       
       const dummySignerBitmap = 31;
       await submitZShare(escrowId, activeRole, dummySignerBitmap, z);
     } catch (error) {
-      addLog({ message: `Failed to submit Z-Share: ${error.message}`, type: 'error' });
+      const errorMessage = String(error?.message || 'Unknown error');
+      const helpMessage = errorMessage.includes('Round 1 nonce not found')
+        ? 'Failed to submit Z-Share: Worker lost nonce state. Run Round 1 again, then retry Round 2.'
+        : `Failed to submit Z-Share: ${errorMessage}`;
+      addLog({ message: helpMessage, type: 'error' });
     }
   };
 
   // Hàm gọi Smart Contract sau khi có bộ chữ ký tổng hợp
   const handleExecuteOnChain = async () => {
   try {
+    if (isSigningFlowClosed) {
+      throw new Error('Execution is blocked because this vault is already finalized');
+    }
     if (!aggregatedSignature) throw new Error("Missing aggregated signature");
 
     // Lấy địa chỉ từ state escrow của trang web làm phương án dự phòng
@@ -351,6 +462,7 @@ export default function EscrowDetail() {
             <p>3. Connected Wallet: <span className="text-white">{address || 'Not connected'}</span></p>
             <p>4. Buyer in DB: <span className="text-white">{escrow?.buyer?.walletAddress || 'Loading...'}</span></p>
             <p>5. DB Status: <span className="text-white">{escrow?.status || 'Loading...'}</span></p>
+            <p>5.5 On-chain Vault Status: <span className="text-white">{onChainVaultStatus === null ? 'N/A' : onChainVaultStatus}</span></p>
             <p>6. Tx Confirmed: <span className="text-white">{String(isConfirmed)}</span></p>
             <p>7. Vault Deployed (hasVaultAddress): <span className="text-white">{String(hasVaultAddress)}</span></p>
           </div>
@@ -361,8 +473,8 @@ export default function EscrowDetail() {
               </span>
             </p>
             <p>=&gt; Show Deposit Button?: 
-              <span className={progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED' ? "text-green-400 ml-2 font-bold" : "text-red-400 ml-2 font-bold"}>
-                {String(progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED')}
+              <span className={progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED' && !isVaultLockedOnChain ? "text-green-400 ml-2 font-bold" : "text-red-400 ml-2 font-bold"}>
+                {String(progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED' && !isVaultLockedOnChain)}
               </span>
             </p>
           </div>
@@ -486,7 +598,7 @@ export default function EscrowDetail() {
         )}
 
         {/* KHỐI 4.5 (PHASE 2): ĐỘC QUYỀN HIỂN THỊ NÚT DEPOSIT CHỈ KHI ĐÃ CÓ VAULT ADDRESS */}
-        {progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED' && (
+        {progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'FUNDED' && !isVaultLockedOnChain && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-emerald-500/50 shadow-[0_0_30px_rgba(16,185,129,0.15)] mt-8 relative overflow-hidden">
             <div className="absolute top-0 right-0 p-4 opacity-10">
               <span className="text-8xl">💎</span>
@@ -514,7 +626,7 @@ export default function EscrowDetail() {
 
         {/* KHỐI 5: LUỒNG KÝ ĐA PHẦN (TSS SIGNING ORCHESTRATION) */}
         {/* Điều kiện: Đã có Vault và (Các Role khác sẽ thấy ngay. Riêng Buyer chỉ thấy khi isConfirmed = true HOẶC db đã báo FUNDED) */}
-        {progress >= 7 && hasVaultAddress && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'FUNDED') && (
+        {progress >= 7 && hasVaultAddress && !isSigningFlowClosed && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'FUNDED' || isVaultLockedOnChain) && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-blue-500/30 shadow-[0_0_30px_rgba(59,130,246,0.1)] mt-8">
             <h3 className="text-xl font-bold mb-6 text-blue-400 border-b border-slate-700 pb-4">TSS Signing Orchestration</h3>
             
@@ -581,6 +693,16 @@ export default function EscrowDetail() {
                 </button>
               </div>
             )}
+          </section>
+        )}
+
+        {progress >= 7 && hasVaultAddress && isSigningFlowClosed && (
+          <section className="bg-slate-800 p-8 rounded-2xl border border-emerald-500/30 shadow-[0_0_30px_rgba(16,185,129,0.1)] mt-8">
+            <h3 className="text-xl font-bold mb-4 text-emerald-400 border-b border-slate-700 pb-4">Escrow Finalized</h3>
+            <p className="text-slate-300">
+              This escrow has already been finalized as <strong>{isEscrowTerminal ? escrow?.status : (Number(onChainVaultStatus) === 2 ? 'RELEASED' : 'REFUNDED')}</strong>.
+              The signing and execution flow is closed.
+            </p>
           </section>
         )}
       </main>

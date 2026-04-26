@@ -266,7 +266,7 @@ router.post('/pubkey/submit', authMiddleware, escrowPubKeySubmitRateLimiter, asy
 
     const expectedAddress = getRoleAddress(session.participants || session.parties, role);
     const requesterAddress = normalizeAddress(req.user?.walletAddress);
-    if (!expectedAddress || requesterAddress !== expectedAddress || ethers.computeAddress(normalizedPubKey).toLowerCase() !== expectedAddress) {
+    if (!expectedAddress || requesterAddress !== expectedAddress) {
       if (io) io.to(escrowId).emit('pubkey_rejected', { escrowId, role, reason: 'AUTH_MISMATCH' });
       return res.status(403).json({ error: `Auth mismatch for role '${role}'` });
     }

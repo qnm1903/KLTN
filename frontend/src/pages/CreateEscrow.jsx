@@ -128,7 +128,7 @@ export default function CreateEscrow() {
           <h2 className="text-3xl font-bold mb-8">Initialize 5-of-7 Escrow</h2>
 
           <div className="mb-8 p-4 bg-slate-900 rounded-lg border border-slate-700">
-            <p className="text-sm text-slate-400 mb-2">Your Wallet-Derived Public Key (Buyer)</p>
+            <p className="text-sm text-slate-400 mb-2">Your TSS Public Key (Buyer)</p>
             <p className="font-mono text-emerald-400 text-sm break-all">{buyerPubKey || 'Missing. Generate at /generate-key first.'}</p>
           </div>
 

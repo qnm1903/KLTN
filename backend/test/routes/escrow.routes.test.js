@@ -48,6 +48,7 @@ describe('Escrow Routes Integration', () => {
   let mediator5;
 
   beforeEach(async () => {
+    app.set('io', undefined);
     buyer = buildParty();
     seller = buildParty();
     mediator1 = buildParty();
@@ -334,6 +335,321 @@ describe('Escrow Routes Integration', () => {
     expect(status.statusCode).toBe(200);
     expect(status.body.completedActions).toContain('release');
     expect(status.body.signingAction).toBeNull();
+  });
+
+  it('emits nonce_collected with escrowId so realtime listeners accept it', async () => {
+    await initSession();
+
+    const toCalls = [];
+    const emitCalls = [];
+    app.set('io', {
+      to(room) {
+        toCalls.push(room);
+        return {
+          emit(...args) {
+            emitCalls.push(args);
+          }
+        };
+      }
+    });
+
+    const zero = '0x' + '00'.repeat(32);
+    const releaseRoles = [
+      { role: 'buyer', party: buyer },
+      { role: 'seller', party: seller },
+      { role: 'mediator1', party: mediator1 },
+      { role: 'mediator2', party: mediator2 },
+      { role: 'mediator3', party: mediator3 }
+    ];
+
+    const round1 = releaseRoles.map((entry) => {
+      const nonce = ethers.hexlify(ethers.randomBytes(32));
+      const share = computeSignatureShare(entry.party.priv, nonce, zero);
+      return { ...entry, nonce, share };
+    });
+
+    for (let index = 0; index < round1.length; index++) {
+      const response = await request(app)
+        .post('/api/escrow/nonce')
+        .set(authHeaderForParty(round1[index].party))
+        .send({
+          escrowId,
+          role: round1[index].role,
+          action: 'release',
+          signerBitmap: signerBitmapRelease,
+          R_x: round1[index].share.R_x,
+          R_y: round1[index].share.R_y
+        });
+
+      expect(response.statusCode).toBe(200);
+    }
+
+    const nonceCollectedCall = emitCalls.find(([eventName]) => eventName === 'nonce_collected');
+    expect(nonceCollectedCall).toBeTruthy();
+    expect(nonceCollectedCall[1]).toEqual(expect.objectContaining({
+      escrowId,
+      R_addr: expect.any(String),
+      challenge: expect.any(String),
+      msgHash: expect.any(String),
+      signerBitmap: signerBitmapRelease
+    }));
+    expect(toCalls).toContain(escrowId);
+  });
+
+  it('emits nonce_received with escrowId on first nonce submission', async () => {
+    await initSession();
+
+    const toCalls = [];
+    const emitCalls = [];
+    app.set('io', {
+      to(room) {
+        toCalls.push(room);
+        return {
+          emit(...args) {
+            emitCalls.push(args);
+          }
+        };
+      }
+    });
+
+    const zero = '0x' + '00'.repeat(32);
+    const nonce = ethers.hexlify(ethers.randomBytes(32));
+    const share = computeSignatureShare(buyer.priv, nonce, zero);
+
+    const response = await request(app)
+      .post('/api/escrow/nonce')
+      .set(authHeaderForParty(buyer))
+      .send({
+        escrowId,
+        role: 'buyer',
+        action: 'release',
+        signerBitmap: signerBitmapRelease,
+        R_x: share.R_x,
+        R_y: share.R_y
+      });
+
+    expect(response.statusCode).toBe(200);
+
+    const nonceReceivedCall = emitCalls.find(([eventName]) => eventName === 'nonce_received');
+    expect(nonceReceivedCall).toBeTruthy();
+    expect(nonceReceivedCall[1]).toEqual(expect.objectContaining({
+      escrowId,
+      count: 1,
+      needed: 5
+    }));
+    expect(toCalls).toContain(escrowId);
+  });
+
+  it('emits z_received with escrowId on first z-share submission', async () => {
+    await initSession();
+
+    const zero = '0x' + '00'.repeat(32);
+    const releaseRoles = [
+      { role: 'buyer', party: buyer },
+      { role: 'seller', party: seller },
+      { role: 'mediator1', party: mediator1 },
+      { role: 'mediator2', party: mediator2 },
+      { role: 'mediator3', party: mediator3 }
+    ];
+
+    const round1 = releaseRoles.map((entry) => {
+      const nonce = ethers.hexlify(ethers.randomBytes(32));
+      const share = computeSignatureShare(entry.party.priv, nonce, zero);
+      return { ...entry, nonce, share };
+    });
+
+    for (let index = 0; index < round1.length; index++) {
+      await request(app)
+        .post('/api/escrow/nonce')
+        .set(authHeaderForParty(round1[index].party))
+        .send({
+          escrowId,
+          role: round1[index].role,
+          action: 'release',
+          signerBitmap: signerBitmapRelease,
+          R_x: round1[index].share.R_x,
+          R_y: round1[index].share.R_y
+        });
+    }
+
+    const toCalls = [];
+    const emitCalls = [];
+    app.set('io', {
+      to(room) {
+        toCalls.push(room);
+        return {
+          emit(...args) {
+            emitCalls.push(args);
+          }
+        };
+      }
+    });
+
+    const challenge = computeSignatureShare(buyer.priv, round1[0].nonce, zero).z;
+    const z = computeSignatureShare(buyer.priv, round1[0].nonce, challenge).z;
+
+    const response = await request(app)
+      .post('/api/escrow/sign')
+      .set(authHeaderForParty(buyer))
+      .send({
+        escrowId,
+        role: 'buyer',
+        signerBitmap: signerBitmapRelease,
+        z
+      });
+
+    expect(response.statusCode).toBe(200);
+
+    const zReceivedCall = emitCalls.find(([eventName]) => eventName === 'z_received');
+    expect(zReceivedCall).toBeTruthy();
+    expect(zReceivedCall[1]).toEqual(expect.objectContaining({
+      escrowId,
+      count: 1,
+      needed: 5
+    }));
+    expect(toCalls).toContain(escrowId);
+  });
+
+  it('emits schnorr_complete with escrowId when all z-shares collected', async () => {
+    await initSession();
+
+    const zero = '0x' + '00'.repeat(32);
+    const releaseRoles = [
+      { role: 'buyer', party: buyer },
+      { role: 'seller', party: seller },
+      { role: 'mediator1', party: mediator1 },
+      { role: 'mediator2', party: mediator2 },
+      { role: 'mediator3', party: mediator3 }
+    ];
+
+    const round1 = releaseRoles.map((entry) => {
+      const nonce = ethers.hexlify(ethers.randomBytes(32));
+      const share = computeSignatureShare(entry.party.priv, nonce, zero);
+      return { ...entry, nonce, share };
+    });
+
+    let challenge = null;
+    for (let index = 0; index < round1.length; index++) {
+      const nonceResponse = await request(app)
+        .post('/api/escrow/nonce')
+        .set(authHeaderForParty(round1[index].party))
+        .send({
+          escrowId,
+          role: round1[index].role,
+          action: 'release',
+          signerBitmap: signerBitmapRelease,
+          R_x: round1[index].share.R_x,
+          R_y: round1[index].share.R_y
+        });
+
+      if (index === round1.length - 1) {
+        challenge = nonceResponse.body.challenge;
+      }
+    }
+
+    const toCalls = [];
+    const emitCalls = [];
+    app.set('io', {
+      to(room) {
+        toCalls.push(room);
+        return {
+          emit(...args) {
+            emitCalls.push(args);
+          }
+        };
+      }
+    });
+
+    for (let index = 0; index < round1.length; index++) {
+      const z = computeSignatureShare(round1[index].party.priv, round1[index].nonce, challenge).z;
+      await request(app)
+        .post('/api/escrow/sign')
+        .set(authHeaderForParty(round1[index].party))
+        .send({
+          escrowId,
+          role: round1[index].role,
+          signerBitmap: signerBitmapRelease,
+          z
+        });
+    }
+
+    const schnorrCompleteCall = emitCalls.find(([eventName]) => eventName === 'schnorr_complete');
+    expect(schnorrCompleteCall).toBeTruthy();
+    expect(schnorrCompleteCall[1]).toEqual(expect.objectContaining({
+      escrowId,
+      R_addr: expect.any(String),
+      z: expect.any(String),
+      e: expect.any(String),
+      msgHash: expect.any(String),
+      signerBitmap: signerBitmapRelease
+    }));
+    expect(toCalls).toContain(escrowId);
+  });
+
+  it('/sign endpoint returns vaultContractAddress in signature payload', async () => {
+    await initSession();
+
+    const zero = '0x' + '00'.repeat(32);
+    const releaseRoles = [
+      { role: 'buyer', party: buyer },
+      { role: 'seller', party: seller },
+      { role: 'mediator1', party: mediator1 },
+      { role: 'mediator2', party: mediator2 },
+      { role: 'mediator3', party: mediator3 }
+    ];
+
+    const round1 = releaseRoles.map((entry) => {
+      const nonce = ethers.hexlify(ethers.randomBytes(32));
+      const share = computeSignatureShare(entry.party.priv, nonce, zero);
+      return { ...entry, nonce, share };
+    });
+
+    let challenge = null;
+    for (let index = 0; index < round1.length; index++) {
+      const nonceResponse = await request(app)
+        .post('/api/escrow/nonce')
+        .set(authHeaderForParty(round1[index].party))
+        .send({
+          escrowId,
+          role: round1[index].role,
+          action: 'release',
+          signerBitmap: signerBitmapRelease,
+          R_x: round1[index].share.R_x,
+          R_y: round1[index].share.R_y
+        });
+
+      if (index === round1.length - 1) {
+        challenge = nonceResponse.body.challenge;
+      }
+    }
+
+    let signResponse = null;
+    for (let index = 0; index < round1.length; index++) {
+      const z = computeSignatureShare(round1[index].party.priv, round1[index].nonce, challenge).z;
+      const response = await request(app)
+        .post('/api/escrow/sign')
+        .set(authHeaderForParty(round1[index].party))
+        .send({
+          escrowId,
+          role: round1[index].role,
+          signerBitmap: signerBitmapRelease,
+          z
+        });
+
+      if (index === round1.length - 1) {
+        signResponse = response;
+      }
+    }
+
+    expect(signResponse.statusCode).toBe(200);
+    expect(signResponse.body.vaultContractAddress.toLowerCase()).toBe(contractAddress.toLowerCase());
+    expect(signResponse.body).toEqual(expect.objectContaining({
+      R_addr: expect.any(String),
+      z: expect.any(String),
+      e: expect.any(String),
+      msgHash: expect.any(String),
+      signerBitmap: signerBitmapRelease
+    }));
   });
 
   it('collects pubkeys incrementally and marks collection complete after 7 submissions', async () => {

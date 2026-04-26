@@ -1,12 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useSetAtom } from 'jotai';
 import { addSystemLogAtom } from './escrowStore';
-
-const NONCE_STORAGE_PREFIX = 'tss_nonce:';
-
-function getNonceStorageKey(nonceKey) {
-  return `${NONCE_STORAGE_PREFIX}${nonceKey}`;
-}
+import { saveNonceRecord, getNonceRecord, clearNonceRecord } from '../../lib/storage';
 
 /**
  * Custom Hook quản lý vòng đời và giao tiếp với TSS Web Worker
@@ -18,19 +13,19 @@ export const useTssWorker = () => {
   const addLog = useSetAtom(addSystemLogAtom); // Lấy hàm ghi log lên Terminal UI
 
   // Khởi tạo Worker khi component mount
-  const persistNonce = useCallback((nonceKey, nonceHex) => {
-    if (!nonceKey || !nonceHex || typeof window === 'undefined') return;
-    window.sessionStorage.setItem(getNonceStorageKey(nonceKey), nonceHex);
+  const persistNonce = useCallback(async (nonceKey, nonceHex) => {
+    if (!nonceKey || !nonceHex) return;
+    await saveNonceRecord(nonceKey, nonceHex);
   }, []);
 
-  const loadNonce = useCallback((nonceKey) => {
-    if (!nonceKey || typeof window === 'undefined') return null;
-    return window.sessionStorage.getItem(getNonceStorageKey(nonceKey));
+  const loadNonce = useCallback(async (nonceKey) => {
+    if (!nonceKey) return null;
+    return getNonceRecord(nonceKey);
   }, []);
 
-  const clearNonce = useCallback((nonceKey) => {
-    if (!nonceKey || typeof window === 'undefined') return;
-    window.sessionStorage.removeItem(getNonceStorageKey(nonceKey));
+  const clearNonce = useCallback(async (nonceKey) => {
+    if (!nonceKey) return;
+    await clearNonceRecord(nonceKey);
   }, []);
 
   useEffect(() => {
@@ -89,13 +84,13 @@ export const useTssWorker = () => {
     // Chuẩn hóa hàm export đúng Signing Happy Path 
     computeNonce: async (nonceKey) => {
       const result = await executeWorkerTask('COMPUTE_NONCE', { nonceKey });
-      persistNonce(nonceKey, result?.nonceHex);
+      await persistNonce(nonceKey, result?.nonceHex);
       return result;
     },
     computeZShare: async (privateKeyHex, challengeHex, nonceKey) => {
-      const nonceHex = loadNonce(nonceKey);
+      const nonceHex = await loadNonce(nonceKey);
       const result = await executeWorkerTask('COMPUTE_Z_SHARE', { privateKeyHex, challengeHex, nonceKey, nonceHex });
-      clearNonce(nonceKey);
+      await clearNonce(nonceKey);
       return result;
     }
   };

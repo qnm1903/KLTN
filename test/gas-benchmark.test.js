@@ -78,14 +78,19 @@ function calcStats(samples) {
   if (n === 0) {
     throw new Error("calcStats received empty samples");
   }
+  const sorted = [...samples].sort((a, b) => a - b);
   const mean = samples.reduce((a, b) => a + b, 0) / n;
   const variance = n > 1
     ? samples.reduce((acc, v) => acc + (v - mean) ** 2, 0) / (n - 1)
     : 0;
   const stdDev = Math.sqrt(variance);
   const margin = 1.96 * (stdDev / Math.sqrt(n)); // 95% CI
+  const median = n % 2 === 0
+    ? Math.round((sorted[(n / 2) - 1] + sorted[n / 2]) / 2)
+    : sorted[Math.floor(n / 2)];
   return {
     mean:   Math.round(mean),
+    median,
     min:    Math.min(...samples),
     max:    Math.max(...samples),
     stdDev: parseFloat(stdDev.toFixed(2)),
@@ -96,6 +101,20 @@ function calcStats(samples) {
 
 function savingsPct(tssGas, multisigGas) {
   return (((multisigGas - tssGas) / multisigGas) * 100).toFixed(2);
+}
+
+function formatGasTable(label, statsMap) {
+  const rows = Object.entries(statsMap).map(([name, stats]) => ({
+    metric: label ? `${label}.${name}` : name,
+    runs: stats.samples.length,
+    min: stats.min,
+    median: stats.median,
+    avg: stats.mean,
+    max: stats.max,
+    stdDev: stats.stdDev,
+    ci95: `${stats.ci95[0]}..${stats.ci95[1]}`,
+  }));
+  console.table(rows);
 }
 
 // ─── Deploy helpers ──────────────────────────────────────────────────────────
@@ -492,7 +511,7 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
     console.log(SEP);
     console.log(
       "  Function".padEnd(22) +
-      "Mean".padStart(10) + "Min".padStart(10) + "Max".padStart(10) +
+      "Mean".padStart(10) + "Median".padStart(10) + "Min".padStart(10) + "Max".padStart(10) +
       "StdDev".padStart(10) + "  95% CI"
     );
     console.log(SEP);
@@ -500,6 +519,7 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
       console.log(
         `  ${fn}`.padEnd(22) +
         String(s.mean).padStart(10) +
+        String(s.median).padStart(10) +
         String(s.min).padStart(10) +
         String(s.max).padStart(10) +
         String(s.stdDev).padStart(10) +
@@ -511,7 +531,7 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
     console.log(SEP);
     console.log(
       "  Function".padEnd(22) +
-      "Mean".padStart(10) + "Min".padStart(10) + "Max".padStart(10) +
+      "Mean".padStart(10) + "Median".padStart(10) + "Min".padStart(10) + "Max".padStart(10) +
       "StdDev".padStart(10) + "  95% CI"
     );
     console.log(SEP);
@@ -519,6 +539,7 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
       console.log(
         `  ${fn}`.padEnd(22) +
         String(s.mean).padStart(10) +
+        String(s.median).padStart(10) +
         String(s.min).padStart(10) +
         String(s.max).padStart(10) +
         String(s.stdDev).padStart(10) +

@@ -221,6 +221,45 @@ const escrowDB = localforage.createInstance({
   storeName: 'escrow_sessions' 
 });
 
+function getNonceRecordKey(nonceKey) {
+  return `nonce_${nonceKey}`;
+}
+
+export const saveNonceRecord = async (nonceKey, nonceHex) => {
+  if (!nonceKey || !nonceHex) return;
+
+  try {
+    await escrowDB.setItem(getNonceRecordKey(nonceKey), {
+      nonceHex,
+      timestamp: Date.now(),
+    });
+  } catch (err) {
+    console.error('[Storage Error] Khong the luu nonce:', err);
+  }
+};
+
+export const getNonceRecord = async (nonceKey) => {
+  if (!nonceKey) return null;
+
+  try {
+    const record = await escrowDB.getItem(getNonceRecordKey(nonceKey));
+    return record?.nonceHex || null;
+  } catch (err) {
+    console.error('[Storage Error] Khong the doc nonce:', err);
+    return null;
+  }
+};
+
+export const clearNonceRecord = async (nonceKey) => {
+  if (!nonceKey) return;
+
+  try {
+    await escrowDB.removeItem(getNonceRecordKey(nonceKey));
+  } catch (err) {
+    console.error('[Storage Error] Khong the xoa nonce:', err);
+  }
+};
+
 export const saveSession = async (escrowId, data, walletAddress) => {
   try {
     const dbKey = getStorageKey(`session_${escrowId}`, walletAddress);

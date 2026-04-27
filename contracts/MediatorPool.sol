@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@chainlink/contracts/src/v0.8/VRFConsumerBaseV2.sol";
-import "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
+import "@chainlink/contracts/src/v0.8/vrf/VRFConsumerBaseV2.sol";
+import "@chainlink/contracts/src/v0.8/vrf/interfaces/VRFCoordinatorV2Interface.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title MediatorPool
@@ -25,7 +25,8 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
     bytes32 private immutable s_keyHash;
     uint32 private immutable s_callbackGasLimit;
     uint16 private constant REQUEST_CONFIRMATIONS = 3; // Số block chờ xác nhận
-    uint32 private constant NUM_WORDS = 1; // Chỉ cần 1 số random
+    uint32 private constant NUM_WORDS = 5; // Cần 5 số random để chọn 5 mediators
+    uint256 public constant COMMITTEE_SIZE = 5; // Số mediator cần chọn
 
     /* ========== CẤU TRÚC DỮ LIỆU MEDIATOR ========== */
     struct Mediator {
@@ -49,7 +50,7 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
     event MediatorRegistered(address indexed mediator, uint256 amount);
     event MediatorUnregistered(address indexed mediator, uint256 amount);
     event RandomnessRequested(uint256 requestId, bytes32 indexed escrowId);
-    event RandomMediatorSelected(bytes32 indexed escrowId, address indexed mediator);
+    event RandomMediatorSelected(bytes32 indexed escrowId, address[] mediators);
     event MediatorSlashed(address indexed mediator, uint256 amount);
 
     /* ========== KHAI BÁO ========== */
@@ -109,7 +110,6 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
             NUM_WORDS
         );
 
-        // Lưu lại requestId này để khi VRF gọi về ta biết nó đang phục vụ Escrow nào
         vrfRequests[requestId] = escrowId;
 
         emit RandomnessRequested(requestId, escrowId);
@@ -118,7 +118,7 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
     /* ========== HÀM GỌI LẠI TỪ VRF (Fulfill) ========== */
     /**
      * @dev Hàm này được Chainlink Node gọi lại 1 cách tự động và an toàn.
-     * randomWords[0] chính là con số ngẫu nhiên tuyệt đối.
+     * randomWords chứa 5 số ngẫu nhiên để chọn 5 mediators.
      */
     function fulfillRandomWords(
         uint256 requestId,
@@ -131,23 +131,31 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
         // Xóa request đã xử lý để tiết kiệm storage
         delete vrfRequests[requestId];
 
-        // Lấy số random từ Chainlink
-        uint256 randomNumber = randomWords[0];
+        // Kiểm tra đủ số random words
+        require(randomWords.length >= COMMITTEE_SIZE, "Insufficient random words");
 
-        // Tính toán index ngẫu nhiên trong Pool
-        uint256 index = randomNumber % mediatorsList.length;
-        address selectedMediator = mediatorsList[index];
+        // Chọn 5 mediators ngẫu nhiên không trùng lặp
+        address[] memory selectedMediators = new address[](COMMITTEE_SIZE);
+        bool[] memory selected = new bool[](mediatorsList.length);
+        
+        for (uint256 i = 0; i < COMMITTEE_SIZE; i++) {
+            uint256 randomNumber = randomWords[i];
+            uint256 index = randomNumber % mediatorsList.length;
+            
+            // Nếu mediator đã được chọn, thử index tiếp theo
+            while (selected[index]) {
+                index = (index + 1) % mediatorsList.length;
+            }
+            
+            selected[index] = true;
+            selectedMediators[i] = mediatorsList[index];
+            
+            // Đảm bảo mediator vẫn active
+            require(mediators[selectedMediators[i]].isActive, "Selected inactive");
+        }
 
-        // Đảm bảo người này vẫn active
-        require(mediators[selectedMediator].isActive, "Selected inactive");
-
-        // ** TẠI ĐÂY LÀ ĐIỂM GIAO NHAU **
-        // Emit sự kiện để Backend/WebSocket bắt được.
-        // Backend sẽ lấy selectedMediator này để tiếp tục xử lý Escrow.
-        emit RandomMediatorSelected(escrowId, selectedMediator);
-
-        // Nếu bạn muốn tự động gọi thẳng vào EscrowFactory, bạn có thể gọi ở đây:
-        // EscrowFactory(factoryAddress).createEscrow(escrowId, selectedMediator);
+        // Emit sự kiện để Backend/WebSocket bắt được
+        emit RandomMediatorSelected(escrowId, selectedMediators);
     }
 
     /* ========== XỬ LÝ TIMEOUT ========== */

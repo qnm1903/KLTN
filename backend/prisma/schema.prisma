@@ -94,6 +94,8 @@ model Evidence {
   escrowId    String
   uploaderId  String
   fileUrl     String   // Đường dẫn file upload
+  fileHash    String   // SHA-256 hash của file content
+  merkleRoot  String?  // Merkle root của tất cả evidence trong escrow
   description String   @default("")
   createdAt   DateTime @default(now())
 

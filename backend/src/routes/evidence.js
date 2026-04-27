@@ -5,6 +5,7 @@ import prisma from '../lib/prisma.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { DISPUTE_EVIDENCE_UPLOAD_PHASES } from '../lib/dispute-lifecycle.js';
 import { uploadEvidenceToIpfs } from '../lib/ipfs-storage.js';
+import { calculateMerkleRoot } from '../lib/merkle.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -125,11 +126,29 @@ router.post('/:id/evidence', authMiddleware, handleEvidenceUpload, async (req, r
       return res.status(502).json({ error: uploadError.message });
     }
 
+    // Get file hash from frontend (SHA-256)
+    const fileHash = req.body.fileHash;
+    if (!fileHash) {
+      return res.status(400).json({ error: 'fileHash is required' });
+    }
+
+    // Get all existing evidence hashes for this escrow
+    const existingEvidences = await prisma.evidence.findMany({
+      where: { escrowId },
+      select: { fileHash: true }
+    });
+
+    // Calculate new Merkle root with new evidence
+    const allHashes = [...existingEvidences.map(e => e.fileHash), fileHash];
+    const merkleRoot = calculateMerkleRoot(allHashes);
+
     const evidence = await prisma.evidence.create({
       data: {
         escrowId,
         uploaderId: userId,
         fileUrl: uploadedFile.fileUrl,
+        fileHash,
+        merkleRoot,
         description: req.body.description || ''
       },
       include: {

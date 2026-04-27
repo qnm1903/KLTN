@@ -15,17 +15,35 @@ export const useTssWorker = () => {
   // Khởi tạo Worker khi component mount
   const persistNonce = useCallback(async (nonceKey, nonceHex) => {
     if (!nonceKey || !nonceHex) return;
+    console.log(`[TSS Worker Main] Saving nonce: ${nonceKey}`);
+    
+    // Check if nonce already exists to prevent overwrite
+    const existingNonce = await getNonceRecord(nonceKey);
+    if (existingNonce) {
+      console.log(`[TSS Worker Main] Nonce already exists, skipping overwrite: ${nonceKey}`);
+      return; // Don't overwrite existing nonce
+    }
+    
     await saveNonceRecord(nonceKey, nonceHex);
   }, []);
 
   const loadNonce = useCallback(async (nonceKey) => {
     if (!nonceKey) return null;
-    return getNonceRecord(nonceKey);
+    console.log(`[TSS Worker Main] Loading nonce: ${nonceKey}`);
+    const nonceHex = await getNonceRecord(nonceKey);
+    console.log(`[TSS Worker Main] Loaded nonce: ${nonceHex ? 'FOUND' : 'NOT FOUND'}`);
+    return nonceHex;
   }, []);
 
   const clearNonce = useCallback(async (nonceKey) => {
     if (!nonceKey) return;
     await clearNonceRecord(nonceKey);
+  }, []);
+
+  const hasNonce = useCallback(async (nonceKey) => {
+    if (!nonceKey) return false;
+    const nonceHex = await getNonceRecord(nonceKey);
+    return Boolean(nonceHex);
   }, []);
 
   useEffect(() => {
@@ -88,10 +106,13 @@ export const useTssWorker = () => {
       return result;
     },
     computeZShare: async (privateKeyHex, challengeHex, nonceKey) => {
+      console.log(`[TSS Worker Main] computeZShare called with nonceKey: ${nonceKey}`);
       const nonceHex = await loadNonce(nonceKey);
+      console.log(`[TSS Worker Main] computeZShare nonceHex: ${nonceHex}`);
       const result = await executeWorkerTask('COMPUTE_Z_SHARE', { privateKeyHex, challengeHex, nonceKey, nonceHex });
       await clearNonce(nonceKey);
       return result;
-    }
+    },
+    hasNonce
   };
 };

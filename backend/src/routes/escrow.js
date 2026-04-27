@@ -90,6 +90,38 @@ async function checkSession(escrowId, res) {
     };
     pubKeysDb.forEach(pk => { session.pubKeys[pk.role] = pk.pubKey; });
     session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, PARTICIPANT_ROLES);
+    
+    // Restore nonces from NonceSubmission table
+    try {
+      const noncesDb = await prisma.nonceSubmission.findMany({
+        where: {
+          escrowId,
+          expiresAt: { gt: new Date() } // Only restore non-expired nonces
+        }
+      });
+      
+      if (noncesDb && noncesDb.length > 0) {
+        console.log(`[TSS Recovery] Khôi phục ${noncesDb.length} nonces từ Database cho Escrow ${escrowId}`);
+        
+        // Determine the current signing action and bitmap from the first nonce
+        const firstNonce = noncesDb[0];
+        session.signingAction = firstNonce.action;
+        session.nonces = {};
+        
+        noncesDb.forEach(n => {
+          session.nonces[n.role] = { R_x: n.nonceR_x, R_y: n.nonceR_y };
+        });
+        
+        // Calculate signer bitmap from roles
+        const roles = Object.keys(session.nonces);
+        session.signingBitmap = calculateSignerBitmap(roles);
+        
+        console.log(`[TSS Recovery] Khôi phục thành công: action=${firstNonce.action}, roles=${roles.join(',')}, bitmap=${session.signingBitmap}`);
+      }
+    } catch (nonceError) {
+      console.warn(`[TSS Recovery] Không thể khôi phục nonce từ Database: ${nonceError.message}`);
+    }
+    
     await saveSession(escrowId, session);
   }
   return session;
@@ -184,6 +216,38 @@ function rolesMatchAction(roles, action) {
   const expected = [...getActionSignerRoles(action)].sort().join('+');
   const actual = [...new Set(roles)].sort().join('+');
   return expected === actual;
+}
+
+// Helper: Calculate signerBitmap from roles list
+// bit 0: buyer, bit 1: seller, bits 2-6: mediator 1-5
+function calculateSignerBitmap(roles) {
+  let bitmap = 0;
+  for (const role of roles) {
+    if (role === 'buyer') bitmap |= 1; // bit 0
+    else if (role === 'seller') bitmap |= 2; // bit 1
+    else if (role.startsWith('mediator')) {
+      const slot = Number(role.replace('mediator', ''));
+      if (slot >= 1 && slot <= 5) bitmap |= (1 << (slot + 1)); // bits 2-6
+    }
+  }
+  return bitmap;
+}
+
+// Helper: Validate signerBitmap - buyer OR seller must be included
+function validateSignerBitmap(bitmap, submittedRoles) {
+  let count = 0;
+  let temp = bitmap;
+  while (temp) { count += temp & 1; temp >>= 1; }
+  if (count < 5) return { valid: false, error: `Need at least 5 signers, got ${count}` };
+
+  // Check core role (buyer or seller must be present)
+  const hasBuyer = (bitmap & 1) !== 0;
+  const hasSeller = (bitmap & 2) !== 0;
+  if (!hasBuyer && !hasSeller) {
+    return { valid: false, error: 'At least one core role (buyer or seller) must approve' };
+  }
+
+  return { valid: true };
 }
 
 // ─── Phase 1: DKG ─────────────────────────────────────────────────────────────
@@ -284,6 +348,28 @@ router.post('/pubkey/submit', authMiddleware, escrowPubKeySubmitRateLimiter, asy
     if (summary.complete && !session.pubKeyAggregationCompletedAt) {
       session.precomputedPkAgg = aggregateWhenReady(session);
       session.pubKeyAggregationCompletedAt = Date.now();
+      
+      // Populate pkAgg into DB for all action combinations
+      try {
+        const buyerSellerPk = aggregatePubKeysForRoles(session.pubKeys, ['buyer', 'seller']);
+        const buyerMediatorPk = aggregatePubKeysForRoles(session.pubKeys, ['buyer', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5']);
+        const sellerMediatorPk = aggregatePubKeysForRoles(session.pubKeys, ['seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5']);
+        
+        await prisma.escrow.update({
+          where: { id: escrowId },
+          data: {
+            pkAggBsX: String(buyerSellerPk.x),
+            pkAggBsY: String(buyerSellerPk.y),
+            pkAggBmX: String(buyerMediatorPk.x),
+            pkAggBmY: String(buyerMediatorPk.y),
+            pkAggSmX: String(sellerMediatorPk.x),
+            pkAggSmY: String(sellerMediatorPk.y)
+          }
+        });
+        console.log(`[DKG] Populated pkAgg into DB for escrow ${escrowId}`);
+      } catch (dbError) {
+        console.warn(`[DKG] Failed to populate pkAgg into DB: ${dbError.message}`);
+      }
     }
     await saveSession(escrowId, session);
     summary = getPubKeyCollectionSummary(session);
@@ -335,6 +421,47 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     catch (e) { return res.status(400).json({ error: 'Invalid coordinate format' }); }
 
     session.nonces[role] = { R_x: normalizedRx, R_y: normalizedRy };
+
+    // AUTO-APPROVE: When user submits nonce, they are implicitly approving the action
+    // Create approval record in database (if not exists)
+    try {
+      const user = await prisma.user.findUnique({ where: { walletAddress: normalizeAddress(req.user.walletAddress) } });
+      if (user) {
+        await prisma.approval.upsert({
+          where: { escrowId_action_userId: { escrowId, action, userId: user.id } },
+          update: {}, // No update needed, just ensure it exists
+          create: { escrowId, action, userId: user.id }
+        });
+      }
+    } catch (approvalError) {
+      // Log but don't fail - this is a best-effort operation
+      console.warn(`[Nonce] Failed to create approval record: ${approvalError.message}`);
+    }
+
+    // Save nonce to NonceSubmission table for persistence
+    try {
+      const nonceTTL = 30 * 60 * 1000; // 30 minutes TTL
+      await prisma.nonceSubmission.upsert({
+        where: { escrowId_action_role: { escrowId, action, role } },
+        update: {
+          nonceR_x: normalizedRx,
+          nonceR_y: normalizedRy,
+          expiresAt: new Date(Date.now() + nonceTTL)
+        },
+        create: {
+          escrowId,
+          action,
+          role,
+          nonceR_x: normalizedRx,
+          nonceR_y: normalizedRy,
+          expiresAt: new Date(Date.now() + nonceTTL)
+        }
+      });
+    } catch (nonceError) {
+      // Log but don't fail - this is a best-effort operation
+      console.warn(`[Nonce] Failed to save nonce to database: ${nonceError.message}`);
+    }
+
     await saveSession(escrowId, session);
 
     const io = req.app.get('io');
@@ -356,13 +483,21 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
     const vaultAddr = dbEscrow?.contractAddress || session.contractAddress;
 
-    // [CÚ CHỐT HẠ]: Đọc trực tiếp ID thực sự của Két sắt từ Blockchain để băm chữ ký
+    // Đọc trực tiếp ID thực sự của Két sắt từ Blockchain để băm chữ ký
     const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
     const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
     const trueChainEscrowId = await vaultContract.escrowId();
 
     const msgHash = buildMsgHash(trueChainEscrowId, action, bitmap, vaultAddr, session.chainId);
     const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
+
+    console.log(`[TSS Round 2] Escrow: ${escrowId}`);
+    console.log(`[TSS Round 2] Action: ${action}, Bitmap: ${bitmap}`);
+    console.log(`[TSS Round 2] Vault: ${vaultAddr}, ChainId: ${session.chainId}`);
+    console.log(`[TSS Round 2] escrowId (raw): ${trueChainEscrowId}`);
+    console.log(`[TSS Round 2] msgHash: ${msgHash}`);
+    console.log(`[TSS Round 2] pkAgg: x=${pkAgg.x}, y=${pkAgg.y}`);
+    console.log(`[TSS Round 2] R_addr: ${R_addr}, challenge (e): ${challenge}`);
 
     session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: bitmap };
     await saveSession(escrowId, session);
@@ -398,7 +533,23 @@ router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => 
       return res.json({ received: zCount, needed: session.signingRoles.length });
     }
 
-    const { R_addr, pkAgg, msgHash, challenge: e } = session.round2Context;
+    const { R_addr, pkAgg, msgHash, challenge: e, signerBitmap: expectedBitmap } = session.round2Context;
+    
+    // VALIDATE signerBitmap: Must match expected bitmap from nonce collection
+    // and must have buyer or seller approval
+    const submittedBitmap = Number(signerBitmap);
+    if (submittedBitmap !== expectedBitmap) {
+      return res.status(400).json({ 
+        error: `Signer bitmap mismatch. Expected: ${expectedBitmap}, got: ${submittedBitmap}` 
+      });
+    }
+    
+    // Validate bitmap structure (minimum 5 signers, core role required)
+    const validation = validateSignerBitmap(submittedBitmap, session.signingRoles);
+    if (!validation.valid) {
+      return res.status(400).json({ error: `Invalid signer bitmap: ${validation.error}` });
+    }
+    
     const z_agg = aggregateZShares(Object.values(session.zShares));
 
     session.completedActions.push(session.signingAction);
@@ -460,6 +611,78 @@ router.get('/:id/status', async (req, res) => {
     nonceCount: Object.keys(session.nonces).length, zShareCount: Object.keys(session.zShares).length,
     completedActions: session.completedActions, pubkeyCollection: toCollectionPayload(getPubKeyCollectionStatus(session))
   });
+});
+
+// ─── Approval API ─────────────────────────────────────────────────────────────
+
+// Get approval status for an escrow action
+router.get('/:id/approvals', authMiddleware, async (req, res) => {
+  try {
+    const { id: escrowId } = req.params;
+    const { action } = req.query;
+    
+    if (!escrowId || !action) {
+      return res.status(400).json({ error: 'Missing required fields: escrowId, action' });
+    }
+    
+    if (!VALID_ACTIONS.includes(action)) {
+      return res.status(400).json({ error: `Invalid action. Allowed: ${VALID_ACTIONS.join(', ')}` });
+    }
+    
+    // Get escrow with buyer/seller info
+    const escrow = await prisma.escrow.findUnique({
+      where: { id: escrowId },
+      include: { buyer: true, seller: true, escrowMediators: { include: { mediator: true }, orderBy: { slot: 'asc' } } }
+    });
+    
+    if (!escrow) {
+      return res.status(404).json({ error: 'Escrow not found' });
+    }
+    
+    // Get approvals from database
+    const approvals = await prisma.approval.findMany({
+      where: { escrowId, action },
+      include: { user: { select: { id: true, walletAddress: true } } }
+    });
+    
+    // Map approvals to roles
+    const approvedRoles = [];
+    for (const approval of approvals) {
+      if (approval.user.walletAddress === escrow.buyer.walletAddress) {
+        approvedRoles.push('buyer');
+      } else if (approval.user.walletAddress === escrow.seller.walletAddress) {
+        approvedRoles.push('seller');
+      } else {
+        // Check if it's a mediator
+        const mediatorSlot = escrow.escrowMediators.findIndex(m => m.mediator.walletAddress === approval.user.walletAddress);
+        if (mediatorSlot !== -1) {
+          approvedRoles.push(`mediator${mediatorSlot + 1}`);
+        }
+      }
+    }
+    
+    // Calculate expected signerBitmap
+    const expectedBitmap = calculateSignerBitmap(approvedRoles);
+    
+    // Validate bitmap
+    const validation = validateSignerBitmap(expectedBitmap, approvedRoles);
+    
+    res.json({
+      escrowId,
+      action,
+      approvals: approvals.map(a => ({
+        userId: a.userId,
+        walletAddress: a.user.walletAddress,
+        approvedAt: a.approvedAt
+      })),
+      approvedRoles,
+      expectedSignerBitmap: expectedBitmap,
+      isValid: validation.valid,
+      validationError: validation.error || null
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ─── API DEPLOY VAULT ĐẦY ĐỦ (CỦA TECH LEAD - TỪ 1 ĐẾN 10) ─────────────────────────

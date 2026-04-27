@@ -11,8 +11,10 @@ const DEFAULT_CLEANUP_CRON = process.env.CLEANUP_CRON_PATTERN || '0 2 * * *';
 
 let timeoutCheckJob = null;
 let fileCleanupJob = null;
+let nonceCleanupJob = null;
 let timeoutCheckInProgress = false;
 let fileCleanupInProgress = false;
+let nonceCleanupInProgress = false;
 
 function logMetric(logger, event, metrics, duration, status = 'success') {
   const log = {
@@ -305,10 +307,28 @@ async function cleanupExpiredFiles(prisma, options = {}) {
   };
 }
 
+async function cleanupExpiredNonces(prisma, logger = console) {
+  const startTime = Date.now();
+  try {
+    const deleted = await prisma.nonceSubmission.deleteMany({
+      where: {
+        expiresAt: { lt: new Date() }
+      }
+    });
+    const duration = Date.now() - startTime;
+    logger.info?.(`[cron] Cleaned up ${deleted.count} expired nonce submissions (${duration}ms)`);
+    return deleted.count;
+  } catch (error) {
+    logger.warn?.(`[cron] Failed to clean up expired nonces: ${error.message}`);
+    return 0;
+  }
+}
+
 export function startCronJobs(prisma, options = {}) {
   const logger = options.logger ?? console;
   const timeoutPattern = options.timeoutPattern ?? DEFAULT_TIMEOUT_CRON;
   const cleanupPattern = options.cleanupPattern ?? DEFAULT_CLEANUP_CRON;
+  const nonceCleanupPattern = options.nonceCleanupPattern ?? '*/5 * * * *'; // Every 5 minutes
   const schedule = options.schedule ?? cron.schedule;
   const validate = options.validate ?? cron.validate;
 
@@ -317,6 +337,9 @@ export function startCronJobs(prisma, options = {}) {
   }
   if (!validate(cleanupPattern)) {
     throw new Error(`Invalid cleanup cron pattern: ${cleanupPattern}`);
+  }
+  if (!validate(nonceCleanupPattern)) {
+    throw new Error(`Invalid nonce cleanup cron pattern: ${nonceCleanupPattern}`);
   }
 
   if (!timeoutCheckJob) {
@@ -367,29 +390,56 @@ export function startCronJobs(prisma, options = {}) {
     logMetric(logger, 'cron.job.scheduled', { job: 'file_cleanup', pattern: cleanupPattern }, 0);
   }
 
-  logMetric(logger, 'cron.started', { totalJobs: 2 }, 0);
+  if (!nonceCleanupJob) {
+    nonceCleanupJob = schedule(nonceCleanupPattern, async () => {
+      if (nonceCleanupInProgress) {
+        logMetric(logger, 'cron.nonce_cleanup.skipped', { reason: 'already_running' }, 0);
+        return;
+      }
+
+      nonceCleanupInProgress = true;
+      const startTime = Date.now();
+      try {
+        await cleanupExpiredNonces(prisma, logger);
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        logMetric(logger, 'cron.nonce_cleanup.failed', { error: error.message }, duration, 'failed');
+      } finally {
+        nonceCleanupInProgress = false;
+      }
+    });
+    logMetric(logger, 'cron.job.scheduled', { job: 'nonce_cleanup', pattern: nonceCleanupPattern }, 0);
+  }
+  logMetric(logger, 'cron.started', { totalJobs: 3 }, 0);
 }
 
 export function stopCronJobs(options = {}) {
-  const logger = options.logger ?? console;
-  let stoppedJobs = 0;
+const logger = options.logger ?? console;
+let stoppedJobs = 0;
 
-  if (timeoutCheckJob) {
-    timeoutCheckJob.stop();
-    timeoutCheckJob = null;
-    stoppedJobs += 1;
-  }
-
-  if (fileCleanupJob) {
-    fileCleanupJob.stop();
-    fileCleanupJob = null;
-    stoppedJobs += 1;
-  }
-
-  timeoutCheckInProgress = false;
-  fileCleanupInProgress = false;
-
-  logMetric(logger, 'cron.stopped', { stoppedJobs }, 0);
+if (timeoutCheckJob) {
+  timeoutCheckJob.stop();
+  timeoutCheckJob = null;
+  stoppedJobs += 1;
 }
 
-export { checkTimeoutEscrows, checkDisputePhaseTransitions, cleanupExpiredFiles };
+if (fileCleanupJob) {
+  fileCleanupJob.stop();
+  fileCleanupJob = null;
+  stoppedJobs += 1;
+}
+
+if (nonceCleanupJob) {
+  nonceCleanupJob.stop();
+  nonceCleanupJob = null;
+  stoppedJobs += 1;
+}
+
+timeoutCheckInProgress = false;
+fileCleanupInProgress = false;
+nonceCleanupInProgress = false;
+
+logMetric(logger, 'cron.stopped', { stoppedJobs }, 0);
+}
+
+export { checkTimeoutEscrows, checkDisputePhaseTransitions, cleanupExpiredFiles, cleanupExpiredNonces };

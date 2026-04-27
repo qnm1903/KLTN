@@ -57,7 +57,7 @@ function isPrismaTimeoutError(error) {
   return error?.code === 'P1008' || message.includes('operation has timed out');
 }
 
-async function withPrismaTimeoutRetry(task, maxAttempts = 3, baseDelayMs = 150) {
+async function withPrismaTimeoutRetry(task, maxAttempts = 5, baseDelayMs = 500) {
   let lastError;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -69,7 +69,9 @@ async function withPrismaTimeoutRetry(task, maxAttempts = 3, baseDelayMs = 150) 
         throw error;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, baseDelayMs * attempt));
+      const delay = baseDelayMs * attempt;
+      console.warn(`[Prisma Retry] Attempt ${attempt}/${maxAttempts} failed, retrying in ${delay}ms...`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 
@@ -179,7 +181,7 @@ router.post('/verify', authVerifyRateLimiter, async (req, res) => {
     }
 
     const addr = address.toLowerCase();
-    const stored = await prisma.authNonce.findUnique({ where: { address: addr } });
+    const stored = await withPrismaTimeoutRetry(() => prisma.authNonce.findUnique({ where: { address: addr } }));
     if (!stored) {
       return res.status(400).json({ error: 'No nonce found. Call GET /nonce first.' });
     }

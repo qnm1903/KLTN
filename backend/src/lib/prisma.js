@@ -13,6 +13,10 @@ const url = rawUrl && rawUrl !== 'undefined' ? rawUrl : 'file:./dev.db';
 const authToken = process.env.TURSO_AUTH_TOKEN;
 
 const adapter = new PrismaLibSql({ url, authToken });
-const prisma = new PrismaClient({ adapter });
+const prisma = new PrismaClient({ 
+  adapter,
+  log: ['error', 'warn'],
+  errorFormat: 'minimal'
+});
 
 export default prisma;

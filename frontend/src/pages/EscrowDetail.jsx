@@ -51,6 +51,39 @@ function normalizeDisplayAmount(amount) {
   return String(amount);
 }
 
+// Helper: Calculate signerBitmap from roles list
+// bit 0: buyer, bit 1: seller, bits 2-6: mediator 1-5
+function calculateSignerBitmapFromRoles(roles) {
+  let bitmap = 0;
+  for (const role of roles) {
+    if (role === 'buyer') bitmap |= 1; // bit 0
+    else if (role === 'seller') bitmap |= 2; // bit 1
+    else if (role.startsWith('mediator')) {
+      const slot = Number(role.replace('mediator', ''));
+      if (slot >= 1 && slot <= 5) bitmap |= (1 << (slot + 1)); // bits 2-6
+    }
+  }
+  return bitmap;
+}
+
+// Helper: Validate signerBitmap - buyer OR seller must be included
+function validateSignerBitmap(bitmap) {
+  // Check minimum signers (5)
+  let count = 0;
+  let temp = bitmap;
+  while (temp) { count += temp & 1; temp >>= 1; }
+  if (count < 5) return { valid: false, error: `Need at least 5 signers, got ${count}` };
+
+  // Check core role (buyer or seller must be present)
+  const hasBuyer = (bitmap & 1) !== 0;
+  const hasSeller = (bitmap & 2) !== 0;
+  if (!hasBuyer && !hasSeller) {
+    return { valid: false, error: 'At least one core role (buyer or seller) must approve' };
+  }
+
+  return { valid: true };
+}
+
 export default function EscrowDetail() {
   // 1. Lấy Context & Định danh
   const { id: escrowId } = useParams();
@@ -60,13 +93,15 @@ export default function EscrowDetail() {
   const [isEscrowLoading, setIsEscrowLoading] = useState(true);
   const [isSubmittingKey, setIsSubmittingKey] = useState(false);
   const [onChainVaultStatus, setOnChainVaultStatus] = useState(null);
+  const [approvalStatus, setApprovalStatus] = useState(null);
+  const [isLoadingApprovals, setIsLoadingApprovals] = useState(false);
   const addLog = useSetAtom(addSystemLogAtom);
 
   // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm deployEscrowVault)
   const { isRecovering } = useSessionRecovery(escrowId, address);
   const { submitPubKey, submitNonce, submitZShare } = useEscrowSync(escrowId);
   const { executeTssAction, fundEscrow, getVaultStatus, isPending, isConfirming, isConfirmed } = useContractCall(); 
-  const { computeNonce, computeZShare } = useTssWorker(); // Khởi tạo Web Worker Hook
+  const { computeNonce, computeZShare, hasNonce } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
   const status = useAtomValue(escrowStatusAtom);
@@ -83,6 +118,19 @@ export default function EscrowDetail() {
   const activeRole = useMemo(() => {
     return resolveRoleFromEscrow(escrow, address);
   }, [escrow, address]);
+
+  // Check nonce state on mount to update UI
+  useEffect(() => {
+    const checkNonceState = async () => {
+      if (escrowId && selectedAction && activeRole && activeRole !== 'Unknown') {
+        const nonceKey = `${escrowId}:${selectedAction}:${activeRole}`;
+        const exists = await hasNonce(nonceKey);
+        console.log(`[EscrowDetail] Nonce state check: ${nonceKey} - ${exists ? 'EXISTS' : 'NOT EXISTS'}`);
+        // You can set a local state here to disable/enable buttons based on nonce existence
+      }
+    };
+    checkNonceState();
+  }, [escrowId, selectedAction, activeRole, hasNonce]);
 
   const hasSubmitted = activeRole !== 'Unknown' && signedNodes.includes(activeRole);
   const localPubKey = getPubKey(address);
@@ -261,26 +309,6 @@ export default function EscrowDetail() {
     }
   }, [isConfirmed, escrow?.status, selectedAction, escrowId, addLog]);
 
-  useEffect(() => {
-    if (!isConfirmed || !selectedAction) return;
-    if (selectedAction !== 'release' && selectedAction !== 'refund') return;
-
-    const nextStatus = selectedAction === 'release' ? 'RELEASED' : 'REFUNDED';
-    if (escrow?.status === nextStatus) return;
-
-    addLog({ message: `Execution confirmed! Syncing '${nextStatus}' status to Database...`, type: 'info' });
-
-    api.patch(`/escrows/${escrowId}/status`, { status: nextStatus })
-      .then(() => {
-        addLog({ message: `Database updated to ${nextStatus}. Signing flow is now closed.`, type: 'success' });
-        setEscrow(prev => ({ ...prev, status: nextStatus }));
-      })
-      .catch((err) => {
-        const errorMsg = err.response?.data?.error || err.message || 'Unknown error';
-        addLog({ message: `Cannot sync ${nextStatus} to Database: ${errorMsg}`, type: 'warning' });
-      });
-  }, [isConfirmed, selectedAction, escrow?.status, escrowId, addLog]);
-
   // --- BẢN VÁ PHASE 2: LUỒNG NẠP TIỀN CHO BUYER ---
   const handleDepositFunds = async () => {
     try {
@@ -334,6 +362,34 @@ export default function EscrowDetail() {
     return `${escrowId}:${action}:${activeRole}`;
   }, [escrowId, activeRole]);
 
+  // Fetch approval status from backend
+  const fetchApprovalStatus = useCallback(async (action) => {
+    if (!escrowId || !action) return;
+    setIsLoadingApprovals(true);
+    try {
+      const { data } = await api.get(`/escrow/${escrowId}/approvals?action=${action}`);
+      setApprovalStatus(data);
+      
+      if (!data.isValid) {
+        addLog({ message: `⚠️ Approval validation: ${data.validationError}`, type: 'warning' });
+      } else {
+        addLog({ message: `✅ Approval status: ${data.approvedRoles.length} signers approved`, type: 'info' });
+      }
+    } catch (error) {
+      console.error('Failed to fetch approval status:', error);
+      addLog({ message: '⚠️ Failed to fetch approval status', type: 'warning' });
+    } finally {
+      setIsLoadingApprovals(false);
+    }
+  }, [escrowId, addLog]);
+
+  // Fetch approval status when selected action changes
+  useEffect(() => {
+    if (selectedAction) {
+      fetchApprovalStatus(selectedAction);
+    }
+  }, [selectedAction, fetchApprovalStatus]);
+
   const handleStartRelease = async () => {
     if (isSigningFlowClosed) {
       addLog({ message: 'Release flow is closed because this vault is already finalized.', type: 'warning' });
@@ -341,6 +397,19 @@ export default function EscrowDetail() {
     }
     const action = 'release';
     setSelectedAction(action);
+    
+    // Calculate expected signerBitmap from action roles
+    // release: buyer + seller + mediator1-5 (all 7 roles)
+    const expectedRoles = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
+    const signerBitmap = calculateSignerBitmapFromRoles(expectedRoles);
+    
+    // Validate before proceeding
+    const validation = validateSignerBitmap(signerBitmap, expectedRoles);
+    if (!validation.valid) {
+      addLog({ message: `❌ Validation failed: ${validation.error}`, type: 'error' });
+      return;
+    }
+    
     try {
       const nonceKey = buildNonceKey(action);
       if (!nonceKey) throw new Error('Cannot start Round 1: unresolved escrow/action/role context');
@@ -350,7 +419,8 @@ export default function EscrowDetail() {
       const safe_R_x = extractTrueHex(R_x);
       const safe_R_y = extractTrueHex(R_y);
 
-      await submitNonce(escrowId, activeRole, action, 31, safe_R_x, safe_R_y);
+      addLog({ message: `Submitting nonce with signerBitmap: ${signerBitmap}`, type: 'info' });
+      await submitNonce(escrowId, activeRole, action, signerBitmap, safe_R_x, safe_R_y);
     } catch (error) {
       const exactError = error.response?.data?.error || error.message;
       addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
@@ -364,6 +434,19 @@ export default function EscrowDetail() {
     }
     const action = 'refund';
     setSelectedAction(action);
+    
+    // Calculate expected signerBitmap from action roles
+    // refund: buyer + seller + mediator1-5 (all 7 roles)
+    const expectedRoles = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
+    const signerBitmap = calculateSignerBitmapFromRoles(expectedRoles);
+    
+    // Validate before proceeding
+    const validation = validateSignerBitmap(signerBitmap, expectedRoles);
+    if (!validation.valid) {
+      addLog({ message: `❌ Validation failed: ${validation.error}`, type: 'error' });
+      return;
+    }
+    
     try {
       const nonceKey = buildNonceKey(action);
       if (!nonceKey) throw new Error('Cannot start Round 1: unresolved escrow/action/role context');
@@ -373,7 +456,8 @@ export default function EscrowDetail() {
       const safe_R_x = extractTrueHex(R_x);
       const safe_R_y = extractTrueHex(R_y);
 
-      await submitNonce(escrowId, activeRole, action, 31, safe_R_x, safe_R_y);
+      addLog({ message: `📝 Submitting nonce with signerBitmap: ${signerBitmap}`, type: 'info' });
+      await submitNonce(escrowId, activeRole, action, signerBitmap, safe_R_x, safe_R_y);
     } catch (error) {
       const exactError = error.response?.data?.error || error.message;
       addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
@@ -388,6 +472,18 @@ export default function EscrowDetail() {
       // Step 1: Lấy Round 1 response từ Backend (đã lưu trong atom)
       if (!nonceRound1?.challenge) {
         throw new Error('❌ Missing Round 1 challenge from backend - please run Round 1 first');
+      }
+      
+      // Get signerBitmap from Round 1 response (from backend)
+      const signerBitmap = nonceRound1.signerBitmap;
+      if (signerBitmap === undefined) {
+        throw new Error('❌ Missing signerBitmap from Round 1 response');
+      }
+      
+      // Validate signerBitmap before submitting
+      const validation = validateSignerBitmap(signerBitmap, []);
+      if (!validation.valid) {
+        throw new Error(`❌ Invalid signerBitmap: ${validation.error}`);
       }
       
       // Step 2: Lấy private share từ session storage hoặc unlock từ bản mã hóa
@@ -413,9 +509,9 @@ export default function EscrowDetail() {
       clearPrivKey(address);
       
       addLog({ message: `✅ Round 2 Z-Share computed successfully with real challenge: ${challengeHex}`, type: 'info' });
+      addLog({ message: `📝 Submitting Z-Share with signerBitmap: ${signerBitmap}`, type: 'info' });
       
-      const dummySignerBitmap = 31;
-      await submitZShare(escrowId, activeRole, dummySignerBitmap, z);
+      await submitZShare(escrowId, activeRole, signerBitmap, z);
     } catch (error) {
       const errorMessage = String(error?.message || 'Unknown error');
       const helpMessage = errorMessage.includes('Round 1 nonce not found')
@@ -512,6 +608,85 @@ export default function EscrowDetail() {
               Go to Key Generator
             </a>
           </div>
+        )}
+
+        {/* APPROVAL STATUS PANEL - Shows when action is selected */}
+        {selectedAction && (
+          <section className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
+            <div className="flex justify-between items-center border-b border-slate-700 pb-3 mb-4">
+              <h3 className="text-lg font-bold text-slate-200">
+                Approval Status: <span className="text-blue-400 uppercase">{selectedAction}</span>
+              </h3>
+              {isLoadingApprovals && (
+                <span className="text-sm text-slate-400">Loading...</span>
+              )}
+            </div>
+            
+            {approvalStatus ? (
+              <div className="space-y-3">
+                {/* Validation Status */}
+                <div className={`p-3 rounded-lg border ${approvalStatus.isValid ? 'bg-green-900/30 border-green-600' : 'bg-red-900/30 border-red-600'}`}>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-lg ${approvalStatus.isValid ? 'text-green-400' : 'text-red-400'}`}>
+                      {approvalStatus.isValid ? '✅' : '❌'}
+                    </span>
+                    <span className={approvalStatus.isValid ? 'text-green-300' : 'text-red-300'}>
+                      {approvalStatus.isValid 
+                        ? 'Valid: Ready to execute' 
+                        : `Invalid: ${approvalStatus.validationError || 'Unknown error'}`}
+                    </span>
+                  </div>
+                </div>
+                
+                {/* Signer Bitmap Info */}
+                <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                  <p className="text-slate-400 text-sm">Signer Bitmap</p>
+                  <p className="text-white font-mono text-lg">{approvalStatus.expectedSignerBitmap} 
+                    <span className="text-slate-500 text-sm ml-2">(Binary: {approvalStatus.expectedSignerBitmap.toString(2).padStart(7, '0')})</span>
+                  </p>
+                </div>
+                
+                {/* Approved Roles */}
+                <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                  <p className="text-slate-400 text-sm mb-2">Approved Signers ({approvalStatus.approvedRoles.length}/7)</p>
+                  <div className="flex flex-wrap gap-2">
+                    {['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'].map((role) => {
+                      const isApproved = approvalStatus.approvedRoles.includes(role);
+                      const isCore = role === 'buyer' || role === 'seller';
+                      return (
+                        <span 
+                          key={role}
+                          className={`px-3 py-1 rounded-full text-sm font-medium border ${
+                            isApproved 
+                              ? isCore 
+                                ? 'bg-purple-600/30 border-purple-500 text-purple-300' 
+                                : 'bg-blue-600/30 border-blue-500 text-blue-300'
+                              : 'bg-slate-700/50 border-slate-600 text-slate-500'
+                          }`}
+                        >
+                          {role} {isApproved ? '✓' : '○'}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+                
+                {/* Core Role Warning */}
+                {!approvalStatus.approvedRoles.includes('buyer') && !approvalStatus.approvedRoles.includes('seller') && (
+                  <div className="bg-yellow-900/30 border border-yellow-600 p-3 rounded">
+                    <p className="text-yellow-300 text-sm">
+                      ⚠️ <strong>Warning:</strong> Neither buyer nor seller has approved yet. 
+                      At least one core role must approve for valid execution.
+                    </p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-slate-400 text-center py-4">
+                {isLoadingApprovals ? 'Loading approval status...' : 'No approval data available'}
+              </div>
+            )}
+          </section>
         )}
 
         {/* KHỐI 1: THÔNG TIN KÝ QUỸ */}

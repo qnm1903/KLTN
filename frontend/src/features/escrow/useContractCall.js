@@ -98,13 +98,40 @@ export const useContractCall = () => {
       throw new Error('Cannot read on-chain vault status right now. Please check wallet/RPC connection.');
     }
 
-    const rawStatus = await publicClient.readContract({
-      address: vaultContractAddress,
-      abi: vaultAbi,
-      functionName: 'status'
-    });
+    const maxRetries = 5;
+    const retryDelay = 2000; // 2 seconds
 
-    return Number(rawStatus);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const rawStatus = await publicClient.readContract({
+          address: vaultContractAddress,
+          abi: vaultAbi,
+          functionName: 'status'
+        });
+
+        // Check if status is valid (not 0x or undefined)
+        if (rawStatus === undefined || rawStatus === '0x' || rawStatus === null) {
+          throw new Error('Status returned no data');
+        }
+
+        return Number(rawStatus);
+      } catch (error) {
+        const errorMessage = error?.shortMessage || error?.message || 'Unknown error';
+        
+        // If this is the last retry, throw the error
+        if (attempt === maxRetries) {
+          throw new Error(`Failed after ${maxRetries} retries: ${errorMessage}`);
+        }
+
+        // Log retry attempt
+        console.warn(`[getVaultStatus] Retry ${attempt}/${maxRetries}: ${errorMessage}`);
+        
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+      }
+    }
+
+    throw new Error('Max retries exceeded for getVaultStatus');
   }, [publicClient]);
 
   const simulateTssAction = useCallback(async (actionType, targetAddress, signatureData) => {

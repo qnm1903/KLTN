@@ -37,7 +37,7 @@ export default function GenerateKey() {
         pubKey,
         proofMessage: `Generated locally for ${address} at ${new Date().toISOString()}`
       });
-      alert('TSS keypair generated. Private share encrypted and ready for Round 2.');
+      alert('TSS keypair generated.');
     } catch (error) {
       console.error('Generate pubkey error:', error);
       alert(error?.message || 'Failed to generate TSS keypair.');

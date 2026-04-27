@@ -68,6 +68,38 @@ function getTxHash(log) {
   return log.transactionHash ?? log.txHash;
 }
 
+async function detectFactoryDeploymentBlock(provider, factoryAddress, logger) {
+  try {
+    // Binary search to find deployment block
+    let low = 0;
+    let high = await provider.getBlockNumber();
+    let deploymentBlock = 0;
+
+    logger.info?.(`[listener] Detecting Factory deployment block for ${factoryAddress}`);
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const code = await provider.getCode(factoryAddress, mid);
+
+      if (code === '0x' || code === '0x0') {
+        // Contract not deployed yet at this block
+        low = mid + 1;
+      } else {
+        // Contract exists at this block
+        deploymentBlock = mid;
+        high = mid - 1;
+      }
+    }
+
+    logger.info?.(`[listener] Factory deployment block detected: ${deploymentBlock}`);
+    return deploymentBlock;
+  } catch (error) {
+    logger.error?.('[listener] Failed to detect Factory deployment block:', error.message);
+    // Fallback to 0 if detection fails
+    return 0;
+  }
+}
+
 async function ensureSyncState(prisma, startBlock) {
   return prisma.eventSyncState.upsert({
     where: { key: SYNC_STATE_KEY },
@@ -231,7 +263,7 @@ export function startEventListenerWorker({ prisma, logger = console, config = {}
   const blockBatchSize = Number(config.blockBatchSize ?? process.env.LISTENER_BLOCK_BATCH_SIZE ?? 1000);
   const providerMaxBlockRange = Number(config.providerMaxBlockRange ?? process.env.LISTENER_PROVIDER_MAX_BLOCK_RANGE ?? 10);
   const syncCheckpointInterval = Number(config.syncCheckpointInterval ?? process.env.LISTENER_SYNC_CHECKPOINT_INTERVAL ?? 5);
-  const startBlock = Number(config.startBlock ?? process.env.LISTENER_START_BLOCK ?? 0);
+  const userProvidedStartBlock = Number(config.startBlock ?? process.env.LISTENER_START_BLOCK ?? null);
 
   if (!rpcUrl || !factoryAddressRaw) {
     throw new Error('RPC_URL and FACTORY_ADDRESS are required to run event listener worker.');
@@ -353,6 +385,14 @@ export function startEventListenerWorker({ prisma, logger = console, config = {}
 
   async function loop() {
     await bootstrapKnownVaults();
+    
+    // Auto-detect deployment block if not provided
+    let startBlock = userProvidedStartBlock;
+    if (startBlock === null) {
+      startBlock = await detectFactoryDeploymentBlock(provider, factoryAddress, logger);
+    }
+    
+    logger.info?.(`[listener] Starting sync from block ${startBlock}`);
     let syncState = await ensureSyncState(prisma, startBlock);
 
     while (running) {

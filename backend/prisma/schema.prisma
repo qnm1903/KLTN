@@ -24,6 +24,7 @@ model User {
   evidences       Evidence[]
   statusHistoryActions EscrowStatusHistory[]
   refreshTokens   RefreshToken[]
+  approvals       Approval[]
 }
 
 model Escrow {
@@ -63,6 +64,9 @@ model Escrow {
   evidences          Evidence[]
   statusHistory      EscrowStatusHistory[]
   pubKeySubmissions  PubKeySubmission[]
+  approvals          Approval[]
+  nonceSubmissions   NonceSubmission[]
+  signingSessions    SigningSession[]
   createdAt          DateTime   @default(now())
   updatedAt          DateTime   @updatedAt
 
@@ -176,6 +180,8 @@ model SigningSession {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  escrow Escrow @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+
   @@index([status, expiresAt])
 }
 
@@ -191,4 +197,35 @@ model PubKeySubmission {
 
   @@unique([escrowId, role])
   @@index([escrowId])
+}
+
+model Approval {
+  id          String   @id @default(uuid())
+  escrowId    String
+  action      String   // release | refund
+  userId      String
+  approvedAt  DateTime @default(now())
+
+  escrow Escrow @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([escrowId, action, userId])
+  @@index([escrowId, action])
+}
+
+model NonceSubmission {
+  id          String   @id @default(uuid())
+  escrowId    String
+  action      String   // release | refund
+  role        String   // buyer | seller | mediator1-5
+  nonceR_x    String   // R_x coordinate
+  nonceR_y    String   // R_y coordinate
+  submittedAt DateTime @default(now())
+  expiresAt   DateTime // TTL for nonce (timeout phase)
+
+  escrow Escrow @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+
+  @@unique([escrowId, action, role])
+  @@index([escrowId, action])
+  @@index([expiresAt])
 }

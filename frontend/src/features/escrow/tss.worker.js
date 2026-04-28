@@ -41,6 +41,32 @@ self.onmessage = async (event) => {
         break;
       }
 
+      case 'COMPUTE_NONCE_FROM_EXISTING': {
+        self.postMessage({ taskId, status: 'computing', log: 'Reusing existing nonce from IndexedDB...' });
+
+        if (!payload?.nonceKey || !payload?.nonceHex) {
+          throw new Error('❌ COMPUTE_NONCE_FROM_EXISTING: nonceKey and nonceHex are required');
+        }
+
+        // Restore existing nonce scalar
+        const existing_k = BigInt(payload.nonceHex.startsWith('0x') ? payload.nonceHex : '0x' + payload.nonceHex);
+        nonceByKey.set(payload.nonceKey, existing_k);
+
+        // Calculate R = k * G from existing nonce
+        const keyPair = ec.keyFromPrivate(existing_k.toString(16), 'hex');
+        const pubPoint = keyPair.getPublic();
+        const R_x = '0x' + pubPoint.getX().toString(16).padStart(64, '0');
+        const R_y = '0x' + pubPoint.getY().toString(16).padStart(64, '0');
+
+        self.postMessage({
+          taskId,
+          status: 'success',
+          result: { R_x, R_y, nonceHex: payload.nonceHex },
+          log: 'Đã tính toán lại Nonce từ giá trị IndexedDB (Round 1) - Reusing existing nonce.'
+        });
+        break;
+      }
+
       case 'COMPUTE_Z_SHARE': {
         self.postMessage({ taskId, status: 'computing', log: 'Đang giải phương trình Schnorr: z_i = k_i + e * x_i...' });
         

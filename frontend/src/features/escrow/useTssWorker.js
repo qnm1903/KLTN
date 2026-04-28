@@ -101,6 +101,16 @@ export const useTssWorker = () => {
   return {
     // Chuẩn hóa hàm export đúng Signing Happy Path 
     computeNonce: async (nonceKey) => {
+      // Check if nonce already exists in IndexedDB - reuse it instead of generating new
+      const existingNonceHex = await loadNonce(nonceKey);
+      if (existingNonceHex) {
+        console.log(`[TSS Worker Main] Reusing existing nonce from IndexedDB: ${nonceKey}`);
+        // Calculate R_x, R_y from existing nonce
+        const result = await executeWorkerTask('COMPUTE_NONCE_FROM_EXISTING', { nonceKey, nonceHex: existingNonceHex });
+        return result;
+      }
+      
+      // No existing nonce - generate new one
       const result = await executeWorkerTask('COMPUTE_NONCE', { nonceKey });
       await persistNonce(nonceKey, result?.nonceHex);
       return result;

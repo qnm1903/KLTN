@@ -6,9 +6,7 @@ import {
   addSystemLogAtom,
   escrowStatusAtom,
   signingPhaseAtom,
-  selectedActionAtom,
   nonceRound1Atom,
-  zShareRound2Atom,
   aggregatedSignatureAtom,
   signingProgressAtom
 } from './escrowStore';
@@ -163,7 +161,7 @@ export const useEscrowSync = (escrowId) => {
       socket.off('schnorr_complete', handleSchnorrComplete);
       socket.emit('leave_escrow', escrowId);
     };
-  }, [escrowId, setProgress, setSignedNodes, setStatus, addLog, applyCollectionSnapshot]);
+  }, [escrowId, setProgress, setSignedNodes, setStatus, addLog, applyCollectionSnapshot, setSigningPhase, setNonceRound1, setSigningProgress, setAggregatedSignature]);
 
   const submitPubKey = useCallback(async ({ role, pubKey }) => {
     if (!escrowId) throw new Error('Escrow id is required');
@@ -184,8 +182,37 @@ export const useEscrowSync = (escrowId) => {
 
   const submitNonce = useCallback(async (escrowId, role, action, signerBitmap, R_x, R_y) => {
     addLog({ message: `Submitting Nonce for action: ${action}...`, type: 'warning' });
-    const { data } = await api.post(`/escrow/nonce`, { escrowId, role, action, signerBitmap, R_x, R_y });
-    return data;
+    try {
+      const { data } = await api.post(`/escrow/nonce`, { escrowId, role, action, signerBitmap, R_x, R_y });
+      
+      // Handle idempotent submission (nonce already exists with same values)
+      if (data.isIdempotent) {
+        addLog({ message: `Nonce already submitted (idempotent), skipping...`, type: 'info' });
+      }
+      
+      // Handle state responses when nonce differs
+      if (data.state === 'round2_ready') {
+        addLog({ message: `Round 1 already complete. Skipping to Round 2.`, type: 'success' });
+      } else if (data.state === 'round1_in_progress') {
+        addLog({ message: `Round 1 in progress: ${data.received}/${data.needed} submitted. Your nonce differs from submitted value.`, type: 'warning' });
+        // Backend returned existing nonce - clear local nonce to prevent future mismatches
+        if (data.existingNonce) {
+          addLog({ message: `Backend has different nonce. Please clear local storage and restart signing.`, type: 'warning' });
+        }
+      }
+      
+      return data;
+    } catch (error) {
+      // Handle 409 conflict - different action or bitmap in progress
+      if (error.response?.status === 409) {
+        const errorMsg = error.response?.data?.error || 'Nonce conflict';
+        addLog({ message: `⚠️ ${errorMsg}`, type: 'warning' });
+        // Re-throw to let caller handle
+        throw error;
+      }
+      // Re-throw other errors
+      throw error;
+    }
   }, [addLog]);
 
   const submitZShare = useCallback(async (escrowId, role, signerBitmap, z) => {

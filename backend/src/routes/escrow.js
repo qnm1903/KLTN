@@ -117,6 +117,32 @@ async function checkSession(escrowId, res) {
         session.signingBitmap = calculateSignerBitmap(roles);
         
         console.log(`[TSS Recovery] Khôi phục thành công: action=${firstNonce.action}, roles=${roles.join(',')}, bitmap=${session.signingBitmap}`);
+        
+        // Auto-compute challenge if enough nonces restored (5+ for release/refund)
+        const actionRoles = getActionSignerRoles(firstNonce.action);
+        if (roles.length >= actionRoles.length && rolesMatchAction(roles, firstNonce.action)) {
+          try {
+            const pkAgg = getPkAggForRoles(session, roles);
+            const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNonces(Object.values(session.nonces));
+            
+            const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
+            const vaultAddr = dbEscrow?.contractAddress || session.contractAddress;
+            
+            const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+            const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
+            const trueChainEscrowId = await vaultContract.escrowId();
+            
+            const msgHash = buildMsgHash(trueChainEscrowId, firstNonce.action, session.signingBitmap, vaultAddr, session.chainId);
+            const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
+            
+            session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
+            session.signingRoles = roles;
+            
+            console.log(`[TSS Recovery] Auto-computed challenge for restored nonces: R_addr=${R_addr}, challenge=${challenge}`);
+          } catch (challengeError) {
+            console.warn(`[TSS Recovery] Failed to auto-compute challenge: ${challengeError.message}`);
+          }
+        }
       }
     } catch (nonceError) {
       console.warn(`[TSS Recovery] Không thể khôi phục nonce từ Database: ${nonceError.message}`);
@@ -419,6 +445,106 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     let normalizedRx, normalizedRy;
     try { normalizedRx = normalizeCoordinate(R_x); normalizedRy = normalizeCoordinate(R_y); } 
     catch (e) { return res.status(400).json({ error: 'Invalid coordinate format' }); }
+
+    // Check if nonce already exists for this role
+    if (session.nonces[role]) {
+      const existingRx = session.nonces[role].R_x;
+      const existingRy = session.nonces[role].R_y;
+      
+      // Same nonce value - idempotent submission
+      if (existingRx === normalizedRx && existingRy === normalizedRy) {
+        const nonceCount = Object.keys(session.nonces).length;
+        console.log(`[Nonce] Idempotent submission from role '${role}' for escrow ${escrowId}`);
+        
+        // If Round 1 is complete, return the round2Context
+        if (session.round2Context) {
+          return res.json({ 
+            state: 'round2_ready',
+            received: nonceCount,
+            needed: actionRoles.length,
+            isIdempotent: true,
+            round2Context: session.round2Context,
+            message: 'Nonce already submitted with same values. Round 1 already complete.'
+          });
+        }
+        
+        // If enough nonces collected but round2Context missing, auto-compute challenge
+        if (nonceCount >= actionRoles.length) {
+          const roles = Object.keys(session.nonces);
+          if (rolesMatchAction(roles, action)) {
+            try {
+              const pkAgg = getPkAggForRoles(session, roles);
+              const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNonces(Object.values(session.nonces));
+              
+              const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
+              const vaultAddr = dbEscrow?.contractAddress || session.contractAddress;
+              
+              const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+              const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
+              const trueChainEscrowId = await vaultContract.escrowId();
+              
+              const msgHash = buildMsgHash(trueChainEscrowId, action, session.signingBitmap, vaultAddr, session.chainId);
+              const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
+              
+              session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
+              session.signingRoles = roles;
+              await saveSession(escrowId, session);
+              
+              console.log(`[Nonce] Auto-computed challenge on idempotent submission: R_addr=${R_addr}, challenge=${challenge}`);
+              
+              return res.json({ 
+                state: 'round2_ready',
+                received: nonceCount,
+                needed: actionRoles.length,
+                isIdempotent: true,
+                round2Context: session.round2Context,
+                message: 'Nonce already submitted with same values. Round 1 now complete.'
+              });
+            } catch (challengeError) {
+              console.warn(`[Nonce] Failed to auto-compute challenge: ${challengeError.message}`);
+            }
+          }
+        }
+        
+        return res.json({ 
+          received: nonceCount, 
+          needed: actionRoles.length, 
+          isIdempotent: true,
+          message: 'Nonce already submitted with same values'
+        });
+      }
+      
+      // Different nonce value - return current state and existing nonce to allow FE to sync
+      console.warn(`[Nonce] Different nonce value from role '${role}' for escrow ${escrowId}. Returning current state and existing nonce.`);
+      const nonceCount = Object.keys(session.nonces).length;
+      const submittedRoles = Object.keys(session.nonces);
+      
+      // Return existing nonce for this role to allow FE to sync
+      const existingNonceForRole = session.nonces[role];
+      
+      // If Round 1 is complete, return the round2Context
+      if (session.round2Context) {
+        return res.json({ 
+          state: 'round2_ready',
+          received: nonceCount,
+          needed: actionRoles.length,
+          submittedRoles,
+          round2Context: session.round2Context,
+          existingNonce: existingNonceForRole ? { R_x: existingNonceForRole.R_x, R_y: existingNonceForRole.R_y } : null,
+          message: 'Your nonce differs from submitted value. Round 1 already complete. Use existing nonce from backend.'
+        });
+      }
+      
+      // Round 1 still in progress
+      return res.json({ 
+        state: 'round1_in_progress',
+        received: nonceCount,
+        needed: actionRoles.length,
+        submittedRoles,
+        existingNonce: existingNonceForRole ? { R_x: existingNonceForRole.R_x, R_y: existingNonceForRole.R_y } : null,
+        message: 'Your nonce differs from submitted value. Round 1 still in progress. Use existing nonce from backend.'
+      });
+    }
 
     session.nonces[role] = { R_x: normalizedRx, R_y: normalizedRy };
 

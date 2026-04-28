@@ -96,12 +96,14 @@ export default function EscrowDetail() {
   const [approvalStatus, setApprovalStatus] = useState(null);
   const [isLoadingApprovals, setIsLoadingApprovals] = useState(false);
   const addLog = useSetAtom(addSystemLogAtom);
+  const setNonceRound1 = useSetAtom(nonceRound1Atom);
+  const setSigningPhase = useSetAtom(signingPhaseAtom);
 
   // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm deployEscrowVault)
   const { isRecovering } = useSessionRecovery(escrowId, address);
   const { submitPubKey, submitNonce, submitZShare } = useEscrowSync(escrowId);
   const { executeTssAction, fundEscrow, getVaultStatus, isPending, isConfirming, isConfirmed } = useContractCall(); 
-  const { computeNonce, computeZShare, hasNonce } = useTssWorker(); // Khởi tạo Web Worker Hook
+  const { computeNonce, computeZShare, hasNonce, clearNonce } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
   const status = useAtomValue(escrowStatusAtom);
@@ -420,10 +422,34 @@ export default function EscrowDetail() {
       const safe_R_y = extractTrueHex(R_y);
 
       addLog({ message: `Submitting nonce with signerBitmap: ${signerBitmap}`, type: 'info' });
-      await submitNonce(escrowId, activeRole, action, signerBitmap, safe_R_x, safe_R_y);
+      const nonceResponse = await submitNonce(escrowId, activeRole, action, signerBitmap, safe_R_x, safe_R_y);
+      
+      // If Round 1 is already complete, set nonceRound1 atom and transition to Round 2
+      if (nonceResponse.state === 'round2_ready' && nonceResponse.round2Context) {
+        setNonceRound1(nonceResponse.round2Context);
+        setSigningPhase('z-share');
+        addLog({ message: `Round 1 already complete. You can proceed to Round 2.`, type: 'success' });
+      }
+      
+      // If backend reports nonce mismatch, clear local nonce and warn user
+      if (nonceResponse.state === 'round1_in_progress' && nonceResponse.existingNonce) {
+        const nonceKey = buildNonceKey(action);
+        if (nonceKey) {
+          await clearNonce(nonceKey);
+          addLog({ message: `⚠️ Local nonce cleared. All participants must restart signing with fresh nonces.`, type: 'error' });
+        }
+      }
     } catch (error) {
+      const status = error.response?.status;
       const exactError = error.response?.data?.error || error.message;
-      addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
+      
+      // Handle 409 conflict - different action or bitmap in progress
+      if (status === 409) {
+        addLog({ message: `⚠️ ${exactError}`, type: 'warning' });
+        // Don't block UI - user can continue with Round 2 if they have nonce stored locally
+      } else {
+        addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
+      }
     }
   };
 
@@ -457,10 +483,34 @@ export default function EscrowDetail() {
       const safe_R_y = extractTrueHex(R_y);
 
       addLog({ message: `📝 Submitting nonce with signerBitmap: ${signerBitmap}`, type: 'info' });
-      await submitNonce(escrowId, activeRole, action, signerBitmap, safe_R_x, safe_R_y);
+      const nonceResponse = await submitNonce(escrowId, activeRole, action, signerBitmap, safe_R_x, safe_R_y);
+      
+      // If Round 1 is already complete, set nonceRound1 atom and transition to Round 2
+      if (nonceResponse.state === 'round2_ready' && nonceResponse.round2Context) {
+        setNonceRound1(nonceResponse.round2Context);
+        setSigningPhase('z-share');
+        addLog({ message: `Round 1 already complete. You can proceed to Round 2.`, type: 'success' });
+      }
+      
+      // If backend reports nonce mismatch, clear local nonce and warn user
+      if (nonceResponse.state === 'round1_in_progress' && nonceResponse.existingNonce) {
+        const nonceKey = buildNonceKey(action);
+        if (nonceKey) {
+          await clearNonce(nonceKey);
+          addLog({ message: `⚠️ Local nonce cleared. All participants must restart signing with fresh nonces.`, type: 'error' });
+        }
+      }
     } catch (error) {
+      const status = error.response?.status;
       const exactError = error.response?.data?.error || error.message;
-      addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
+      
+      // Handle 409 conflict - different action or bitmap in progress
+      if (status === 409) {
+        addLog({ message: `⚠️ ${exactError}`, type: 'warning' });
+        // Don't block UI - user can continue with Round 2 if they have nonce stored locally
+      } else {
+        addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
+      }
     }
   };
 

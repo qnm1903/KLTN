@@ -13,6 +13,7 @@ import {
 import api from '../../lib/api';
 import { getStoredAccessToken } from '../../store/authStore';
 import { socket } from '../../lib/socket';
+import { clearNonceRecord } from '../../lib/storage';
 
 const PARTICIPANT_ROLES = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
 
@@ -197,7 +198,11 @@ export const useEscrowSync = (escrowId) => {
         addLog({ message: `Round 1 in progress: ${data.received}/${data.needed} submitted. Your nonce differs from submitted value.`, type: 'warning' });
         // Backend returned existing nonce - clear local nonce to prevent future mismatches
         if (data.existingNonce) {
-          addLog({ message: `Backend has different nonce. Please clear local storage and restart signing.`, type: 'warning' });
+          addLog({ message: `Clearing local nonce and requiring restart...`, type: 'error' });
+          // Build nonceKey from escrowId, action, role
+          const nonceKey = `${escrowId}:${action}:${data.role || role}`;
+          await clearNonceRecord(nonceKey);
+          throw new Error(`Nonce mismatch: Your local nonce differs from backend. Please restart signing with a fresh nonce.`);
         }
       }
       
@@ -221,5 +226,42 @@ export const useEscrowSync = (escrowId) => {
     return data;
   }, [addLog]);
 
-  return { submitPubKey, submitNonce, submitZShare };
+  const resetSigning = useCallback(async (action, reason) => {
+    addLog({ message: `Resetting signing session due to: ${reason}`, type: 'warning' });
+    try {
+      const { data } = await api.post(`/escrow/${escrowId}/reset-signing`, { action, reason });
+      setSigningPhase('dkg_ready');
+      setNonceRound1(null);
+      setAggregatedSignature(null);
+      addLog({ message: `Signing session reset. All participants must restart with fresh nonces.`, type: 'error' });
+      return data;
+    } catch (error) {
+      if (error.response?.status === 404) {
+        addLog({ message: `Session expired or not found. Please refresh the page and restart signing from the beginning.`, type: 'error' });
+        setSigningPhase('dkg_ready');
+        setNonceRound1(null);
+        setAggregatedSignature(null);
+      } else {
+        addLog({ message: `Failed to reset signing: ${error.message}`, type: 'error' });
+      }
+      throw error;
+    }
+  }, [escrowId, addLog, setSigningPhase, setNonceRound1, setAggregatedSignature]);
+
+  useEffect(() => {
+    if (!escrowId) return;
+
+    const handleSigningReset = (data) => {
+      if (data?.escrowId !== escrowId) return;
+      setSigningPhase('dkg_ready');
+      setNonceRound1(null);
+      setAggregatedSignature(null);
+      addLog({ message: `⚠️ ${data.message || 'Signing session reset by another participant.'}`, type: 'error' });
+    };
+
+    socket.on('signing_reset', handleSigningReset);
+    return () => socket.off('signing_reset', handleSigningReset);
+  }, [escrowId, setSigningPhase, setNonceRound1, setAggregatedSignature, addLog]);
+
+  return { submitPubKey, submitNonce, submitZShare, resetSigning };
 };

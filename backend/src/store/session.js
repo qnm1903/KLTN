@@ -1,6 +1,7 @@
 // In-memory map: escrowId -> { pubKeys, pkAgg, nonces, zShares, signingRoles, signingAction, round2Context, completedActions, createdAt, status, parties }
 import {
 	SESSION_TTL_MS,
+	SIGNING_TTL_MS,
 	getPubKeyCollectionSummary,
 	syncPubKeyCollectionState,
 	isPubKeySetComplete
@@ -75,6 +76,11 @@ function computeExpiresAt(createdAt) {
 
 function isSessionExpired(session, nowMs = Date.now()) {
 	return nowMs - Number(session.createdAt || 0) > SESSION_TTL_MS;
+}
+
+export function isSigningExpired(session, nowMs = Date.now()) {
+	if (!session.signingStartedAt) return false;
+	return nowMs - Number(session.signingStartedAt) > SIGNING_TTL_MS;
 }
 
 export async function saveSession(escrowId, session) {

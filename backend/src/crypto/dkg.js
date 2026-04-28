@@ -1,6 +1,7 @@
 import { aggregatePublicKeys } from './schnorr.js';
 
-export const SESSION_TTL_MS = 30 * 60 * 1000; // 30 phút
+export const SESSION_TTL_MS = 30 * 60 * 1000; // 30 phút (DKG phase)
+export const SIGNING_TTL_MS = 6 * 60 * 60 * 1000; // 6 giờ (signing phase)
 
 export const PARTICIPANT_ROLES = [
   'buyer',

@@ -1,5 +1,5 @@
 import express from 'express';
-import { deleteSession, getSession, getPubKeyCollectionStatus, hasSession, saveSession } from '../store/session.js';
+import { deleteSession, getSession, getPubKeyCollectionStatus, hasSession, saveSession, isSigningExpired } from '../store/session.js';
 import {
   aggregateWhenReady,
   aggregatePubKeysForRoles,
@@ -431,9 +431,14 @@ router.post('/nonce', authMiddleware, async (req, res) => {
 
     const bitmap = Number(signerBitmap);
     if (!session.signingAction) {
-      session.signingAction = action; session.nonces = {}; session.zShares = {}; session.signingBitmap = bitmap;
-    } else if (session.signingAction !== action || session.signingBitmap !== bitmap) {
-      return res.status(409).json({ error: 'Different action or bitmap in progress' });
+      session.signingAction = action; session.nonces = {}; session.zShares = {}; session.signingBitmap = 0; session.signingStartedAt = Date.now(); // Start with 0, will update as nonces are submitted
+    } else if (session.signingAction !== action) {
+      return res.status(409).json({ error: 'Different action in progress' });
+    }
+
+    // Check signing timeout (6 hours)
+    if (isSigningExpired(session)) {
+      return res.status(410).json({ error: 'Signing session expired. Please restart signing.' });
     }
 
     const normalizeCoordinate = (coord) => {
@@ -455,15 +460,20 @@ router.post('/nonce', authMiddleware, async (req, res) => {
       if (existingRx === normalizedRx && existingRy === normalizedRy) {
         const nonceCount = Object.keys(session.nonces).length;
         console.log(`[Nonce] Idempotent submission from role '${role}' for escrow ${escrowId}`);
-        
+
+        // Recalculate signerBitmap based on actual submitted roles
+        const submittedRoles = Object.keys(session.nonces);
+        session.signingBitmap = calculateSignerBitmap(submittedRoles);
+
         // If Round 1 is complete, return the round2Context
         if (session.round2Context) {
-          return res.json({ 
+          return res.json({
             state: 'round2_ready',
             received: nonceCount,
             needed: actionRoles.length,
             isIdempotent: true,
             round2Context: session.round2Context,
+            signerBitmap: session.signingBitmap,
             message: 'Nonce already submitted with same values. Round 1 already complete.'
           });
         }
@@ -498,6 +508,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
                 needed: actionRoles.length,
                 isIdempotent: true,
                 round2Context: session.round2Context,
+                signerBitmap: session.signingBitmap,
                 message: 'Nonce already submitted with same values. Round 1 now complete.'
               });
             } catch (challengeError) {
@@ -510,6 +521,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
           received: nonceCount, 
           needed: actionRoles.length, 
           isIdempotent: true,
+          signerBitmap: session.signingBitmap,
           message: 'Nonce already submitted with same values'
         });
       }
@@ -531,6 +543,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
           submittedRoles,
           round2Context: session.round2Context,
           existingNonce: existingNonceForRole ? { R_x: existingNonceForRole.R_x, R_y: existingNonceForRole.R_y } : null,
+          signerBitmap: session.signingBitmap,
           message: 'Your nonce differs from submitted value. Round 1 already complete. Use existing nonce from backend.'
         });
       }
@@ -542,11 +555,16 @@ router.post('/nonce', authMiddleware, async (req, res) => {
         needed: actionRoles.length,
         submittedRoles,
         existingNonce: existingNonceForRole ? { R_x: existingNonceForRole.R_x, R_y: existingNonceForRole.R_y } : null,
+        signerBitmap: session.signingBitmap,
         message: 'Your nonce differs from submitted value. Round 1 still in progress. Use existing nonce from backend.'
       });
     }
 
     session.nonces[role] = { R_x: normalizedRx, R_y: normalizedRy };
+
+    // Update signerBitmap based on actual submitted roles
+    const submittedRoles = Object.keys(session.nonces);
+    session.signingBitmap = calculateSignerBitmap(submittedRoles);
 
     // AUTO-APPROVE: When user submits nonce, they are implicitly approving the action
     // Create approval record in database (if not exists)
@@ -595,7 +613,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
 
     if (nonceCount < actionRoles.length) {
       if (io) io.to(escrowId).emit('nonce_received', { escrowId, count: nonceCount, needed: actionRoles.length });
-      return res.json({ received: nonceCount, needed: actionRoles.length });
+      return res.json({ received: nonceCount, needed: actionRoles.length, signerBitmap: session.signingBitmap });
     }
 
     const roles = Object.keys(session.nonces);
@@ -614,25 +632,25 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
     const trueChainEscrowId = await vaultContract.escrowId();
 
-    const msgHash = buildMsgHash(trueChainEscrowId, action, bitmap, vaultAddr, session.chainId);
+    const msgHash = buildMsgHash(trueChainEscrowId, action, session.signingBitmap, vaultAddr, session.chainId);
     const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
 
     console.log(`[TSS Round 2] Escrow: ${escrowId}`);
-    console.log(`[TSS Round 2] Action: ${action}, Bitmap: ${bitmap}`);
+    console.log(`[TSS Round 2] Action: ${action}, Bitmap: ${session.signingBitmap}`);
     console.log(`[TSS Round 2] Vault: ${vaultAddr}, ChainId: ${session.chainId}`);
     console.log(`[TSS Round 2] escrowId (raw): ${trueChainEscrowId}`);
     console.log(`[TSS Round 2] msgHash: ${msgHash}`);
     console.log(`[TSS Round 2] pkAgg: x=${pkAgg.x}, y=${pkAgg.y}`);
     console.log(`[TSS Round 2] R_addr: ${R_addr}, challenge (e): ${challenge}`);
 
-    session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: bitmap };
+    session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
     await saveSession(escrowId, session);
 
     if (io) {
-      io.to(escrowId).emit('nonce_collected', { escrowId, R_addr, challenge, msgHash, pkAgg, signerBitmap: bitmap });
+      io.to(escrowId).emit('nonce_collected', { escrowId, R_addr, challenge, msgHash, pkAgg, signerBitmap: session.signingBitmap });
     }
 
-    return res.json({ ok: true, R_addr, challenge, msgHash, pkAgg, signerBitmap: bitmap });
+    return res.json({ ok: true, R_addr, challenge, msgHash, pkAgg, signerBitmap: session.signingBitmap });
   } catch (error) {
     if (error.message.includes('bad point')) return res.status(400).json({ error: 'Invalid point coordinates' });
     res.status(500).json({ error: error.message });
@@ -647,6 +665,11 @@ router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => 
 
     const session = await checkSession(escrowId, res);
     if (!session || !session.round2Context) return res.status(400).json({ error: 'Round 1 not completed' });
+
+    // Check signing timeout (6 hours)
+    if (isSigningExpired(session)) {
+      return res.status(410).json({ error: 'Signing session expired. Please restart signing.' });
+    }
 
     session.zShares[role] = z;
     await saveSession(escrowId, session);
@@ -904,6 +927,127 @@ router.post('/deploy-vault', authMiddleware, async (req, res) => {
   } catch (error) {
     console.error('[Deploy] LỖI CẤP ĐỘ HỆ THỐNG:', error);
     res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+// ─── Reset Signing Session API ────────────────────────────────────────────────
+// Called by frontend when on-chain execution fails (InvalidSignature)
+router.post('/:id/reset-signing', authMiddleware, async (req, res) => {
+  try {
+    const { id: escrowId } = req.params;
+    const { action, reason } = req.body;
+
+    if (!escrowId) {
+      return res.status(400).json({ error: 'Missing escrowId' });
+    }
+
+    let session = await getSession(escrowId);
+    if (!session) {
+      console.log(`[ResetSigning] Session not found. Auto-creating session and restoring public keys from database for escrow ${escrowId}`);
+      const escrowDb = await prisma.escrow.findUnique({
+        where: { id: escrowId },
+        include: { buyer: true, seller: true, escrowMediators: { include: { mediator: true }, orderBy: { slot: 'asc' } } }
+      });
+
+      if (!escrowDb || !escrowDb.contractAddress) {
+        return res.status(404).json({ error: 'Escrow not found or vault not deployed' });
+      }
+
+      const pubKeysDb = await prisma.pubKeySubmission.findMany({ where: { escrowId } });
+      if (!pubKeysDb || pubKeysDb.length < 7) {
+        return res.status(400).json({ error: 'Not enough public keys in database to restore session' });
+      }
+
+      session = {
+        escrowId,
+        chainId: process.env.CHAIN_ID || "11155111",
+        contractAddress: escrowDb.contractAddress,
+        participants: {
+          buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
+          seller: normalizeAddress(escrowDb.seller?.walletAddress),
+          mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
+        },
+        parties: {
+          buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
+          seller: normalizeAddress(escrowDb.seller?.walletAddress),
+          mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
+        },
+        pubKeys: {},
+        status: 'ACTIVE',
+        completedActions: [],
+        nonces: {},
+        zShares: {},
+        createdAt: Date.now()
+      };
+      pubKeysDb.forEach(pk => { session.pubKeys[pk.role] = pk.pubKey; });
+      session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, PARTICIPANT_ROLES);
+      await saveSession(escrowId, session);
+      console.log(`[ResetSigning] Session auto-created and public keys restored for escrow ${escrowId}`);
+    }
+
+    console.log(`[ResetSigning] Resetting signing for escrow ${escrowId}. Reason: ${reason || 'unknown'}`);
+
+    // Clear session signing state
+    session.nonces = {};
+    session.zShares = {};
+    session.signingRoles = null;
+    session.signingAction = null;
+    session.signingBitmap = null;
+    session.round2Context = null;
+
+    // Remove signingAction from completedActions if it was added
+    if (action && session.completedActions.includes(action)) {
+      session.completedActions = session.completedActions.filter(a => a !== action);
+    }
+
+    await saveSession(escrowId, session);
+
+    // Delete NonceSubmission records from database
+    try {
+      await prisma.nonceSubmission.deleteMany({
+        where: {
+          escrowId,
+          action: action || session.signingAction || 'release'
+        }
+      });
+      console.log(`[ResetSigning] Deleted NonceSubmission records for ${escrowId}`);
+    } catch (dbError) {
+      console.warn(`[ResetSigning] Failed to delete NonceSubmission: ${dbError.message}`);
+    }
+
+    // Delete Approval records for the action
+    try {
+      await prisma.approval.deleteMany({
+        where: {
+          escrowId,
+          action: action || session.signingAction || 'release'
+        }
+      });
+      console.log(`[ResetSigning] Deleted Approval records for ${escrowId}, action: ${action || session.signingAction || 'release'}`);
+    } catch (dbError) {
+      console.warn(`[ResetSigning] Failed to delete Approvals: ${dbError.message}`);
+    }
+
+    // Emit event to frontend
+    const io = req.app.get('io');
+    if (io) {
+      io.to(escrowId).emit('signing_reset', {
+        escrowId,
+        action,
+        reason: reason || 'On-chain execution failed',
+        message: 'Signing session has been reset. All participants must restart with fresh nonces.'
+      });
+    }
+
+    res.json({
+      ok: true,
+      message: 'Signing session reset successfully',
+      escrowId,
+      action
+    });
+  } catch (error) {
+    console.error('[ResetSigning] Error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 

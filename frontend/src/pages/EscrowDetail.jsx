@@ -51,21 +51,6 @@ function normalizeDisplayAmount(amount) {
   return String(amount);
 }
 
-// Helper: Calculate signerBitmap from roles list
-// bit 0: buyer, bit 1: seller, bits 2-6: mediator 1-5
-function calculateSignerBitmapFromRoles(roles) {
-  let bitmap = 0;
-  for (const role of roles) {
-    if (role === 'buyer') bitmap |= 1; // bit 0
-    else if (role === 'seller') bitmap |= 2; // bit 1
-    else if (role.startsWith('mediator')) {
-      const slot = Number(role.replace('mediator', ''));
-      if (slot >= 1 && slot <= 5) bitmap |= (1 << (slot + 1)); // bits 2-6
-    }
-  }
-  return bitmap;
-}
-
 // Helper: Validate signerBitmap - buyer OR seller must be included
 function validateSignerBitmap(bitmap) {
   // Check minimum signers (5)
@@ -101,7 +86,7 @@ export default function EscrowDetail() {
 
   // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm deployEscrowVault)
   const { isRecovering } = useSessionRecovery(escrowId, address);
-  const { submitPubKey, submitNonce, submitZShare } = useEscrowSync(escrowId);
+  const { submitPubKey, submitNonce, submitZShare, resetSigning } = useEscrowSync(escrowId);
   const { executeTssAction, fundEscrow, getVaultStatus, isPending, isConfirming, isConfirmed } = useContractCall(); 
   const { computeNonce, computeZShare, hasNonce, clearNonce } = useTssWorker(); // Khởi tạo Web Worker Hook
 
@@ -399,31 +384,24 @@ export default function EscrowDetail() {
     }
     const action = 'release';
     setSelectedAction(action);
-    
-    // Calculate expected signerBitmap from action roles
-    // release: buyer + seller + mediator1-5 (all 7 roles)
-    const expectedRoles = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
-    const signerBitmap = calculateSignerBitmapFromRoles(expectedRoles);
-    
-    // Validate before proceeding
-    const validation = validateSignerBitmap(signerBitmap, expectedRoles);
-    if (!validation.valid) {
-      addLog({ message: `❌ Validation failed: ${validation.error}`, type: 'error' });
-      return;
-    }
-    
+
     try {
       const nonceKey = buildNonceKey(action);
       if (!nonceKey) throw new Error('Cannot start Round 1: unresolved escrow/action/role context');
 
       const { R_x, R_y } = await computeNonce(nonceKey);
-      
+
       const safe_R_x = extractTrueHex(R_x);
       const safe_R_y = extractTrueHex(R_y);
 
-      addLog({ message: `Submitting nonce with signerBitmap: ${signerBitmap}`, type: 'info' });
-      const nonceResponse = await submitNonce(escrowId, activeRole, action, signerBitmap, safe_R_x, safe_R_y);
-      
+      // Backend will calculate signerBitmap from actual submitted roles
+      addLog({ message: `Submitting nonce for action: ${action}...`, type: 'info' });
+      const nonceResponse = await submitNonce(escrowId, activeRole, action, 0, safe_R_x, safe_R_y);
+
+      // Use signerBitmap from backend response
+      const actualSignerBitmap = nonceResponse.signerBitmap;
+      addLog({ message: `Backend confirmed signerBitmap: ${actualSignerBitmap}`, type: 'info' });
+
       // If Round 1 is already complete, set nonceRound1 atom and transition to Round 2
       if (nonceResponse.state === 'round2_ready' && nonceResponse.round2Context) {
         setNonceRound1(nonceResponse.round2Context);
@@ -460,31 +438,24 @@ export default function EscrowDetail() {
     }
     const action = 'refund';
     setSelectedAction(action);
-    
-    // Calculate expected signerBitmap from action roles
-    // refund: buyer + seller + mediator1-5 (all 7 roles)
-    const expectedRoles = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
-    const signerBitmap = calculateSignerBitmapFromRoles(expectedRoles);
-    
-    // Validate before proceeding
-    const validation = validateSignerBitmap(signerBitmap, expectedRoles);
-    if (!validation.valid) {
-      addLog({ message: `❌ Validation failed: ${validation.error}`, type: 'error' });
-      return;
-    }
-    
+
     try {
       const nonceKey = buildNonceKey(action);
       if (!nonceKey) throw new Error('Cannot start Round 1: unresolved escrow/action/role context');
 
       const { R_x, R_y } = await computeNonce(nonceKey);
-      
+
       const safe_R_x = extractTrueHex(R_x);
       const safe_R_y = extractTrueHex(R_y);
 
-      addLog({ message: `📝 Submitting nonce with signerBitmap: ${signerBitmap}`, type: 'info' });
-      const nonceResponse = await submitNonce(escrowId, activeRole, action, signerBitmap, safe_R_x, safe_R_y);
-      
+      // Backend will calculate signerBitmap from actual submitted roles
+      addLog({ message: `Submitting nonce for action: ${action}...`, type: 'info' });
+      const nonceResponse = await submitNonce(escrowId, activeRole, action, 0, safe_R_x, safe_R_y);
+
+      // Use signerBitmap from backend response
+      const actualSignerBitmap = nonceResponse.signerBitmap;
+      addLog({ message: `Backend confirmed signerBitmap: ${actualSignerBitmap}`, type: 'info' });
+
       // If Round 1 is already complete, set nonceRound1 atom and transition to Round 2
       if (nonceResponse.state === 'round2_ready' && nonceResponse.round2Context) {
         setNonceRound1(nonceResponse.round2Context);
@@ -587,6 +558,16 @@ export default function EscrowDetail() {
 
   } catch (error) {
     addLog({ message: `On-chain execution failed: ${error.message}`, type: 'error' });
+
+    // If signature verification failed, reset signing session
+    if (error.message?.includes('InvalidSignature') || error.message?.includes('signature')) {
+      addLog({ message: `⚠️ InvalidSignature detected. Resetting signing session...`, type: 'error' });
+      try {
+        await resetSigning(selectedAction, 'InvalidSignature on-chain');
+      } catch (resetError) {
+        addLog({ message: `Failed to reset signing: ${resetError.message}`, type: 'error' });
+      }
+    }
   }
 };
 

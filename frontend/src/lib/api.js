@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { getStoredAccessToken, clearSession } from '../store/authStore';
+import { getStoredAccessToken, clearSession, setSession } from '../store/authStore';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api',
@@ -25,14 +25,66 @@ api.interceptors.request.use((config) => {
   return config;
 }, (error) => Promise.reject(error));
 
-// RESPONSE INTERCEPTOR: Circuit Breaker cho lỗi 401
+// RESPONSE INTERCEPTOR: Refresh token khi 401
+let isRefreshing = false;
+let failedQueue = [];
+
+const processQueue = (error, token = null) => {
+  failedQueue.forEach(prom => {
+    if (error) {
+      prom.reject(error);
+    } else {
+      prom.resolve(token);
+    }
+  });
+  failedQueue = [];
+};
+
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
-    if (error.response?.status === 401) {
-      console.warn("🚨 [401 Unauthorized]: Phiên hết hạn. Đang làm sạch State...");
-      clearSession();
+  async (error) => {
+    const originalRequest = error.config;
+
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject });
+        }).then(token => {
+          originalRequest.headers.Authorization = `Bearer ${token}`;
+          return api(originalRequest);
+        }).catch(err => {
+          return Promise.reject(err);
+        });
+      }
+
+      originalRequest._retry = true;
+      isRefreshing = true;
+
+      try {
+        console.log("[Refresh Token]: Đang refresh access token...");
+        const refreshRes = await api.post('/auth/refresh');
+        const newAccessToken = refreshRes.data.accessToken || refreshRes.data.token;
+
+        // Lưu access token mới
+        setSession({ 
+          accessToken: newAccessToken, 
+          user: refreshRes.data.user 
+        });
+
+        // Retry original request với token mới
+        originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
+        processQueue(null, newAccessToken);
+        return api(originalRequest);
+      } catch (refreshError) {
+        console.error("[Refresh Failed]:", refreshError);
+        processQueue(refreshError, null);
+        clearSession();
+        return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
+      }
     }
+
     return Promise.reject(error);
   }
 );

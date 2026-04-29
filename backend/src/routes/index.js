@@ -4,6 +4,7 @@ import authRouter from './auth.js';         // SIWE Auth (nonce, verify)
 import usersRouter from './users.js';       // User profile & mediator list
 import escrowsRouter from './escrows.js';   // Business Escrow CRUD
 import evidenceRouter from './evidence.js'; // Dispute Evidence upload
+import mediatorRouter from './mediator.js'; // Mediator Pool management
 
 const router = express.Router();
 
@@ -17,5 +18,6 @@ router.use('/escrow', escrowRouter);
 router.use('/users', usersRouter);
 router.use('/escrows', escrowsRouter);
 router.use('/escrows', evidenceRouter);
+router.use('/mediator', mediatorRouter);
 
 export default router;

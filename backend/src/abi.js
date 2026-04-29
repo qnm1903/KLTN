@@ -6,7 +6,14 @@ export const factoryAbi = [
   'function escrowsBySeller(address) external view returns (address[])'
 ];
 
-// 2. ABI của Vault
+// 2. ABI của MediatorPool (cho event listener)
+export const mediatorPoolAbi = [
+  'function requestRandomMediator(bytes32 escrowId, address buyer, address seller) external',
+  'event RandomMediatorSelected(bytes32 indexed escrowId, address[] mediators)',
+  'event RandomnessRequested(uint256 requestId, bytes32 indexed escrowId)'
+];
+
+// 3. ABI của Vault
 export const vaultAbi = [
   'function escrowId() external view returns (bytes32)',
   'function buyer() external view returns (address)',

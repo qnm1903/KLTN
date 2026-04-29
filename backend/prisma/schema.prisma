@@ -17,6 +17,12 @@ model User {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
+  // Mediator fields
+  isMediator           Boolean  @default(false)
+  mediatorStake        Decimal  @default(0)
+  mediatorRegisteredAt DateTime?
+  mediatorTimeoutCount Int      @default(0)
+
   // Relations
   boughtEscrows   Escrow[]   @relation("BuyerEscrows")
   soldEscrows     Escrow[]   @relation("SellerEscrows")
@@ -25,6 +31,8 @@ model User {
   statusHistoryActions EscrowStatusHistory[]
   refreshTokens   RefreshToken[]
   approvals       Approval[]
+
+  @@index([isMediator])
 }
 
 model Escrow {
@@ -36,6 +44,10 @@ model Escrow {
   amount          Decimal   // Số ETH ký quỹ (wei precision: 10^18 decimals)
   status          String   @default("DRAFT") // DRAFT | INITIALIZED | LOCKED | DISPUTED | RELEASED | REFUNDED
   disputePhase    String?  // OPENED | EVIDENCE_WINDOW | REVIEW_WINDOW | DECISION_PENDING | RESOLVED
+
+  // Mediator Pool fields
+  mediatorPoolUsed     Boolean   @default(false)
+  mediatorsSelectedAt  DateTime?
   
   // Deadlines cho timeout check
   confirmDeadline   DateTime?  // Hạn cuối user phải confirm giao dịch (optional)

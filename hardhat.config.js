@@ -1,20 +1,26 @@
 require('hardhat-contract-sizer');
 require("@nomicfoundation/hardhat-toolbox");
+require("@openzeppelin/hardhat-upgrades");
 require("dotenv").config();
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
-    version: "0.8.24",
+    version: "0.8.30",
     settings: {
       optimizer: {
         enabled: true,
         runs: 200,
       },
+      evmVersion: "prague",
     },
   },
   networks: {
-    hardhat: {},
+    hardhat: {
+      chainId: 31337,
+      // Optional: for VRF testing with real coordinator, uncomment and set env
+      // forking: { url: process.env.MAINNET_RPC_URL || process.env.SEPOLIA_RPC_URL || '' }
+    },
     sepolia: {
       url: process.env.SEPOLIA_RPC_URL || "",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []

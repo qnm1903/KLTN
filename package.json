@@ -6,6 +6,8 @@
   "scripts": {
     "test": "npx hardhat test",
     "deploy:sepolia": "npx hardhat run scripts/deploy-sepolia.js --network sepolia",
+    "deploy:mediator-pool:mock": "npx hardhat run scripts/deploy-mediator-pool-mock.js --network hardhat",
+    "deploy:mediator-pool:sepolia": "npx hardhat run scripts/deploy-mediator-pool.js --network sepolia",
     "verify:sepolia": "node scripts/verify-sepolia.js",
     "smoke:sepolia": "node scripts/smoke-sepolia.js",
     "metrics:sync": "node scripts/sync-gas-results.js"
@@ -15,12 +17,14 @@
   "license": "ISC",
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^6.1.2",
+    "@openzeppelin/hardhat-upgrades": "^3.9.1",
     "hardhat": "^2.28.6",
     "hardhat-contract-sizer": "^2.10.1"
   },
   "dependencies": {
     "@chainlink/contracts": "^1.5.0",
     "@openzeppelin/contracts": "^5.6.1",
+    "@openzeppelin/contracts-upgradeable": "^5.6.1",
     "axios": "^1.6.0",
     "dotenv": "^17.3.1",
     "elliptic": "^6.5.6"

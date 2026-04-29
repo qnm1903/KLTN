@@ -3,30 +3,45 @@ pragma solidity ^0.8.20;
 
 import "@chainlink/contracts/src/v0.8/vrf/VRFConsumerBaseV2.sol";
 import "@chainlink/contracts/src/v0.8/vrf/interfaces/VRFCoordinatorV2Interface.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 /**
  * @title MediatorPool
  * @dev Quản lý danh sách trọng tài tích hợp Chainlink VRF để chọn ngẫu nhiên tuyệt đối.
  */
-contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
+contract MediatorPool is 
+    VRFConsumerBaseV2, 
+    Initializable, 
+    UUPSUpgradeable, 
+    AccessControlUpgradeable, 
+    PausableUpgradeable, 
+    ReentrancyGuardTransient 
+{
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    uint256 public constant COMMITTEE_SIZE = 5;
+    uint256 public constant MIN_MEDIATORS = 5;
+    uint256 public constant MAX_TIMEOUTS = 3;
+    uint256 public constant MAINNET_STAKE = 0.01 ether;
+    uint256 public constant TESTNET_STAKE = 0.001 ether;
+    
+    bool public isTestnet;
+    
+    // Sybil detection events
+    event SybilDetected(address indexed mediator, string reason);
+    event ReputationUpdated(address indexed mediator, uint256 oldScore, uint256 newScore);
 
     /* ========== CẤU HÌNH CHAINLINK VRF ========== */
     VRFCoordinatorV2Interface private immutable COORDINATOR;
 
-    // Các thông số này phụ thuộc vào mạng lưới bạn deploy (Sepolia, Base, Polygon...)
-    // Ví dụ Sepolia:
-    // uint64 s_subscriptionId = 123;
-    // bytes32 s_keyHash = 0x474e34a077df58807dbe9c96d3c009b23b3c6d0cce433e59bbf5b34f823bc56c;
-    // uint32 callbackGasLimit = 100000;
-
-    uint64 private immutable s_subscriptionId;
-    bytes32 private immutable s_keyHash;
-    uint32 private immutable s_callbackGasLimit;
+    uint64 private s_subscriptionId;
+    bytes32 private s_keyHash;
+    uint32 private s_callbackGasLimit;
     uint16 private constant REQUEST_CONFIRMATIONS = 3; // Số block chờ xác nhận
     uint32 private constant NUM_WORDS = 5; // Cần 5 số random để chọn 5 mediators
-    uint256 public constant COMMITTEE_SIZE = 5; // Số mediator cần chọn
 
     /* ========== CẤU TRÚC DỮ LIỆU MEDIATOR ========== */
     struct Mediator {
@@ -34,17 +49,22 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
         uint256 stakeAmount;
         bool isActive;
         uint256 timeoutCount;
+        uint256 reputationScore; // 0-100
+        uint256 totalVotes;
+        uint256 successfulVotes;
     }
 
     address[] public mediatorsList;
     mapping(address => Mediator) public mediators;
 
-    uint256 public constant MIN_STAKE = 0.01 ether;
-    uint256 public constant MAX_TIMEOUTS = 3;
-
     /* ========== TRẠNG THÁI YÊU CẦU RANDOM ========== */
     // Lưu lại requestId của VRF đang chờ -> để biết nó đang phục vụ cho Escrow nào
-    mapping(uint256 requestId => bytes32 escrowId) public vrfRequests;
+    struct RequestDetails {
+        bytes32 escrowId;
+        address buyer;
+        address seller;
+    }
+    mapping(uint256 requestId => RequestDetails) public vrfRequests;
 
     /* ========== EVENTS ========== */
     event MediatorRegistered(address indexed mediator, uint256 amount);
@@ -54,30 +74,53 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
     event MediatorSlashed(address indexed mediator, uint256 amount);
 
     /* ========== KHAI BÁO ========== */
-    constructor(
-        address _vrfCoordinator,   // Địa chỉ VRF Coordinator của mạng
-        uint64 _subscriptionId,    // ID Subscription đã tạo trên web Chainlink
-        bytes32 _keyHash,          // KeyHash của mạng
-        uint32 _callbackGasLimit   // Gas limit cho hàm fulfill
-    )
+    constructor(address _vrfCoordinator)
         VRFConsumerBaseV2(_vrfCoordinator)
-        Ownable(msg.sender)
     {
         COORDINATOR = VRFCoordinatorV2Interface(_vrfCoordinator);
+        _disableInitializers();
+    }
+    
+    function initialize(
+        uint64 _subscriptionId,
+        bytes32 _keyHash,
+        uint32 _callbackGasLimit
+    ) public initializer {
+        __AccessControl_init();
+        __Pausable_init();
+        
         s_subscriptionId = _subscriptionId;
         s_keyHash = _keyHash;
         s_callbackGasLimit = _callbackGasLimit;
+        
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(ADMIN_ROLE, msg.sender);
+        
+        isTestnet = block.chainid == 11155111;
+    }
+    
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(ADMIN_ROLE) {}
+    
+    function getRequiredStake() public view returns (uint256) {
+        return isTestnet ? TESTNET_STAKE : MAINNET_STAKE;
     }
 
     /* ========== ĐĂNG KÝ MEDIATOR ========== */
-    function registerAsMediator() external payable nonReentrant {
-        require(msg.value >= MIN_STAKE, "Stake too low");
+    function registerAsMediator() external payable whenNotPaused nonReentrant {
+        require(msg.value >= getRequiredStake(), "Stake too low");
         require(!mediators[msg.sender].isActive, "Already registered");
 
-        mediators[msg.sender] = Mediator(msg.sender, msg.value, true, 0);
+        mediators[msg.sender] = Mediator(msg.sender, msg.value, true, 0, 50, 0, 0);
         mediatorsList.push(msg.sender);
 
         emit MediatorRegistered(msg.sender, msg.value);
+    }
+    
+    function updateReputation(address mediator, uint256 newScore) external onlyRole(ADMIN_ROLE) {
+        require(newScore <= 100, "Score must be 0-100");
+        uint256 oldScore = mediators[mediator].reputationScore;
+        mediators[mediator].reputationScore = newScore;
+        emit ReputationUpdated(mediator, oldScore, newScore);
     }
 
     function unregister() external nonReentrant {
@@ -95,11 +138,12 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
 
     /* ========== YÊU CẦU RANDOM TỪ VRF ========== */
     /**
-     * @dev Hàm này được gọi khi Escrow cần chọn ngẫu nhiên 1 Mediator.
+     * @dev Hàm này được gọi khi Escrow cần chọn ngẫu nhiên 5 Mediators.
      * Nó sẽ tốn 1 lượng LINK để trả phí cho Chainlink.
      */
-    function requestRandomMediator(bytes32 escrowId) external onlyOwner nonReentrant {
-        require(mediatorsList.length > 0, "No mediators");
+    function requestRandomMediator(bytes32 escrowId, address buyer, address seller) external whenNotPaused nonReentrant {
+        require(mediatorsList.length >= MIN_MEDIATORS, "Not enough mediators");
+        require(buyer != seller, "Buyer and seller must be different");
 
         // Gửi yêu cầu lên Chainlink
         uint256 requestId = COORDINATOR.requestRandomWords(
@@ -110,7 +154,7 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
             NUM_WORDS
         );
 
-        vrfRequests[requestId] = escrowId;
+        vrfRequests[requestId] = RequestDetails(escrowId, buyer, seller);
 
         emit RandomnessRequested(requestId, escrowId);
     }
@@ -124,9 +168,9 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
         uint256 requestId,
         uint256[] memory randomWords
     ) internal override {
-        // Lấy ID Escrow tương ứng với request này
-        bytes32 escrowId = vrfRequests[requestId];
-        require(escrowId != bytes32(0), "Invalid request");
+        // Lấy chi tiết request
+        RequestDetails memory details = vrfRequests[requestId];
+        require(details.escrowId != bytes32(0), "Invalid request");
 
         // Xóa request đã xử lý để tiết kiệm storage
         delete vrfRequests[requestId];
@@ -134,32 +178,49 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
         // Kiểm tra đủ số random words
         require(randomWords.length >= COMMITTEE_SIZE, "Insufficient random words");
 
-        // Chọn 5 mediators ngẫu nhiên không trùng lặp
+        // Xây dựng danh sách mediator đủ điều kiện (loại buyer/seller)
+        address[] memory eligibleMediators = new address[](mediatorsList.length);
+        uint256 eligibleCount = 0;
+        for (uint256 i = 0; i < mediatorsList.length; i++) {
+            address m = mediatorsList[i];
+            if (m != details.buyer && m != details.seller && mediators[m].isActive) {
+                eligibleMediators[eligibleCount] = m;
+                eligibleCount++;
+            }
+        }
+        require(eligibleCount >= COMMITTEE_SIZE, "Not enough eligible mediators");
+
+        // Chọn 5 mediators ngẫu nhiên không trùng lặp từ danh sách đủ điều kiện
         address[] memory selectedMediators = new address[](COMMITTEE_SIZE);
-        bool[] memory selected = new bool[](mediatorsList.length);
+        bool[] memory selected = new bool[](eligibleCount);
         
         for (uint256 i = 0; i < COMMITTEE_SIZE; i++) {
             uint256 randomNumber = randomWords[i];
-            uint256 index = randomNumber % mediatorsList.length;
+            uint256 index = randomNumber % eligibleCount;
             
+            uint256 attempts = 0;
             // Nếu mediator đã được chọn, thử index tiếp theo
-            while (selected[index]) {
-                index = (index + 1) % mediatorsList.length;
+            while (selected[index] && attempts < eligibleCount) {
+                index = (index + 1) % eligibleCount;
+                attempts++;
             }
+            require(attempts < eligibleCount, "Selection collision exceeded");
             
             selected[index] = true;
-            selectedMediators[i] = mediatorsList[index];
+            selectedMediators[i] = eligibleMediators[index];
             
-            // Đảm bảo mediator vẫn active
-            require(mediators[selectedMediators[i]].isActive, "Selected inactive");
+            // Optional: Detect low reputation for monitoring
+            if (mediators[selectedMediators[i]].reputationScore < 30) {
+                emit SybilDetected(selectedMediators[i], "Low reputation");
+            }
         }
 
         // Emit sự kiện để Backend/WebSocket bắt được
-        emit RandomMediatorSelected(escrowId, selectedMediators);
+        emit RandomMediatorSelected(details.escrowId, selectedMediators);
     }
 
     /* ========== XỬ LÝ TIMEOUT ========== */
-    function slashForTimeout(address _mediator) external onlyOwner nonReentrant {
+    function slashForTimeout(address _mediator) external onlyRole(ADMIN_ROLE) nonReentrant {
         require(mediators[_mediator].isActive, "Not active");
 
         Mediator storage m = mediators[_mediator];
@@ -170,7 +231,7 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
             uint256 penalty = m.stakeAmount;
             delete mediators[_mediator];
 
-            (bool success, ) = owner().call{value: penalty}("");
+            (bool success, ) = msg.sender.call{value: penalty}("");
             require(success, "Slash failed");
 
             emit MediatorSlashed(_mediator, penalty);
@@ -195,6 +256,11 @@ contract MediatorPool is VRFConsumerBaseV2, Ownable, ReentrancyGuard {
             list[i] = mediators[mediatorsList[i]];
         }
         return list;
+    }
+
+    // Hàm test helper để mô phỏng VRF callback (chỉ dùng trong test)
+    function testFulfillRandomWords(uint256 requestId, uint256[] memory randomWords) external {
+        fulfillRandomWords(requestId, randomWords);
     }
 
     receive() external payable {}

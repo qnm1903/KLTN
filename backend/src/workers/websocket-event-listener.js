@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import { canTransitionStatus } from '../lib/escrow-status.js';
-import { factoryAbi, vaultAbi } from '../abi.js';
+import { factoryAbi, vaultAbi, mediatorPoolAbi } from '../abi.js';
+import { emitToEscrow } from '../lib/socket-emitter.js';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const CONFIRM_DEADLINE_DAYS = Number(process.env.CONFIRM_DEADLINE_DAYS ?? 7);
@@ -158,9 +159,65 @@ async function handleVaultEvent(prisma, eventName, args, contractAddress, logger
   }
 }
 
+async function handleRandomMediatorSelected(prisma, escrowId, mediators, logger) {
+  try {
+    const escrowIdHex = escrowId;
+
+    const escrow = await prisma.escrow.findFirst({
+      where: { chainEscrowId: escrowIdHex },
+      select: { id: true, status: true }
+    });
+
+    if (!escrow) {
+      logger?.warn?.(`[mediator-pool] No escrow found for chainEscrowId=${escrowIdHex}`);
+      return;
+    }
+
+    const records = [];
+    for (let i = 0; i < mediators.length; i++) {
+      const addr = normalizeAddress(mediators[i]);
+      if (!addr) continue;
+
+      const user = await prisma.user.findFirst({
+        where: { walletAddress: addr },
+        select: { id: true }
+      });
+
+      if (!user) {
+        logger?.warn?.(`[mediator-pool] No user found for mediator address ${addr}`);
+        continue;
+      }
+
+      records.push({
+        escrowId: escrow.id,
+        mediatorId: user.id,
+        slot: i + 1
+      });
+    }
+
+    if (records.length > 0) {
+      await prisma.escrowMediator.createMany({
+        data: records,
+        skipDuplicates: true
+      });
+      logger?.info?.(`[mediator-pool] Saved ${records.length} mediators for escrow ${escrow.id}`);
+    }
+
+    emitToEscrow(escrow.id, 'mediators_selected', {
+      escrowId: escrow.id,
+      chainEscrowId: escrowIdHex,
+      mediators: mediators.map(m => normalizeAddress(m)),
+      count: records.length
+    });
+  } catch (error) {
+    logger?.error?.('[mediator-pool] Failed to handle RandomMediatorSelected:', error?.message ?? error);
+  }
+}
+
 export function startWebSocketEventListener({ prisma, logger = console, config = {} }) {
   const rpcUrl = config.rpcUrl ?? process.env.WS_RPC_URL ?? process.env.RPC_URL;
   const factoryAddressRaw = config.factoryAddress ?? process.env.FACTORY_ADDRESS;
+  const mediatorPoolAddressRaw = config.mediatorPoolAddress ?? process.env.MEDIATOR_POOL_CONTRACT;
   const confirmations = Number(config.confirmations ?? process.env.LISTENER_CONFIRMATIONS ?? 6);
 
   if (!rpcUrl || !factoryAddressRaw) {
@@ -168,8 +225,23 @@ export function startWebSocketEventListener({ prisma, logger = console, config =
   }
 
   const factoryAddress = normalizeAddress(factoryAddressRaw);
+  const mediatorPoolAddress = normalizeAddress(mediatorPoolAddressRaw);
   const provider = new ethers.WebSocketProvider(rpcUrl);
   const factoryContract = new ethers.Contract(factoryAddress, factoryAbi, provider);
+
+  // Subscribe to MediatorPool events
+  if (mediatorPoolAddress) {
+    const mediatorPoolContract = new ethers.Contract(mediatorPoolAddress, mediatorPoolAbi, provider);
+
+    mediatorPoolContract.on('RandomMediatorSelected', async (escrowId, mediators, event) => {
+      if (event.logIndex < confirmations) return;
+      await handleRandomMediatorSelected(prisma, escrowId, mediators, logger);
+    });
+
+    logger?.info?.(`[websocket] Subscribed to MediatorPool: ${mediatorPoolAddress}`);
+  } else {
+    logger?.warn?.('[websocket] MEDIATOR_POOL_CONTRACT not set, skipping MediatorPool listener');
+  }
 
   const knownVaults = new Map(); // vaultAddress -> contract instance
   let running = true;

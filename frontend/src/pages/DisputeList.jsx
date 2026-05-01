@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { DISPUTE_STATUS } from '../constants/dispute.constants.js';
 import mockDataDefault, { mockDisputeList } from '../../../test/disputeMockData.js';
 
@@ -41,6 +42,7 @@ function statusBadge(status) {
 
 export default function DisputeList() {
   const [filter, setFilter] = useState('all');
+  const navigate = useNavigate();
 
   // Dùng mockDisputeList (imported từ frontend/test)
   const disputes = mockDisputeList || [];
@@ -109,12 +111,14 @@ export default function DisputeList() {
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{new Date(d.createdAt).toLocaleString()}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
-                    <a
-                      href={`#/disputes/${d.disputeId}`}
+                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
+                    <button
+                      onClick={() => navigate(`/disputes/${d.disputeId}`)}
                       className="px-3 py-1 rounded-md bg-indigo-600 text-white text-sm hover:bg-indigo-700"
                     >
                       View Details
-                    </a>
+                    </button>
+                  </td>
                   </td>
                 </tr>
               );

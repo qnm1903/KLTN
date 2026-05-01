@@ -14,6 +14,11 @@ import { MEDIATOR_STATUS } from '../../constants/dispute.constants.js';
  * - Bao gồm VotingProgressBar inline (7 ticks, threshold marker tại 5).
  */
 const MediatorPanel = () => {
+  const { address } = useAccount();
+  const { data: walletClient } = useWalletClient();
+  const setMediators = useSetAtom(mediatorsListAtom);
+  const currentDispute = useAtomValue(currentDisputeAtom);
+  const [processingMediator, setProcessingMediator] = React.useState(null);
   const mediators = useAtomValue(mediatorsListAtom) || [];
   const tally = useAtomValue(voteTallyAtom) || {
     RELEASE_TO_BUYER: 0,
@@ -22,6 +27,38 @@ const MediatorPanel = () => {
     OTHER: 0,
     totalVotes: 0,
     threshold: 5
+  };
+
+  const handleMediatorDecision = async (mediatorAddr, action) => {
+    if (!mediatorAddr || !walletClient || !address) return;
+    setProcessingMediator(mediatorAddr);
+
+    try {
+      const message = {
+        mediator: mediatorAddr,
+        disputeId: currentDispute?.disputeId || '',
+        action: action,
+        timestamp: new Date().toISOString()
+      };
+
+      const domain = { name: 'DisputeEscrow', version: '1' };
+      const types = { AcceptMediator: [{ name: 'mediator', type: 'address' }, { name: 'disputeId', type: 'string' }, { name: 'action', type: 'string' }, { name: 'timestamp', type: 'string' }] };
+
+      const signature = await walletClient.signTypedData({
+        domain, types, primaryType: 'AcceptMediator', message, account: address
+      });
+
+      await acceptMediator(message.disputeId, { mediator: mediatorAddr, signature, timestamp: message.timestamp });
+      
+      setMediators((prev) => prev.map((m) =>
+        m.address.toLowerCase() === mediatorAddr.toLowerCase()
+          ? { ...m, status: action === 'ACCEPT' ? MEDIATOR_STATUS.ACCEPTED : MEDIATOR_STATUS.DECLINED } : m
+      ));
+    } catch (err) {
+      console.error('Decision error', err);
+    } finally {
+      setProcessingMediator(null);
+    }
   };
 
   // Ensure 7 slots for UI
@@ -62,8 +99,21 @@ const MediatorPanel = () => {
             </div>
 
             <div className="flex items-center space-x-3">
-              <StatusBadge status={m.status} />
-              <div className="text-xs text-gray-400">{m.votedAt ? new Date(m.votedAt).toLocaleString() : ''}</div>
+              {address && m.address && address.toLowerCase() === m.address.toLowerCase() && m.status === MEDIATOR_STATUS.ASSIGNED ? (
+                <div className="flex items-center space-x-2">
+                  <button onClick={() => handleMediatorDecision(m.address, 'ACCEPT')} disabled={processingMediator === m.address} className="px-3 py-1 rounded-md bg-green-600 text-white text-sm hover:bg-green-700 disabled:opacity-50">
+                    {processingMediator === m.address ? '...' : 'Accept'}
+                  </button>
+                  <button onClick={() => handleMediatorDecision(m.address, 'DECLINE')} disabled={processingMediator === m.address} className="px-3 py-1 rounded-md bg-red-100 text-red-800 text-sm hover:bg-red-200 disabled:opacity-50">
+                    {processingMediator === m.address ? '...' : 'Decline'}
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <StatusBadge status={m.status} />
+                  <div className="text-xs text-gray-400">{m.votedAt ? new Date(m.votedAt).toLocaleString() : ''}</div>
+                </>
+              )}
             </div>
           </li>
         ))}

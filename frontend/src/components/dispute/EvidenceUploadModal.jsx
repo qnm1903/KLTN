@@ -36,67 +36,61 @@ export default function EvidenceUploadModal({ isOpen, onClose, onUpload }) {
 
 
   const handleUpload = async () => {
-  if (!file) {
-    alert('Vui lòng chọn file trước khi upload.');
-    return;
-  }
+    if (!file) {
+      alert('Vui lòng chọn file trước khi upload.');
+      return;
+    }
 
-  setUploading(true);
+    setUploading(true);
 
-  // Kiểm tra wallet (nếu muốn require signer khi sign metadata)
-  const shouldSign = signMetadata === true;
+    try {
+      // 1. Upload file trước để lấy IPFS Hash
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('uploaderAddress', address || '');
+      formData.append('description', description || '');
+      formData.append('confidential', confidential ? 'true' : 'false');
 
-  let signature = null;
-  try {
-    if (shouldSign) {
-      if (!walletClient || !address) {
-        alert('Wallet chưa kết nối. Vui lòng kết nối wallet để sign metadata.');
-        setUploading(false);
-        return;
+      const targetDisputeId = typeof disputeId !== 'undefined' ? disputeId : '';
+      const uploadRes = await uploadEvidence(targetDisputeId, formData);
+      console.log('[EvidenceUploadModal] upload result:', uploadRes);
+
+      // 2. Ký ví sau khi ĐÃ CÓ ipfsHash (Vá lỗ hổng Cốt lõi 1)
+      if (signMetadata) {
+        if (!walletClient || !address) {
+          alert('Wallet chưa kết nối. Vui lòng kết nối để ký metadata.');
+          setUploading(false);
+          return;
+        }
+
+        const metadata = {
+          ipfsHash: uploadRes.ipfsHash,
+          disputeId: targetDisputeId,
+          timestamp: new Date().toISOString()
+        };
+
+        const signature = await signatureUtils.signEvidenceMetadata(walletClient, address, metadata);
+        
+        // Gửi chữ ký lên Backend (Backend cần API hứng signature này)
+        const signatureEndpoint = `/api/disputes/${targetDisputeId}/evidence/${uploadRes.evidenceId}/signature`;
+        await fetch(signatureEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uploaderAddress: address, signature, timestamp: metadata.timestamp })
+        });
       }
-
-      // chuẩn bị metadata cho signature; lưu ý: nếu bạn có client-side file hash, nên tính và gửi ipfsHash thực tế
-      const metadata = {
-        ipfsHash: '', // Nếu đã có ipfs hash phía client thì đặt ở đây; nếu không, backend có thể accept signature without ipfsHash
-        disputeId: typeof disputeId !== 'undefined' ? disputeId : '', // đảm bảo component nhận prop disputeId
-        timestamp: new Date().toISOString()
-      };
-
-      // Sử dụng signatureUtils (viem WalletClient)
-      signature = await signatureUtils.signEvidenceMetadata(walletClient, address, metadata);
+    } catch (err) {
+      console.error('Upload error', err);
+      alert('Upload thất bại. Kiểm tra console.');
+    } finally {
+      setUploading(false);
+      setFile(null);
+      setDescription('');
+      setConfidential(true);
+      setSignMetadata(false);
+      onClose?.();
     }
-
-    // Build FormData (multipart)
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('uploaderAddress', address || '');
-    formData.append('description', description || '');
-    formData.append('confidential', confidential ? 'true' : 'false');
-    if (signature) formData.append('signature', signature);
-
-    // Gọi API uploadEvidence
-    // NOTE: component cần prop `disputeId`; đảm bảo truyền khi dùng component
-    const targetDisputeId = typeof disputeId !== 'undefined' ? disputeId : '';
-    if (!targetDisputeId) {
-      console.warn('EvidenceUploadModal: disputeId not provided; uploading to anonymous endpoint may fail.');
-    }
-
-    const res = await uploadEvidence(targetDisputeId, formData);
-    console.log('[EvidenceUploadModal] uploadEvidence response:', res);
-
-  } catch (err) {
-    console.error('Upload error', err);
-    alert('Upload failed. Kiểm tra console để biết chi tiết.');
-  } finally {
-    setUploading(false);
-    // reset form
-    setFile(null);
-    setDescription('');
-    setConfidential(true);
-    setSignMetadata(false);
-    onClose?.();
-  }
-};
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">

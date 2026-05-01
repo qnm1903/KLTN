@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { useSetAtom } from 'jotai';
+import { toast } from 'react-toastify';
 import {
   currentDisputeAtom,
   evidenceListAtom,
@@ -102,6 +103,7 @@ export function useDisputeWebSocket(disputeId) {
           requestId: incoming.requestId || prev.requestId
         };
       });
+      toast.info('7 Mediators have been assigned via VRF!');
     };
 
     const handleEvidenceAdded = (payload) => {
@@ -126,6 +128,7 @@ export function useDisputeWebSocket(disputeId) {
           evidence: [...prev.evidence, evidence]
         };
       });
+      toast.success('New evidence uploaded!');
     };
 
     const handleVoteSubmitted = (payload) => {
@@ -181,6 +184,7 @@ export function useDisputeWebSocket(disputeId) {
         }
         return prev;
       });
+      toast.info('A mediator has cast their vote.');
     };
 
     const handleDisputeResolved = (payload) => {
@@ -244,6 +248,7 @@ export function useDisputeWebSocket(disputeId) {
           )
         );
       }
+      toast.success('Dispute resolved! Threshold reached.');
     };
 
     // ---- Register listeners (socket.io style) ----

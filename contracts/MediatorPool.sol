@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@chainlink/contracts/src/v0.8/vrf/VRFConsumerBaseV2.sol";
-import "@chainlink/contracts/src/v0.8/vrf/interfaces/VRFCoordinatorV2Interface.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -14,7 +14,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
  * @dev Quản lý danh sách trọng tài tích hợp Chainlink VRF để chọn ngẫu nhiên tuyệt đối.
  */
 contract MediatorPool is 
-    VRFConsumerBaseV2, 
+    VRFConsumerBaseV2Plus, 
     Initializable, 
     UUPSUpgradeable, 
     AccessControlUpgradeable, 
@@ -35,9 +35,9 @@ contract MediatorPool is
     event ReputationUpdated(address indexed mediator, uint256 oldScore, uint256 newScore);
 
     /* ========== CẤU HÌNH CHAINLINK VRF ========== */
-    VRFCoordinatorV2Interface private immutable COORDINATOR;
+    // s_vrfCoordinator is inherited from VRFConsumerBaseV2Plus
 
-    uint64 private s_subscriptionId;
+    uint256 private s_subscriptionId;
     bytes32 private s_keyHash;
     uint32 private s_callbackGasLimit;
     uint16 private constant REQUEST_CONFIRMATIONS = 3; // Số block chờ xác nhận
@@ -75,14 +75,13 @@ contract MediatorPool is
 
     /* ========== KHAI BÁO ========== */
     constructor(address _vrfCoordinator)
-        VRFConsumerBaseV2(_vrfCoordinator)
+        VRFConsumerBaseV2Plus(_vrfCoordinator)
     {
-        COORDINATOR = VRFCoordinatorV2Interface(_vrfCoordinator);
         _disableInitializers();
     }
     
     function initialize(
-        uint64 _subscriptionId,
+        uint256 _subscriptionId,
         bytes32 _keyHash,
         uint32 _callbackGasLimit
     ) public initializer {
@@ -145,13 +144,18 @@ contract MediatorPool is
         require(mediatorsList.length >= MIN_MEDIATORS, "Not enough mediators");
         require(buyer != seller, "Buyer and seller must be different");
 
-        // Gửi yêu cầu lên Chainlink
-        uint256 requestId = COORDINATOR.requestRandomWords(
-            s_keyHash,
-            s_subscriptionId,
-            REQUEST_CONFIRMATIONS,
-            s_callbackGasLimit,
-            NUM_WORDS
+        // Gửi yêu cầu lên Chainlink VRF v2.5
+        uint256 requestId = s_vrfCoordinator.requestRandomWords(
+            VRFV2PlusClient.RandomWordsRequest({
+                keyHash: s_keyHash,
+                subId: s_subscriptionId,
+                requestConfirmations: REQUEST_CONFIRMATIONS,
+                callbackGasLimit: s_callbackGasLimit,
+                numWords: NUM_WORDS,
+                extraArgs: VRFV2PlusClient._argsToBytes(
+                    VRFV2PlusClient.ExtraArgsV1({nativePayment: false})
+                )
+            })
         );
 
         vrfRequests[requestId] = RequestDetails(escrowId, buyer, seller);
@@ -166,7 +170,7 @@ contract MediatorPool is
      */
     function fulfillRandomWords(
         uint256 requestId,
-        uint256[] memory randomWords
+        uint256[] calldata randomWords
     ) internal override {
         // Lấy chi tiết request
         RequestDetails memory details = vrfRequests[requestId];
@@ -260,6 +264,12 @@ contract MediatorPool is
 
     // Hàm test helper để mô phỏng VRF callback (chỉ dùng trong test)
     function testFulfillRandomWords(uint256 requestId, uint256[] memory randomWords) external {
+        // Copy memory array to calldata-compatible format for internal call
+        this.fulfillRandomWordsProxy(requestId, randomWords);
+    }
+
+    // Internal proxy to handle the calldata requirement for testing
+    function fulfillRandomWordsProxy(uint256 requestId, uint256[] calldata randomWords) external {
         fulfillRandomWords(requestId, randomWords);
     }
 

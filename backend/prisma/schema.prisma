@@ -31,6 +31,8 @@ model User {
   statusHistoryActions EscrowStatusHistory[]
   refreshTokens   RefreshToken[]
   approvals       Approval[]
+  disputeVotes    DisputeVote[]
+  mediatorDisputes DisputeMediator[]
 
   @@index([isMediator])
 }
@@ -79,6 +81,7 @@ model Escrow {
   approvals          Approval[]
   nonceSubmissions   NonceSubmission[]
   signingSessions    SigningSession[]
+  disputes           Dispute[]
   createdAt          DateTime   @default(now())
   updatedAt          DateTime   @updatedAt
 
@@ -112,6 +115,8 @@ model Evidence {
   fileUrl     String   // Đường dẫn file upload
   fileHash    String   // SHA-256 hash của file content
   merkleRoot  String?  // Merkle root của tất cả evidence trong escrow
+  signature   String?
+  messageRaw  Json?
   description String   @default("")
   createdAt   DateTime @default(now())
 
@@ -119,6 +124,98 @@ model Evidence {
   uploader User   @relation(fields: [uploaderId], references: [id])
 
   @@index([escrowId])
+}
+
+model DisputeEvent {
+  id           String   @id @default(uuid())
+  disputeId    String
+  escrowId     String
+  type         String
+  payload      Json
+  attemptCount Int      @default(0)
+  lastError    String?
+  processedAt  DateTime?
+  createdAt    DateTime @default(now())
+
+  dispute Dispute @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+
+  @@index([processedAt, createdAt])
+  @@index([disputeId, createdAt])
+  @@index([escrowId, createdAt])
+}
+
+model Dispute {
+  id               String   @id @default(uuid())
+  escrowId         String
+  status           String   @default("VOTING") // PENDING_VRF | MEDIATORS_ASSIGNED | VOTING | RESOLVED | VRF_FAILED | APPEAL_WINDOW | TIMED_OUT
+  initiatorAddress String
+  reason           String
+  description      String   @default("")
+  outcome          String?  // RELEASE_TO_BUYER | RETURN_TO_SELLER | SPLIT | OTHER
+  onChainTxHash    String?
+  requestId        String?
+  assignedAt       DateTime?
+  finalizedAt      DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  escrow    Escrow            @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+  mediators DisputeMediator[]
+  votes     DisputeVote[]
+  events    DisputeEvent[]
+
+  @@index([escrowId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model DisputeMediator {
+  disputeId   String
+  mediatorId  String
+  slot        Int?
+  status      String   @default("assigned") // assigned | accepted | declined | voted | no_response
+  acceptedAt  DateTime?
+  declinedAt  DateTime?
+  votedAt     DateTime?
+  signature   String?
+  messageRaw  Json?
+  nonce       Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  dispute  Dispute @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  mediator User    @relation(fields: [mediatorId], references: [id], onDelete: Cascade)
+
+  @@id([disputeId, mediatorId])
+  @@unique([disputeId, slot])
+  @@index([mediatorId])
+  @@index([status])
+}
+
+model DisputeVote {
+  id           String   @id @default(uuid())
+  disputeId    String
+  mediatorId   String
+  vote         String   // RELEASE_TO_BUYER | RETURN_TO_SELLER | SPLIT | OTHER
+  justification String   @default("")
+  evidenceRefs Json?
+  signature    String
+  messageRaw   Json
+  votedAt      DateTime @default(now())
+
+  dispute  Dispute @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  mediator User    @relation(fields: [mediatorId], references: [id], onDelete: Cascade)
+
+  @@unique([disputeId, mediatorId])
+  @@index([disputeId, votedAt])
+  @@index([mediatorId])
+}
+
+model MediatorNonce {
+  address      String   @id
+  currentNonce Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
 model EventSyncState {

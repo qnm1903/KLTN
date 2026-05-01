@@ -1,11 +1,9 @@
-// frontend/src/components/dispute/MediatorPanel.jsx
-// Component hiển thị danh sách Mediators (7) và Voting progress bar.
-// Comment bằng tiếng Việt; giữ nguyên các thuật ngữ IT/Web3 (Mediator, VoteTally, Jotai atom).
-
-import React from 'react';
-import { useAtomValue } from 'jotai';
-import { mediatorsListAtom, voteTallyAtom } from '../../store/disputeAtoms.js';
+import React, { useState } from 'react';
+import { useAccount, useWalletClient } from 'wagmi';
+import { useAtomValue, useSetAtom } from 'jotai';
+import { mediatorsListAtom, voteTallyAtom, currentDisputeAtom } from '../../store/disputeAtoms.js';
 import { MEDIATOR_STATUS } from '../../constants/dispute.constants.js';
+import { acceptMediator } from '../../services/dispute.service.js';
 
 /**
  * MediatorPanel

@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DISPUTE_STATUS } from '../constants/dispute.constants.js';
-import mockDataDefault, { mockDisputeList } from '../../../test/disputeMockData.js';
+import { mockDisputeList } from '../../test/disputeMockData.js';
 
 /**
  * DisputeList page
@@ -111,14 +111,12 @@ export default function DisputeList() {
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{new Date(d.createdAt).toLocaleString()}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
                     <button
                       onClick={() => navigate(`/disputes/${d.disputeId}`)}
                       className="px-3 py-1 rounded-md bg-indigo-600 text-white text-sm hover:bg-indigo-700"
                     >
                       View Details
                     </button>
-                  </td>
                   </td>
                 </tr>
               );

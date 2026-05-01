@@ -5,7 +5,7 @@ import VRFLoadingState from '../components/dispute/VRFLoadingState.jsx';
 import EvidenceTimeline from '../components/dispute/EvidenceTimeline.jsx';
 import MediatorPanel from '../components/dispute/MediatorPanel.jsx';
 
-import mockDataDefault, { mockDisputeDetail, mockEvidenceList, mockMediators, mockVoteTally } from '../../../test/disputeMockData.js';
+import mockDataDefault, { mockDisputeDetail, mockEvidenceList, mockMediators, mockVoteTally } from '../../test/disputeMockData.js';
 import { DISPUTE_STATUS } from '../constants/dispute.constants.js';
 
 /**

@@ -1,8 +1,7 @@
-// frontend/src/components/dispute/EvidenceUploadModal.jsx
-// Modal upload Evidence (drag-and-drop placeholder).
-// Comment bằng tiếng Việt; giữ nguyên các thuật ngữ IT/Web3 (Modal, IPFS, payload, wallet signature).
-
 import React, { useState, useRef } from 'react';
+import { useAccount, useWalletClient } from 'wagmi';
+import { uploadEvidence } from '../../services/dispute.service.js';
+import signatureUtils from '../../utils/signatureUtils.js';
 
 /**
  * Props:
@@ -16,6 +15,8 @@ export default function EvidenceUploadModal({ isOpen, onClose, onUpload }) {
   const [confidential, setConfidential] = useState(true);
   const [signMetadata, setSignMetadata] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const { address } = useAccount();
+  const { data: walletClient } = useWalletClient();
 
   const fileInputRef = useRef(null);
 
@@ -33,42 +34,69 @@ export default function EvidenceUploadModal({ isOpen, onClose, onUpload }) {
     if (f) setFile(f);
   };
 
-  const handleUpload = async () => {
-    if (!file) {
-      alert('Vui lòng chọn file trước khi upload (mock).');
-      return;
-    }
-    setUploading(true);
-    const payload = {
-      fileName: file.name,
-      fileSize: file.size,
-      fileType: file.type,
-      description,
-      confidential,
-      signMetadata,
-      uploadedAt: new Date().toISOString()
-    };
 
-    try {
-      if (typeof onUpload === 'function') {
-        await onUpload(payload);
-      } else {
-        // Mock upload: log payload
-        console.log('[EvidenceUploadModal] mock upload payload:', payload);
-        await new Promise((r) => setTimeout(r, 900));
+  const handleUpload = async () => {
+  if (!file) {
+    alert('Vui lòng chọn file trước khi upload.');
+    return;
+  }
+
+  setUploading(true);
+
+  // Kiểm tra wallet (nếu muốn require signer khi sign metadata)
+  const shouldSign = signMetadata === true;
+
+  let signature = null;
+  try {
+    if (shouldSign) {
+      if (!walletClient || !address) {
+        alert('Wallet chưa kết nối. Vui lòng kết nối wallet để sign metadata.');
+        setUploading(false);
+        return;
       }
-    } catch (err) {
-      console.error('Upload error', err);
-    } finally {
-      setUploading(false);
-      // reset form
-      setFile(null);
-      setDescription('');
-      setConfidential(true);
-      setSignMetadata(false);
-      onClose?.();
+
+      // chuẩn bị metadata cho signature; lưu ý: nếu bạn có client-side file hash, nên tính và gửi ipfsHash thực tế
+      const metadata = {
+        ipfsHash: '', // Nếu đã có ipfs hash phía client thì đặt ở đây; nếu không, backend có thể accept signature without ipfsHash
+        disputeId: typeof disputeId !== 'undefined' ? disputeId : '', // đảm bảo component nhận prop disputeId
+        timestamp: new Date().toISOString()
+      };
+
+      // Sử dụng signatureUtils (viem WalletClient)
+      signature = await signatureUtils.signEvidenceMetadata(walletClient, address, metadata);
     }
-  };
+
+    // Build FormData (multipart)
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('uploaderAddress', address || '');
+    formData.append('description', description || '');
+    formData.append('confidential', confidential ? 'true' : 'false');
+    if (signature) formData.append('signature', signature);
+
+    // Gọi API uploadEvidence
+    // NOTE: component cần prop `disputeId`; đảm bảo truyền khi dùng component
+    const targetDisputeId = typeof disputeId !== 'undefined' ? disputeId : '';
+    if (!targetDisputeId) {
+      console.warn('EvidenceUploadModal: disputeId not provided; uploading to anonymous endpoint may fail.');
+    }
+
+    const res = await uploadEvidence(targetDisputeId, formData);
+    console.log('[EvidenceUploadModal] uploadEvidence response:', res);
+
+  } catch (err) {
+    console.error('Upload error', err);
+    alert('Upload failed. Kiểm tra console để biết chi tiết.');
+  } finally {
+    setUploading(false);
+    // reset form
+    setFile(null);
+    setDescription('');
+    setConfidential(true);
+    setSignMetadata(false);
+    onClose?.();
+  }
+};
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">

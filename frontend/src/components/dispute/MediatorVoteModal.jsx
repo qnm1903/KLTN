@@ -1,8 +1,7 @@
-// frontend/src/components/dispute/MediatorVoteModal.jsx
-// Modal cho Mediator thực hiện Vote (yêu cầu EIP-712 signature note).
-// Comment bằng tiếng Việt; giữ nguyên các thuật ngữ IT/Web3 (Modal, EIP-712, payload, wallet).
-
 import React, { useState } from 'react';
+import { useAccount, useWalletClient } from 'wagmi';
+import { submitVote } from '../../services/dispute.service.js';
+import signatureUtils from '../../utils/signatureUtils.js';
 
 /**
  * Props:
@@ -15,35 +14,64 @@ export default function MediatorVoteModal({ isOpen, onClose, onSubmit, mediatorA
   const [choice, setChoice] = useState('RELEASE_TO_BUYER');
   const [justification, setJustification] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const { address } = useAccount();
+  const { data: walletClient } = useWalletClient();
 
   if (!isOpen) return null;
 
-  const handleSignAndSubmit = async () => {
-    setSubmitting(true);
-    const payload = {
-      mediator: mediatorAddress || '0xMediatorMock',
-      vote: choice,
-      justification,
-      timestamp: new Date().toISOString(),
-      // mock signature placeholder to simulate EIP-712
-      signature: '0xMockEIP712Signature'
-    };
 
-    try {
-      if (typeof onSubmit === 'function') {
-        await onSubmit(payload);
-      } else {
-        console.log('[MediatorVoteModal] mock submit payload:', payload);
-        await new Promise((r) => setTimeout(r, 900));
-      }
-    } catch (err) {
-      console.error('Vote submit error', err);
-    } finally {
-      setSubmitting(false);
-      onClose?.();
-    }
+  const handleSignAndSubmit = async () => {
+  setSubmitting(true);
+
+  // Validate wallet & account
+  if (!walletClient || !address) {
+    alert('Wallet chưa kết nối. Vui lòng kết nối wallet để ký và submit vote.');
+    setSubmitting(false);
+    return;
+  }
+
+  // Ensure mediatorAddress provided (prop)
+  const signerAddr = mediatorAddress || address;
+
+  const votePayload = {
+    mediator: signerAddr,
+    vote: choice,
+    justification,
+    evidenceRefs: [], // nếu có evidence selection, gắn vào đây
+    timestamp: new Date().toISOString(),
+    disputeId: typeof disputeId !== 'undefined' ? disputeId : undefined,
+    verifyingContract: undefined // nếu bạn có dispute contract address, set ở đây
   };
 
+  try {
+    // Tạo EIP-712 signature bằng signatureUtils (viem WalletClient)
+    const signature = await signatureUtils.signVotePayload(walletClient, address, signerAddr, votePayload);
+
+    // Gắn signature vào payload gửi về backend
+    const submitPayload = {
+      mediator: signerAddr,
+      vote: choice,
+      justification,
+      evidenceRefs: votePayload.evidenceRefs,
+      timestamp: votePayload.timestamp,
+      signature
+    };
+
+    // Gọi API submitVote
+    const targetDisputeId = typeof disputeId !== 'undefined' ? disputeId : '';
+    if (!targetDisputeId) {
+      console.warn('MediatorVoteModal: disputeId not provided; submitVote may fail.');
+    }
+    const res = await submitVote(targetDisputeId, submitPayload);
+    console.log('[MediatorVoteModal] submitVote response:', res);
+  } catch (err) {
+    console.error('Vote submit failed', err);
+    alert('Vote submit thất bại. Kiểm tra console để biết chi tiết.');
+  } finally {
+    setSubmitting(false);
+    onClose?.();
+  }
+};
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/40" onClick={() => !submitting && onClose?.()} />

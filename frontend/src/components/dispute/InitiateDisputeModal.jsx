@@ -1,7 +1,6 @@
-// frontend/src/components/dispute/InitiateDisputeModal.jsx
-// Modal để user khởi tạo Dispute.
-// Comment bằng tiếng Việt; giữ nguyên các thuật ngữ IT/Web3 (Modal, UI/UX, payload, wallet).
 import React, { useState } from 'react';
+import { useAccount, useWalletClient } from 'wagmi';
+import { createDispute } from '../../services/dispute.service.js';
 
 /**
  * Props:
@@ -13,34 +12,46 @@ export default function InitiateDisputeModal({ isOpen, onClose, onSubmit }) {
   const [reason, setReason] = useState('PaymentIssue');
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const { address } = useAccount();
+  const { data: walletClient } = useWalletClient(); 
 
   if (!isOpen) return null;
 
   const handleSubmit = async () => {
-    setSubmitting(true);
-    const payload = {
-      reason,
-      description,
-      createdAt: new Date().toISOString()
-    };
+  setSubmitting(true);
 
-    // Nếu có onSubmit prop, gọi nó; nếu không, console.log (mock handler)
-    try {
-      if (typeof onSubmit === 'function') {
-        await onSubmit(payload);
-      } else {
-        // Mock submission: chỉ log payload
-        console.log('[InitiateDisputeModal] mock submit payload:', payload);
-        // giả lập delay
-        await new Promise((r) => setTimeout(r, 800));
-      }
-    } catch (err) {
-      console.error('Submit error', err);
-    } finally {
-      setSubmitting(false);
-      if (typeof onClose === 'function') onClose();
-    }
+  // Validate wallet connection (yêu cầu wallet cho hành động createDispute theo policy)
+  if (!walletClient || !address) {
+    alert('Wallet chưa kết nối. Vui lòng kết nối wallet trước khi tạo dispute.');
+    setSubmitting(false);
+    return;
+  }
+
+  // Lấy escrowId nếu component nhận prop; nếu không có, gửi empty string (backend có thể validate)
+  // Nếu bạn có `escrowId` trong props, đảm bảo component nhận prop đó.
+  const escrowId = typeof props !== 'undefined' && props.escrowId ? props.escrowId : '';
+
+  const payload = {
+    escrowId,
+    initiatorAddress: address,
+    reason,
+    description,
+    evidenceRefs: []
   };
+
+  try {
+    // Gọi service để tạo dispute (REST API)
+    const res = await createDispute(payload);
+    // Optionally, bạn có thể show res hoặc route tới detail page
+    console.log('[InitiateDisputeModal] createDispute response:', res);
+  } catch (err) {
+    console.error('createDispute error', err);
+    alert('Tạo dispute thất bại. Kiểm tra console để biết chi tiết.');
+  } finally {
+    setSubmitting(false);
+    if (typeof onClose === 'function') onClose();
+  }
+};
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">

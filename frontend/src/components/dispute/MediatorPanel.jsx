@@ -7,10 +7,12 @@ import { acceptMediator } from '../../services/dispute.service.js';
 
 /**
  * MediatorPanel
- * - Đọc mediatorsListAtom và voteTallyAtom.
- * - Render list 7 mediators với status badge.
- * - Bao gồm VotingProgressBar inline (7 ticks, threshold marker tại 5).
+ * - Hiển thị danh sách 7 mediators với giao diện Dark Cyber / Glassmorphism.
+ * - KHÔNG thay đổi logic Web3 (useWalletClient / signTypedData) hay Jotai state logic.
+ * - Chỉ thay đổi UI: màu sắc, background, button style, badges, progress bar.
+ *
  */
+
 const MediatorPanel = () => {
   const { address } = useAccount();
   const { data: walletClient } = useWalletClient();
@@ -27,6 +29,7 @@ const MediatorPanel = () => {
     threshold: 5
   };
 
+  // --- PRESERVE LOGIC: handleMediatorDecision (KHÔNG SỬA) ---
   const handleMediatorDecision = async (mediatorAddr, action) => {
     if (!mediatorAddr || !walletClient || !address) return;
     setProcessingMediator(mediatorAddr);
@@ -58,6 +61,7 @@ const MediatorPanel = () => {
       setProcessingMediator(null);
     }
   };
+  // --- END PRESERVE LOGIC ---
 
   // Ensure 7 slots for UI
   const padded = Array.from({ length: 7 }).map((_, i) => mediators[i] || null).map((m, idx) =>
@@ -76,10 +80,10 @@ const MediatorPanel = () => {
   );
 
   return (
-    <div className="bg-white rounded-lg shadow p-4 space-y-4">
+    <div className="bg-slate-800/50 backdrop-blur-md border border-slate-700/50 rounded-xl shadow-xl shadow-black/40 p-4 space-y-4">
       <div className="flex items-center justify-between">
-        <h4 className="text-sm font-semibold text-gray-700">Assigned Mediators (7)</h4>
-        <div className="text-xs text-gray-500">Threshold: {tally.threshold || 5}</div>
+        <h4 className="text-sm font-semibold text-slate-200">Assigned Mediators (7)</h4>
+        <div className="text-xs text-slate-400">Threshold: {tally.threshold || 5}</div>
       </div>
 
       {/* Mediator list */}
@@ -87,29 +91,37 @@ const MediatorPanel = () => {
         {padded.map((m, i) => (
           <li key={`${m.address}-${i}`} className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 bg-gray-50 rounded-md flex items-center justify-center text-sm font-medium text-gray-700">
+              <div className="w-10 h-10 bg-slate-700 rounded-md flex items-center justify-center text-sm font-medium text-slate-300">
                 {m.address && m.address.startsWith('0x') ? m.address.slice(2, 4).toUpperCase() : `M${i + 1}`}
               </div>
               <div className="flex flex-col">
-                <div className="text-sm text-gray-800">{truncateAddr(m.address)}</div>
-                <div className="text-xs text-gray-500">{m.score ? `Score ${m.score}` : 'No score'}</div>
+                <div className="text-sm text-slate-200">{truncateAddr(m.address)}</div>
+                <div className="text-xs text-slate-400">{m.score ? `Score ${m.score}` : 'No score'}</div>
               </div>
             </div>
 
             <div className="flex items-center space-x-3">
               {address && m.address && address.toLowerCase() === m.address.toLowerCase() && m.status === MEDIATOR_STATUS.ASSIGNED ? (
                 <div className="flex items-center space-x-2">
-                  <button onClick={() => handleMediatorDecision(m.address, 'ACCEPT')} disabled={processingMediator === m.address} className="px-3 py-1 rounded-md bg-green-600 text-white text-sm hover:bg-green-700 disabled:opacity-50">
+                  <button
+                    onClick={() => handleMediatorDecision(m.address, 'ACCEPT')}
+                    disabled={processingMediator === m.address}
+                    className="px-3 py-1 rounded-md bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 text-sm hover:bg-emerald-500/40 disabled:opacity-50"
+                  >
                     {processingMediator === m.address ? '...' : 'Accept'}
                   </button>
-                  <button onClick={() => handleMediatorDecision(m.address, 'DECLINE')} disabled={processingMediator === m.address} className="px-3 py-1 rounded-md bg-red-100 text-red-800 text-sm hover:bg-red-200 disabled:opacity-50">
+                  <button
+                    onClick={() => handleMediatorDecision(m.address, 'DECLINE')}
+                    disabled={processingMediator === m.address}
+                    className="px-3 py-1 rounded-md bg-rose-500/20 text-rose-400 border border-rose-500/50 text-sm hover:bg-rose-500/40 disabled:opacity-50"
+                  >
                     {processingMediator === m.address ? '...' : 'Decline'}
                   </button>
                 </div>
               ) : (
                 <>
                   <StatusBadge status={m.status} />
-                  <div className="text-xs text-gray-400">{m.votedAt ? new Date(m.votedAt).toLocaleString() : ''}</div>
+                  <div className="text-xs text-slate-400">{m.votedAt ? new Date(m.votedAt).toLocaleString() : ''}</div>
                 </>
               )}
             </div>
@@ -125,21 +137,20 @@ const MediatorPanel = () => {
   );
 };
 
-/* StatusBadge component */
+/* StatusBadge component - dark theme */
 const StatusBadge = ({ status }) => {
   const map = {
-    [MEDIATOR_STATUS.ASSIGNED]: { label: 'Assigned', cls: 'bg-gray-100 text-gray-800' },
-    [MEDIATOR_STATUS.ACCEPTED]: { label: 'Accepted', cls: 'bg-blue-100 text-blue-800' },
-    [MEDIATOR_STATUS.VOTED]: { label: 'Voted', cls: 'bg-green-100 text-green-800' },
-    [MEDIATOR_STATUS.DECLINED]: { label: 'Declined', cls: 'bg-red-100 text-red-800' },
-    [MEDIATOR_STATUS.NO_RESPONSE]: { label: 'No response', cls: 'bg-yellow-100 text-yellow-800' }
+    [MEDIATOR_STATUS.ASSIGNED]: { label: 'Assigned', cls: 'bg-slate-700/40 text-slate-200' },
+    [MEDIATOR_STATUS.ACCEPTED]: { label: 'Accepted', cls: 'bg-emerald-700/30 text-emerald-300' },
+    [MEDIATOR_STATUS.VOTED]: { label: 'Voted', cls: 'bg-amber-600/30 text-amber-300' },
+    [MEDIATOR_STATUS.DECLINED]: { label: 'Declined', cls: 'bg-rose-700/30 text-rose-300' },
+    [MEDIATOR_STATUS.NO_RESPONSE]: { label: 'No response', cls: 'bg-yellow-700/30 text-yellow-300' }
   };
   const item = map[status] || map[MEDIATOR_STATUS.ASSIGNED];
-  return <span className={`px-3 py-1 rounded-full text-xs font-medium ${item.cls}`}>{item.label}</span>;
+  return <span className={`px-3 py-1 rounded-full text-xs font-medium ${item.cls} border border-white/5`}>{item.label}</span>;
 };
 
-/* VotingProgressBar inline */
-/* - Displays 7 ticks, fills according to tally counts in order: RELEASE_TO_BUYER, RETURN_TO_SELLER, SPLIT, OTHER */
+/* VotingProgressBar inline - dark theme colors */
 const VotingProgressBar = ({ tally }) => {
   const TOTAL = 7;
   const order = ['RELEASE_TO_BUYER', 'RETURN_TO_SELLER', 'SPLIT', 'OTHER'];
@@ -154,7 +165,14 @@ const VotingProgressBar = ({ tally }) => {
 
   const slots = Array.from({ length: TOTAL }).map((_, i) => {
     const outcome = filled[i] || null;
-    const color = outcome === 'RELEASE_TO_BUYER' ? 'bg-green-500' : outcome === 'RETURN_TO_SELLER' ? 'bg-red-500' : outcome === 'SPLIT' ? 'bg-amber-500' : 'bg-gray-300';
+    const color =
+      outcome === 'RELEASE_TO_BUYER'
+        ? 'bg-emerald-500'
+        : outcome === 'RETURN_TO_SELLER'
+        ? 'bg-rose-500'
+        : outcome === 'SPLIT'
+        ? 'bg-amber-500'
+        : 'bg-slate-600';
     const filledFlag = !!outcome;
     return { color, filled: filledFlag };
   });
@@ -164,12 +182,12 @@ const VotingProgressBar = ({ tally }) => {
   return (
     <div className="w-full">
       <div className="flex items-center justify-between mb-2">
-        <div className="text-sm text-gray-600">Voting progress</div>
-        <div className="text-sm text-gray-600">{tally.totalVotes}/{TOTAL} votes</div>
+        <div className="text-sm text-slate-200">Voting progress</div>
+        <div className="text-sm text-slate-200">{tally.totalVotes}/{TOTAL} votes</div>
       </div>
 
       <div className="relative w-full h-12 flex items-center">
-        <div className="absolute left-4 right-4 h-2 bg-gray-100 rounded-full" />
+        <div className="absolute left-4 right-4 h-2 bg-slate-700/40 rounded-full" />
         <div
           className="absolute top-1.5 h-8 w-0.5 bg-indigo-400"
           style={{ left: `${thresholdPosPercent}%`, transform: 'translateX(-50%)' }}
@@ -179,16 +197,16 @@ const VotingProgressBar = ({ tally }) => {
         <div className="relative z-10 flex items-center justify-between w-full px-4">
           {slots.map((s, idx) => (
             <div key={idx} className="flex flex-col items-center">
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${s.color} ${s.filled ? 'shadow-md' : 'opacity-80'}`}>
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${s.color} ${s.filled ? 'shadow-[0_6px_18px_rgba(0,0,0,0.5)]' : 'opacity-70'}`}>
                 {s.filled ? (
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 00-1.414 0L8 12.586 4.707 9.293a1 1 0 10-1.414 1.414l4 4a1 1 0 001.414 0l8-8a1 1 0 000-1.414z" clipRule="evenodd" />
                   </svg>
                 ) : (
-                  <div className="w-2 h-2 rounded-full bg-white/60" />
+                  <div className="w-2 h-2 rounded-full bg-white/30" />
                 )}
               </div>
-              <div className="mt-2 text-xs text-gray-500">#{idx + 1}</div>
+              <div className="mt-2 text-xs text-slate-400">#{idx + 1}</div>
             </div>
           ))}
         </div>
@@ -196,11 +214,11 @@ const VotingProgressBar = ({ tally }) => {
 
       {/* Legend */}
       <div className="mt-3 flex items-center space-x-4">
-        <Legend color="bg-green-500" label="Release to Buyer" />
-        <Legend color="bg-red-500" label="Return to Seller" />
+        <Legend color="bg-emerald-500" label="Release to Buyer" />
+        <Legend color="bg-rose-500" label="Return to Seller" />
         <Legend color="bg-amber-500" label="Split" />
-        <Legend color="bg-gray-300" label="Other" />
-        <div className="ml-auto text-sm text-gray-500">Threshold: 5 votes</div>
+        <Legend color="bg-slate-600" label="Other" />
+        <div className="ml-auto text-sm text-slate-400">Threshold: 5 votes</div>
       </div>
     </div>
   );
@@ -209,7 +227,7 @@ const VotingProgressBar = ({ tally }) => {
 const Legend = ({ color, label }) => (
   <div className="flex items-center space-x-2">
     <div className={`w-3 h-3 rounded ${color}`} />
-    <div className="text-xs text-gray-600">{label}</div>
+    <div className="text-xs text-slate-400">{label}</div>
   </div>
 );
 

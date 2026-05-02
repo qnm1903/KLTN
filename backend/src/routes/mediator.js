@@ -239,6 +239,65 @@ router.get('/pool-status', async (req, res) => {
 });
 
 /**
+ * @route   GET /api/mediator/random-result/:escrowId
+ * @desc    Get random mediator selection result from database
+ * @access  Private (authenticated)
+ */
+router.get('/random-result/:escrowId', authMiddleware, async (req, res) => {
+  try {
+    const { escrowId } = req.params;
+
+    // Generate escrowId bytes32 from string if needed
+    const escrowIdBytes32 = ethers.isBytesLike(escrowId) ? escrowId : ethers.keccak256(ethers.toUtf8Bytes(escrowId));
+
+    // Find escrow by chainEscrowId
+    const escrow = await prisma.escrow.findFirst({
+      where: { chainEscrowId: escrowIdBytes32 },
+      select: { id: true, status: true }
+    });
+
+    if (!escrow) {
+      return res.status(404).json({ error: 'Escrow not found' });
+    }
+
+    // Get mediators from EscrowMediator table
+    const escrowMediators = await prisma.escrowMediator.findMany({
+      where: { escrowId: escrow.id },
+      include: {
+        mediator: {
+          select: { walletAddress: true }
+        }
+      },
+      orderBy: { slot: 'asc' }
+    });
+
+    if (escrowMediators.length === 0) {
+      return res.json({
+        success: true,
+        status: 'pending',
+        message: 'Random selection in progress'
+      });
+    }
+
+    const mediators = escrowMediators.map(em => ({
+      address: em.mediator.walletAddress,
+      slot: em.slot
+    }));
+
+    res.json({
+      success: true,
+      status: 'completed',
+      escrowId: escrow.id,
+      chainEscrowId: escrowIdBytes32,
+      mediators
+    });
+  } catch (error) {
+    console.error('[Get Random Result Error]:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * @route   GET /api/mediator/all
  * @desc    Get all mediators from contract
  * @access  Public

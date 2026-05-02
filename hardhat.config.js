@@ -19,7 +19,7 @@ module.exports = {
     hardhat: {
       chainId: 31337,
       // Optional: for VRF testing with real coordinator, uncomment and set env
-      // forking: { url: process.env.MAINNET_RPC_URL || process.env.SEPOLIA_RPC_URL || '' }
+      // forking: { url: process.env.SEPOLIA_RPC_URL || '' }
     },
     sepolia: {
       url: process.env.SEPOLIA_RPC_URL || "",

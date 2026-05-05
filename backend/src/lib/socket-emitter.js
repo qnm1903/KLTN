@@ -5,9 +5,22 @@
  */
 
 let ioInstance = null;
+const queuedEvents = [];
 
 export function setIO(io) {
   ioInstance = io;
+  // Flush queued events when IO becomes available
+  if (ioInstance && queuedEvents.length > 0) {
+    try {
+      for (const ev of queuedEvents) {
+        ioInstance.to(ev.escrowId).emit(ev.eventName, ev.data);
+      }
+      queuedEvents.length = 0;
+      console.info('[Socket] Flushed queued events after IO initialization');
+    } catch (err) {
+      console.error('[Socket] Failed to flush queued events:', err?.message || err);
+    }
+  }
 }
 
 export function getIO() {
@@ -16,10 +29,16 @@ export function getIO() {
 
 export function emitToEscrow(escrowId, eventName, data) {
   if (!ioInstance) {
-    console.warn('[Socket] IO not initialized, cannot emit event:', eventName);
+    console.warn('[Socket] IO not initialized, queueing event:', eventName);
+    // Queue and return so DB writes can continue; will be flushed when IO is set
+    queuedEvents.push({ escrowId, eventName, data });
     return;
   }
-  ioInstance.to(escrowId).emit(eventName, data);
+  try {
+    ioInstance.to(escrowId).emit(eventName, data);
+  } catch (err) {
+    console.error('[Socket] Failed to emit event:', eventName, err?.message || err);
+  }
 }
 
 export function emitDisputeCreated(escrowId, payload) {

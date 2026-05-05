@@ -9,8 +9,9 @@ import signatureUtils from '../../utils/signatureUtils.js';
  * - onClose: function
  * - onSubmit: optional async function(payload) - nếu provided sẽ được gọi khi submit
  * - mediatorAddress: optional string - hiển thị address của mediator đang vote
+ * - disputeId: optional string - dispute id hiện tại
  */
-export default function MediatorVoteModal({ isOpen, onClose, onSubmit, mediatorAddress = null }) {
+export default function MediatorVoteModal({ isOpen, onClose, onSubmit, mediatorAddress = null, disputeId = '' }) {
   const [choice, setChoice] = useState('RELEASE_TO_BUYER');
   const [justification, setJustification] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -39,7 +40,7 @@ export default function MediatorVoteModal({ isOpen, onClose, onSubmit, mediatorA
     justification,
     evidenceRefs: [], // nếu có evidence selection, gắn vào đây
     timestamp: new Date().toISOString(),
-    disputeId: typeof disputeId !== 'undefined' ? disputeId : undefined,
+    disputeId,
     verifyingContract: undefined // nếu bạn có dispute contract address, set ở đây
   };
 
@@ -58,11 +59,12 @@ export default function MediatorVoteModal({ isOpen, onClose, onSubmit, mediatorA
     };
 
     // Gọi API submitVote
-    const targetDisputeId = typeof disputeId !== 'undefined' ? disputeId : '';
+    const targetDisputeId = disputeId;
     if (!targetDisputeId) {
       console.warn('MediatorVoteModal: disputeId not provided; submitVote may fail.');
     }
     const res = await submitVote(targetDisputeId, submitPayload);
+    onSubmit?.(res);
     console.log('[MediatorVoteModal] submitVote response:', res);
   } catch (err) {
     console.error('Vote submit failed', err);

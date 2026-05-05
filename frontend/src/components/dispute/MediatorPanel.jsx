@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { useAccount, useWalletClient } from 'wagmi';
 import { useAtomValue, useSetAtom } from 'jotai';
 import { mediatorsListAtom, voteTallyAtom, currentDisputeAtom } from '../../store/disputeAtoms.js';

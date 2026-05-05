@@ -214,22 +214,13 @@ async function handleRandomMediatorSelected(prisma, escrowId, mediators, logger)
       const addr = normalizeAddress(mediators[i]);
       if (!addr) continue;
 
-      let user = await prisma.user.findFirst({
+      // Ensure the on-chain address exists as a User (idempotent)
+      const user = await prisma.user.upsert({
         where: { walletAddress: addr },
+        update: { isMediator: true, role: 'MEDIATOR' },
+        create: { walletAddress: addr, role: 'MEDIATOR', isMediator: true },
         select: { id: true }
       });
-
-      // SỬA LỖI 1 (Bóng ma): Tự động tạo user nếu Chainlink trả về ví chưa có trong DB
-      if (!user) {
-        logger?.info?.(`[mediator-pool] Auto-creating missing user for address: ${addr}`);
-        user = await prisma.user.create({
-          data: {
-            walletAddress: addr,
-            role: 'mediator' // Thêm các trường default khác nếu Schema bắt buộc
-          },
-          select: { id: true }
-        });
-      }
 
       records.push({
         escrowId: escrow.id,
@@ -241,15 +232,29 @@ async function handleRandomMediatorSelected(prisma, escrowId, mediators, logger)
     if (records.length > 0) {
       logger?.info?.(`[mediator-pool] Saving ${records.length} mediators to SQLite...`);
       
-      // SỬA LỖI 2 (SQLite sập): Xóa createMany có skipDuplicates, dùng vòng lặp try/catch
+      // SỬA LỖI 2 (SQLite sập): Upsert by unique (escrowId, slot) để idempotent
       for (const record of records) {
         try {
-          await prisma.escrowMediator.create({ data: record });
+          await prisma.escrowMediator.upsert({
+            where: {
+              escrowId_slot: {
+                escrowId: record.escrowId,
+                slot: record.slot
+              }
+            },
+            update: {
+              mediatorId: record.mediatorId
+            },
+            create: record
+          });
+          logger?.info?.(`[mediator-pool] Upserted escrowMediator slot ${record.slot} for escrow ${record.escrowId}`);
         } catch (error) {
-          // Mã P2002 là lỗi Unique constraint (đã tồn tại), ta chủ động bỏ qua
-          if (error.code !== 'P2002') {
-            logger?.error?.(`[mediator-pool] Database error saving mediator: ${error.message}`);
+          // Ignore duplicate unique errors from races; surface others
+          if (error.code && error.code === 'P2002') {
+            logger?.warn?.(`[mediator-pool] Duplicate escrowMediator slot ${record.slot} for escrow ${record.escrowId}, skipping`);
+            continue;
           }
+          logger?.error?.(`[mediator-pool] Database error saving mediator: ${error.message || error}`);
         }
       }
       logger?.info?.(`[mediator-pool] Successfully saved mediators for escrow ${escrow.id}`);

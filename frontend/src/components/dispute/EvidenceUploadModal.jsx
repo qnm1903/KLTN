@@ -8,8 +8,9 @@ import signatureUtils from '../../utils/signatureUtils.js';
  * - isOpen: boolean
  * - onClose: function
  * - onUpload: optional function(payload) - nếu provided sẽ gọi khi upload
+ * - disputeId: optional string - dispute id hiện tại
  */
-export default function EvidenceUploadModal({ isOpen, onClose, onUpload }) {
+export default function EvidenceUploadModal({ isOpen, onClose, onUpload, disputeId = '' }) {
   const [file, setFile] = useState(null);
   const [description, setDescription] = useState('');
   const [confidential, setConfidential] = useState(true);
@@ -51,8 +52,9 @@ export default function EvidenceUploadModal({ isOpen, onClose, onUpload }) {
       formData.append('description', description || '');
       formData.append('confidential', confidential ? 'true' : 'false');
 
-      const targetDisputeId = typeof disputeId !== 'undefined' ? disputeId : '';
+      const targetDisputeId = disputeId;
       const uploadRes = await uploadEvidence(targetDisputeId, formData);
+      onUpload?.(uploadRes);
       console.log('[EvidenceUploadModal] upload result:', uploadRes);
 
       // 2. Ký ví sau khi ĐÃ CÓ ipfsHash (Vá lỗ hổng Cốt lõi 1)

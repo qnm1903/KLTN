@@ -7,8 +7,9 @@ import { createDispute } from '../../services/dispute.service.js';
  * - isOpen: boolean - hiển thị Modal hay không
  * - onClose: function - callback khi đóng Modal
  * - onSubmit: optional function(payload) - nếu provided sẽ được gọi khi submit (mock handler nếu không có)
+ * - escrowId: optional string - escrow id hiện tại
  */
-export default function InitiateDisputeModal({ isOpen, onClose, onSubmit }) {
+export default function InitiateDisputeModal({ isOpen, onClose, onSubmit, escrowId = '' }) {
   const [reason, setReason] = useState('PaymentIssue');
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -27,10 +28,6 @@ export default function InitiateDisputeModal({ isOpen, onClose, onSubmit }) {
     return;
   }
 
-  // Lấy escrowId nếu component nhận prop; nếu không có, gửi empty string (backend có thể validate)
-  // Nếu bạn có `escrowId` trong props, đảm bảo component nhận prop đó.
-  const escrowId = typeof props !== 'undefined' && props.escrowId ? props.escrowId : '';
-
   const payload = {
     escrowId,
     initiatorAddress: address,
@@ -42,6 +39,7 @@ export default function InitiateDisputeModal({ isOpen, onClose, onSubmit }) {
   try {
     // Gọi service để tạo dispute (REST API)
     const res = await createDispute(payload);
+    onSubmit?.(res);
     // Optionally, bạn có thể show res hoặc route tới detail page
     console.log('[InitiateDisputeModal] createDispute response:', res);
   } catch (err) {

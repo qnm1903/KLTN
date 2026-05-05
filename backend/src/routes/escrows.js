@@ -1,5 +1,6 @@
 import express from 'express';
 import prisma from '../lib/prisma.js';
+import { ethers } from 'ethers';
 import { authMiddleware } from '../middleware/auth.js';
 import { canTransitionStatus, normalizeEscrowStatus } from '../lib/escrow-status.js';
 import { buildDisputeLifecycleData, DISPUTE_PHASES } from '../lib/dispute-lifecycle.js';
@@ -266,6 +267,17 @@ router.get('/:id', authMiddleware, async (req, res) => {
           },
           orderBy: { slot: 'asc' }
         },
+        disputes: {
+          include: {
+            mediators: {
+              include: {
+                mediator: { select: { id: true, walletAddress: true, name: true } }
+              },
+              orderBy: { createdAt: 'asc' }
+            }
+          },
+          orderBy: { createdAt: 'desc' }
+        },
         evidences: {
           include: {
             uploader: { select: { id: true, walletAddress: true, name: true } }
@@ -299,6 +311,10 @@ router.patch('/:id/status', authMiddleware, async (req, res) => {
   try {
     const { status, chainEscrowId, contractAddress, pkAggBsX, pkAggBsY, pkAggBmX, pkAggBmY, pkAggSmX, pkAggSmY, reason } = req.body;
     const isProvided = (value) => value !== undefined && value !== null;
+    // Normalize chainEscrowId if caller provided a UUID string — convert to bytes32
+    const normalizedChainEscrowId = isProvided(chainEscrowId)
+      ? (ethers.isBytesLike(chainEscrowId) ? chainEscrowId : ethers.keccak256(ethers.toUtf8Bytes(chainEscrowId)))
+      : undefined;
     const enforceStatusTransitions = String(process.env.ENFORCE_ESCROW_STATUS_TRANSITIONS || 'true').toLowerCase() === 'true';
     const allowParticipantTerminalPatch = String(process.env.ALLOW_PARTICIPANT_TERMINAL_STATUS_PATCH || 'false').toLowerCase() === 'true';
     const nextStatus = status ? normalizeEscrowStatus(status) : null;
@@ -346,7 +362,7 @@ router.patch('/:id/status', authMiddleware, async (req, res) => {
 
       const updateData = {};
       if (nextStatus) updateData.status = nextStatus;
-      if (isProvided(chainEscrowId)) updateData.chainEscrowId = chainEscrowId;
+      if (isProvided(chainEscrowId)) updateData.chainEscrowId = normalizedChainEscrowId;
       if (isProvided(contractAddress)) updateData.contractAddress = contractAddress;
       if (isProvided(pkAggBsX)) updateData.pkAggBsX = pkAggBsX;
       if (isProvided(pkAggBsY)) updateData.pkAggBsY = pkAggBsY;
@@ -404,7 +420,7 @@ router.patch('/:id/status', authMiddleware, async (req, res) => {
             reason: reason || null,
             metadata: {
               participantRole,
-              chainEscrowId: isProvided(chainEscrowId) ? chainEscrowId : null,
+              chainEscrowId: isProvided(chainEscrowId) ? normalizedChainEscrowId : null,
               contractAddress: isProvided(contractAddress) ? contractAddress : null
             }
           }

@@ -31,7 +31,7 @@ const VRFLoadingState = ({ requestId = null, txHash = null, estimatedSeconds = 9
             Waiting for Chainlink VRF to select Mediators
           </h3>
           <p className="text-sm text-gray-500 mt-2 max-w-xl">
-            Hệ thống đang chờ callback on-chain từ Chainlink VRF để chọn 7 Mediators cho dispute. Quá trình này có thể mất một vài phút.
+            Hệ thống đang chờ callback on-chain từ Chainlink VRF để chọn 5 Mediators cho dispute. Quá trình này có thể mất một vài phút.
           </p>
         </div>
 

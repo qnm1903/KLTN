@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/interfaces/IVRFCoordinatorV2Plus.sol";
 import "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
@@ -96,6 +97,18 @@ contract MediatorPool is
         _grantRole(ADMIN_ROLE, msg.sender);
         
         isTestnet = block.chainid == 11155111;
+    }
+
+    function initializeVrfConfig(address _vrfCoordinator) external reinitializer(2) onlyRole(ADMIN_ROLE) {
+        require(_vrfCoordinator != address(0), "VRF coordinator cannot be zero");
+        s_vrfCoordinator = IVRFCoordinatorV2Plus(_vrfCoordinator);
+        emit CoordinatorSet(_vrfCoordinator);
+    }
+
+    function updateVrfCoordinator(address _vrfCoordinator) external onlyRole(ADMIN_ROLE) {
+        require(_vrfCoordinator != address(0), "VRF coordinator cannot be zero");
+        s_vrfCoordinator = IVRFCoordinatorV2Plus(_vrfCoordinator);
+        emit CoordinatorSet(_vrfCoordinator);
     }
     
     function _authorizeUpgrade(address newImplementation) internal override onlyRole(ADMIN_ROLE) {}

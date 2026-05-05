@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useAtomValue, useSetAtom } from 'jotai';
 import { useConnection } from 'wagmi';
 
@@ -290,8 +290,17 @@ export default function EscrowDetail() {
           setEscrow(prev => ({ ...prev, status: 'LOCKED' }));
         })
         .catch(err => {
-          console.error("Lỗi đồng bộ DB:", err);
-          addLog({ message: "Lỗi đồng bộ DB, nhưng tiền đã vào Smart Contract.", type: 'warning' });
+          // --- BẮT ĐẦU XỬ LÝ LỖI 409 (RACE CONDITION) ---
+          if (err.response?.status === 409) {
+            console.log('✅ Worker đã cập nhật DB thành LOCKED trước, bỏ qua lỗi Conflict.');
+            addLog({ message: "Worker đã đồng bộ trạng thái, tiền đã vào Smart Contract an toàn.", type: 'info' });
+            // Cập nhật lại UI state vì thực tế DB đã được Worker khóa thành công
+            setEscrow(prev => ({ ...prev, status: 'LOCKED' }));
+          } else {
+            // --- CÁC LỖI KHÁC VẪN BÁO BÌNH THƯỜNG ---
+            console.error("Lỗi đồng bộ DB:", err);
+            addLog({ message: "Lỗi đồng bộ DB, nhưng tiền đã vào Smart Contract.", type: 'warning' });
+          }
         });
     }
   }, [isConfirmed, escrow?.status, selectedAction, escrowId, addLog]);
@@ -482,6 +491,48 @@ export default function EscrowDetail() {
       } else {
         addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
       }
+    }
+  };
+
+  const navigate = useNavigate();
+  const { id } = useParams();
+  // Hàm xử lý kích hoạt luồng Dispute
+  const handleRaiseDispute = async () => {
+    try {
+      // 1. Lấy lý do từ người dùng
+      const reasonInput = window.prompt("Vui lòng nhập lý do tạo tranh chấp:", "Sản phẩm không đúng như mô tả");
+      if (reasonInput === null) return; 
+      const reason = reasonInput.trim() || "Không cung cấp lý do cụ thể";
+
+      addLog({ message: 'Đang khởi tạo hồ sơ Dispute...', type: 'info' });
+
+      // 2. BƯỚC 1: Lưu thông tin Dispute vào Database
+      // Lưu ý: api instance đã có sẵn tiền tố /api nên chỉ cần truyền /disputes
+      const response = await api.post('/disputes', { 
+        escrowId: id, 
+        reason: reason 
+      });
+      
+      const disputeId = response.data?.id || response.data?.disputeId;
+
+      addLog({ message: 'Đang gửi yêu cầu chọn 5 Trọng tài lên Blockchain (VRF)...', type: 'info' });
+
+      // BƯỚC 2: Gọi Route mới để trigger Chainlink VRF
+      await api.post('/mediator/request-random', { 
+        escrowId: id,
+        buyerAddress: escrow.buyer.walletAddress,   // Đổi từ 'buyer' thành 'buyerAddress'
+        sellerAddress: escrow.seller.walletAddress  // Đổi từ 'seller' thành 'sellerAddress'
+      });
+
+      addLog({ message: 'Yêu cầu On-chain đã được gửi thành công!', type: 'success' });
+
+      // 4. Chuyển hướng sang giao diện quản lý Dispute
+      navigate(`/disputes/${disputeId || id}`);
+
+    } catch (error) {
+      const errorMsg = error.response?.data?.error || error.message;
+      addLog({ message: `Lỗi: ${errorMsg}`, type: 'error' });
+      console.error("Dispute Integration Error:", error);
     }
   };
 
@@ -865,6 +916,9 @@ export default function EscrowDetail() {
                 </button>
                 <button onClick={handleStartRefund} className="flex-1 bg-amber-600 hover:bg-amber-500 py-3 rounded-lg font-bold text-white shadow-lg">
                   Start Refund
+                </button>
+                <button onClick={handleRaiseDispute} className="flex-1 bg-rose-600 hover:bg-rose-500 py-3 rounded-lg font-bold text-white shadow-lg shadow-rose-500/20">
+                  Raise Dispute
                 </button>
               </div>
             )}

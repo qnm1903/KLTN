@@ -29,60 +29,114 @@ const MediatorPanel = () => {
     threshold: 5
   };
 
-  // --- PRESERVE LOGIC: handleMediatorDecision (KHÔNG SỬA) ---
-  const handleMediatorDecision = async (mediatorAddr, action) => {
-    if (!mediatorAddr || !walletClient || !address) return;
-    setProcessingMediator(mediatorAddr);
+const handleMediatorDecision = async (mediatorAddr, action) => {
+  if (!mediatorAddr || !walletClient || !address || !currentDispute) return;
+  setProcessingMediator(mediatorAddr);
 
-    try {
-      const message = {
-        mediator: mediatorAddr,
-        disputeId: currentDispute?.disputeId || '',
-        action: action,
-        timestamp: new Date().toISOString()
-      };
+  try {
+    // Normalize decision as backend expects 'accept' or 'decline'
+    const decision = String(action || '').toLowerCase() === 'accept' ? 'accept' : 'decline';
 
-      const domain = { name: 'DisputeEscrow', version: '1' };
-      const types = { AcceptMediator: [{ name: 'mediator', type: 'address' }, { name: 'disputeId', type: 'string' }, { name: 'action', type: 'string' }, { name: 'timestamp', type: 'string' }] };
+    // Build EIP-712 message matching backend's ACCEPT_MEDIATOR_TYPE
+    const nonce = 0; // first-time mediator nonce; backend will verify/consume
+    const deadline = Math.floor(Date.now() / 1000) + 300; // 5 minutes into the future
 
-      const signature = await walletClient.signTypedData({
-        domain, types, primaryType: 'AcceptMediator', message, account: address
-      });
+    const message = {
+      disputeId: currentDispute?.disputeId || currentDispute?.id || '',
+      escrowId: currentDispute?.escrowId || '',
+      mediator: mediatorAddr,
+      decision,
+      nonce,
+      deadline
+    };
 
-      await acceptMediator(message.disputeId, { mediator: mediatorAddr, signature, timestamp: message.timestamp });
-      
-      setMediators((prev) => prev.map((m) =>
-        m.address.toLowerCase() === mediatorAddr.toLowerCase()
-          ? { ...m, status: action === 'ACCEPT' ? MEDIATOR_STATUS.ACCEPTED : MEDIATOR_STATUS.DECLINED } : m
-      ));
-    } catch (err) {
-      console.error('Decision error', err);
-    } finally {
-      setProcessingMediator(null);
-    }
+    // Domain + Types must match backend/src/types/dispute-typed-data.js: ACCEPT_MEDIATOR_TYPE
+    const domain = {
+      name: 'KLTNDisputeVoting',
+      version: '1',
+      chainId: 11155111,
+      verifyingContract: '0x0000000000000000000000000000000000000000'
+    };
+
+    const types = {
+      AcceptMediator: [
+        { name: 'disputeId', type: 'string' },
+        { name: 'escrowId', type: 'string' },
+        { name: 'mediator', type: 'address' },
+        { name: 'decision', type: 'string' },
+        { name: 'nonce', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' }
+      ]
+    };
+
+    // Sign typed data with wallet client (MetaMask)
+    const signature = await walletClient.signTypedData({
+      domain,
+      types,
+      primaryType: 'AcceptMediator',
+      message,
+      account: address
+    });
+
+    // Call backend with exactly the fields it expects
+    await acceptMediator(message.disputeId, {
+      decision,
+      signature,
+      message
+    });
+
+    // Update local mediators list UI optimistically
+    setMediators((prev) => prev.map((m) =>
+      (m.address || (m.mediator && m.mediator.walletAddress) || m.mediatorId || '').toLowerCase() === mediatorAddr.toLowerCase()
+        ? { ...m, status: decision === 'accept' ? 'ACCEPTED' : 'DECLINED', acceptedAt: decision === 'accept' ? new Date().toISOString() : null, declinedAt: decision === 'decline' ? new Date().toISOString() : null }
+        : m
+    ));
+  } catch (err) {
+    console.error('Decision error', err);
+  } finally {
+    setProcessingMediator(null);
+  }
+};
+
+  // Prefer a real committee size (5) and use dispute data when available.
+const COMMITTEE_SIZE = 5;
+const sourceMediators = (currentDispute?.mediators && currentDispute.mediators.length > 0)
+  ? currentDispute.mediators
+  : mediators || [];
+
+const padded = Array.from({ length: COMMITTEE_SIZE }).map((_, i) => {
+  const m = sourceMediators[i] || null;
+  if (!m) {
+    return {
+      address: `unassigned-${i + 1}`,
+      status: MEDIATOR_STATUS.ASSIGNED,
+      acceptedAt: null,
+      declinedAt: null,
+      votedAt: null,
+      voteChoice: null,
+      score: null,
+      note: null
+    };
+  }
+
+  // Support multiple shapes returned by backend: { address } or { mediator: { walletAddress } }
+  const address = m.address || (m.mediator && m.mediator.walletAddress) || m.mediatorId || '';
+  return {
+    address,
+    status: m.status || MEDIATOR_STATUS.ASSIGNED,
+    acceptedAt: m.acceptedAt || null,
+    declinedAt: m.declinedAt || null,
+    votedAt: m.votedAt || null,
+    voteChoice: m.voteChoice || null,
+    score: m.score || null,
+    note: m.note || null
   };
-  // --- END PRESERVE LOGIC ---
-
-  // Ensure 7 slots for UI
-  const padded = Array.from({ length: 7 }).map((_, i) => mediators[i] || null).map((m, idx) =>
-    m
-      ? m
-      : {
-          address: `unassigned-${idx + 1}`,
-          status: MEDIATOR_STATUS.ASSIGNED,
-          acceptedAt: null,
-          declinedAt: null,
-          votedAt: null,
-          voteChoice: null,
-          score: null,
-          note: null
-        }
-  );
+});
 
   return (
     <div className="bg-slate-800/50 backdrop-blur-md border border-slate-700/50 rounded-xl shadow-xl shadow-black/40 p-4 space-y-4">
       <div className="flex items-center justify-between">
-        <h4 className="text-sm font-semibold text-slate-200">Assigned Mediators (7)</h4>
+        <h4 className="text-sm font-semibold text-slate-200">Assigned Mediators ({COMMITTEE_SIZE})</h4>
         <div className="text-xs text-slate-400">Threshold: {tally.threshold || 5}</div>
       </div>
 
@@ -131,7 +185,7 @@ const MediatorPanel = () => {
 
       {/* Voting progress bar */}
       <div className="mt-4">
-        <VotingProgressBar tally={tally} />
+        <VotingProgressBar tally={tally} total={COMMITTEE_SIZE} />
       </div>
     </div>
   );
@@ -150,9 +204,9 @@ const StatusBadge = ({ status }) => {
   return <span className={`px-3 py-1 rounded-full text-xs font-medium ${item.cls} border border-white/5`}>{item.label}</span>;
 };
 
-/* VotingProgressBar inline - dark theme colors */
-const VotingProgressBar = ({ tally }) => {
-  const TOTAL = 7;
+/* VotingProgressBar inline */
+const VotingProgressBar = ({ tally, total = 5 }) => {
+  const TOTAL = total;
   const order = ['RELEASE_TO_BUYER', 'RETURN_TO_SELLER', 'SPLIT', 'OTHER'];
   const filled = [];
 
@@ -177,7 +231,8 @@ const VotingProgressBar = ({ tally }) => {
     return { color, filled: filledFlag };
   });
 
-  const thresholdPosPercent = ((5 - 1) / (TOTAL - 1)) * 100; // 5th tick position
+  const threshold = tally.threshold || 5;
+  const thresholdPosPercent = ((threshold - 1) / (TOTAL - 1)) * 100; // threshold tick position
 
   return (
     <div className="w-full">
@@ -191,7 +246,7 @@ const VotingProgressBar = ({ tally }) => {
         <div
           className="absolute top-1.5 h-8 w-0.5 bg-indigo-400"
           style={{ left: `${thresholdPosPercent}%`, transform: 'translateX(-50%)' }}
-          title="Threshold (5 votes required)"
+          title={`Threshold (${threshold} votes required)`}
         />
 
         <div className="relative z-10 flex items-center justify-between w-full px-4">
@@ -218,7 +273,7 @@ const VotingProgressBar = ({ tally }) => {
         <Legend color="bg-rose-500" label="Return to Seller" />
         <Legend color="bg-amber-500" label="Split" />
         <Legend color="bg-slate-600" label="Other" />
-        <div className="ml-auto text-sm text-slate-400">Threshold: 5 votes</div>
+        <div className="ml-auto text-sm text-slate-400">Threshold: {threshold} votes</div>
       </div>
     </div>
   );

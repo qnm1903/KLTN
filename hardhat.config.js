@@ -1,10 +1,10 @@
-require('hardhat-contract-sizer');
-require("@nomicfoundation/hardhat-toolbox");
-require("@openzeppelin/hardhat-upgrades");
-require("dotenv").config();
+import "@nomicfoundation/hardhat-toolbox";
+import "@openzeppelin/hardhat-upgrades";
+import * as dotenv from "dotenv";
 
-/** @type import('hardhat/config').HardhatUserConfig */
-module.exports = {
+dotenv.config();
+
+const config = {
   solidity: {
     version: "0.8.30",
     settings: {
@@ -37,3 +37,5 @@ module.exports = {
     enabled: true
   }
 };
+
+export default config;

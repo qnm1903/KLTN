@@ -4,9 +4,11 @@ import EvidenceTimeline from '../components/dispute/EvidenceTimeline.jsx';
 import MediatorPanel from '../components/dispute/MediatorPanel.jsx';
 import useDisputeDetail from '../hooks/useDisputeDetail.js';
 import { DISPUTE_STATUS } from '../constants/dispute.constants.js';
+import { useParams } from 'react-router-dom';
 
 const DisputeDetail = () => {
-  const { currentDispute, status } = useDisputeDetail();
+  const { id } = useParams();
+  const { currentDispute, status } = useDisputeDetail(id);
   const displayStatus = status ?? DISPUTE_STATUS.PENDING_VRF;
 
   return (

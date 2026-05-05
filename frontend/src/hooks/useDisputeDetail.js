@@ -7,68 +7,67 @@ import {
   voteTallyAtom
 } from '../store/disputeAtoms.js';
 
-// Import mock data (dùng cho UI testing / dev mode)
-import {
-  mockDisputeDetail,
-  mockEvidenceList,
-  mockMediators,
-  mockVoteTally
-} from '../../test/disputeMockData.js';
+// 1. Nhập api instance từ lib (Đã xoá import mock data)
+import api from '../lib/api.js';
 
 /**
  * useDisputeDetail
  *
- * - Centralizes access to Dispute-related Jotai atoms.
- * - Khi hook mount và nếu chưa có data, hook sẽ inject mock data từ frontend/test/disputeMockData.js
- *   để tiện development / visual QA trước khi backend tích hợp.
- *
- * Trả về:
- * {
- *   currentDispute, // object or null
- *   status,         // currentDispute?.status or null
- *   evidence,       // array of Evidence
- *   mediators,      // array of Mediator (7 slots when assigned)
- *   tally           // VoteTally object
- * }
+ * - Nhận vào disputeId từ URL.
+ * - Gọi API Backend để lấy dữ liệu thực tế.
+ * - Cập nhật vào Jotai atoms.
  */
-export default function useDisputeDetail() {
-  // Đọc giá trị hiện trạng bằng useAtomValue (readonly)
+export default function useDisputeDetail(disputeId) {
+  // Đọc giá trị hiện trạng bằng useAtomValue
   const currentDispute = useAtomValue(currentDisputeAtom);
   const evidence = useAtomValue(evidenceListAtom);
   const mediators = useAtomValue(mediatorsListAtom);
   const tally = useAtomValue(voteTallyAtom);
 
-  // Setter để inject mock data khi cần
+  // Setter để cập nhật data thật
   const setCurrentDispute = useSetAtom(currentDisputeAtom);
   const setEvidence = useSetAtom(evidenceListAtom);
   const setMediators = useSetAtom(mediatorsListAtom);
   const setTally = useSetAtom(voteTallyAtom);
 
-  // Inject mock data on mount if atoms are empty (dev convenience)
+  // 2. Fetch dữ liệu thật thay vì Mock Data
   useEffect(() => {
-    // Nếu currentDispute chưa tồn tại, inject mock dataset
-    if (!currentDispute) {
-      // Lưu ý: production code nên có flag cho mock (e.g., process.env.NODE_ENV === 'development')
-      try {
-        setCurrentDispute(mockDisputeDetail);
-        setEvidence(mockEvidenceList);
-        setMediators(mockMediators);
-        setTally(mockVoteTally);
-      } catch (err) {
-        // Nếu có lỗi khi inject mock data, log để dev biết
-        // Không throw để tránh crash UI
-        // eslint-disable-next-line no-console
-        console.error('useDisputeDetail: failed to inject mock data', err);
-      }
-    }
-    // Chỉ chạy 1 lần khi mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    // Nếu không có disputeId (chưa load URL kịp), bỏ qua
+    if (!disputeId) return;
 
-  // Derive status for convenience
+    const fetchRealDisputeData = async () => {
+      try {
+        // Sử dụng api.js đã được cấu hình interceptors
+        const response = await api.get(`/disputes/${disputeId}`);
+        const data = response.data;
+
+        // Đổ dữ liệu thật từ Backend vào Global State (Jotai)
+        setCurrentDispute(data);
+        setEvidence(data.evidence || []);
+        setMediators(data.mediators || []);
+        
+        // Cập nhật tally, dự phòng nếu backend trả về null/undefined
+        setTally(data.currentTally || {
+          RELEASE_TO_BUYER: 0,
+          RETURN_TO_SELLER: 0,
+          SPLIT: 0,
+          OTHER: 0,
+          totalVotes: 0,
+          threshold: 5
+        });
+      } catch (err) {
+        console.error('Lỗi khi fetch dữ liệu Dispute từ Backend:', err);
+      }
+    };
+
+    fetchRealDisputeData();
+    
+    // Khối code mock data trước đó đã bị xóa hoàn toàn.
+  }, [disputeId, setCurrentDispute, setEvidence, setMediators, setTally]);
+
+  // Derive status
   const status = currentDispute ? currentDispute.status : null;
 
-  // Trả về object theo yêu cầu để component tiêu thụ
   return {
     currentDispute,
     status,

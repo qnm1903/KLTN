@@ -173,19 +173,62 @@ async function handleRandomMediatorSelected(prisma, escrowId, mediators, logger)
       return;
     }
 
+    // const records = [];
+    // for (let i = 0; i < mediators.length; i++) {
+    //   const addr = normalizeAddress(mediators[i]);
+    //   if (!addr) continue;
+
+    //   const user = await prisma.user.findFirst({
+    //     where: { walletAddress: addr },
+    //     select: { id: true }
+    //   });
+
+    //   if (!user) {
+    //     logger?.warn?.(`[mediator-pool] No user found for mediator address ${addr}`);
+    //     continue;
+    //   }
+
+    //   records.push({
+    //     escrowId: escrow.id,
+    //     mediatorId: user.id,
+    //     slot: i + 1
+    //   });
+    // }
+
+    // if (records.length > 0) {
+    //   await prisma.escrowMediator.createMany({
+    //     data: records,
+    //     skipDuplicates: true
+    //   });
+    //   logger?.info?.(`[mediator-pool] Saved ${records.length} mediators for escrow ${escrow.id}`);
+    // }
+
+    // emitToEscrow(escrow.id, 'mediators_selected', {
+    //   escrowId: escrow.id,
+    //   chainEscrowId: escrowIdHex,
+    //   mediators: mediators.map(m => normalizeAddress(m)),
+    //   count: records.length
+    // });
     const records = [];
     for (let i = 0; i < mediators.length; i++) {
       const addr = normalizeAddress(mediators[i]);
       if (!addr) continue;
 
-      const user = await prisma.user.findFirst({
+      let user = await prisma.user.findFirst({
         where: { walletAddress: addr },
         select: { id: true }
       });
 
+      // SỬA LỖI 1 (Bóng ma): Tự động tạo user nếu Chainlink trả về ví chưa có trong DB
       if (!user) {
-        logger?.warn?.(`[mediator-pool] No user found for mediator address ${addr}`);
-        continue;
+        logger?.info?.(`[mediator-pool] Auto-creating missing user for address: ${addr}`);
+        user = await prisma.user.create({
+          data: {
+            walletAddress: addr,
+            role: 'mediator' // Thêm các trường default khác nếu Schema bắt buộc
+          },
+          select: { id: true }
+        });
       }
 
       records.push({
@@ -196,11 +239,40 @@ async function handleRandomMediatorSelected(prisma, escrowId, mediators, logger)
     }
 
     if (records.length > 0) {
-      await prisma.escrowMediator.createMany({
-        data: records,
-        skipDuplicates: true
+      logger?.info?.(`[mediator-pool] Saving ${records.length} mediators to SQLite...`);
+      
+      // SỬA LỖI 2 (SQLite sập): Xóa createMany có skipDuplicates, dùng vòng lặp try/catch
+      for (const record of records) {
+        try {
+          await prisma.escrowMediator.create({ data: record });
+        } catch (error) {
+          // Mã P2002 là lỗi Unique constraint (đã tồn tại), ta chủ động bỏ qua
+          if (error.code !== 'P2002') {
+            logger?.error?.(`[mediator-pool] Database error saving mediator: ${error.message}`);
+          }
+        }
+      }
+      logger?.info?.(`[mediator-pool] Successfully saved mediators for escrow ${escrow.id}`);
+      // CẬP NHẬT TRẠNG THÁI ĐỂ TẮT SPINNER TRÊN GIAO DIỆN
+      // 1. Cập nhật bảng Escrow sang trạng thái DISPUTED
+      await prisma.escrow.update({
+        where: { id: escrow.id },
+        data: { status: 'DISPUTED' }
       });
-      logger?.info?.(`[mediator-pool] Saved ${records.length} mediators for escrow ${escrow.id}`);
+
+      // 2. Tìm và cập nhật bảng Dispute sang trạng thái VOTING
+      const activeDispute = await prisma.dispute.findFirst({
+        where: { escrowId: escrow.id },
+        orderBy: { createdAt: 'desc' }
+      });
+
+      if (activeDispute) {
+        await prisma.dispute.update({
+          where: { id: activeDispute.id },
+          data: { status: 'VOTING' } 
+        });
+        logger?.info?.(`[mediator-pool] Updated Dispute status to VOTING for escrow ${escrow.id}`);
+      }
     }
 
     emitToEscrow(escrow.id, 'mediators_selected', {

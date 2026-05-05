@@ -13,15 +13,14 @@ const MEDIATOR_POOL_ABI = [
   'function getRequiredStake() external view returns (uint256)',
   'function mediators(address) external view returns (address wallet, uint256 stakeAmount, bool isActive, uint256 timeoutCount, uint256 reputationScore, uint256 totalVotes, uint256 successfulVotes)',
   'function mediatorsList(uint256) external view returns (address)',
-  'function getAllMediators() external view returns (Mediator[])',
+  'function getAllMediators() external view returns (tuple(address wallet, uint256 stakeAmount, bool isActive, uint256 timeoutCount, uint256 reputationScore, uint256 totalVotes, uint256 successfulVotes)[])',
   'function isTestnet() external view returns (bool)',
   'event MediatorRegistered(address indexed mediator, uint256 amount)',
   'event MediatorUnregistered(address indexed mediator, uint256 amount)',
   'event RandomnessRequested(uint256 requestId, bytes32 indexed escrowId)',
   'event RandomMediatorSelected(bytes32 indexed escrowId, address[] mediators)',
   'event SybilDetected(address indexed mediator, string reason)',
-  'event ReputationUpdated(address indexed mediator, uint256 oldScore, uint256 newScore)',
-  'struct Mediator { address wallet; uint256 stakeAmount; bool isActive; uint256 timeoutCount; uint256 reputationScore; uint256 totalVotes; uint256 successfulVotes; }'
+  'event ReputationUpdated(address indexed mediator, uint256 oldScore, uint256 newScore)'
 ];
 
 /**
@@ -164,8 +163,18 @@ router.post('/request-random', authMiddleware, async (req, res) => {
     const buyer = buyerAddress ? ethers.getAddress(buyerAddress) : ethers.ZeroAddress;
     const seller = sellerAddress ? ethers.getAddress(sellerAddress) : ethers.ZeroAddress;
 
+    // Convert `escrowId` (UUID string from frontend) to bytes32 expected by contract
+    const escrowIdBytes = ethers.isBytesLike(escrowId)
+      ? escrowId
+      : ethers.keccak256(ethers.toUtf8Bytes(escrowId));
+
+    await prisma.escrow.update({
+      where: { id: escrowId },
+      data: { chainEscrowId: escrowIdBytes }
+    });
+
     // Request random mediators with buyer/seller exclusion
-    const tx = await mediatorPool.requestRandomMediator(escrowId, buyer, seller);
+    const tx = await mediatorPool.requestRandomMediator(escrowIdBytes, buyer, seller);
     const receipt = await tx.wait();
 
     // Parse requestId from event
@@ -189,7 +198,8 @@ router.post('/request-random', authMiddleware, async (req, res) => {
       success: true,
       message: 'Random mediator selection requested',
       requestId: requestId.toString(),
-      escrowId,
+      escrowId: escrowId,
+      chainEscrowId: escrowIdBytes,
       buyerAddress: buyer,
       sellerAddress: seller,
       txHash: receipt.hash

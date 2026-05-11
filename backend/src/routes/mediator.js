@@ -163,18 +163,26 @@ router.post('/request-random', authMiddleware, async (req, res) => {
     const buyer = buyerAddress ? ethers.getAddress(buyerAddress) : ethers.ZeroAddress;
     const seller = sellerAddress ? ethers.getAddress(sellerAddress) : ethers.ZeroAddress;
 
-    // Convert `escrowId` (UUID string from frontend) to bytes32 expected by contract
-    const escrowIdBytes = ethers.isBytesLike(escrowId)
-      ? escrowId
-      : ethers.keccak256(ethers.toUtf8Bytes(escrowId));
+    // 1. Kéo Escrow từ Database lên để lấy địa chỉ Hợp đồng (Vault)
+    const escrowDb = await prisma.escrow.findUnique({ where: { id: escrowId } });
+    if (!escrowDb || !escrowDb.contractAddress) {
+      return res.status(400).json({ error: 'Vault not deployed yet' });
+    }
 
+    // 2. Đọc ĐÚNG mã chainEscrowId thực tế từ Smart Contract
+    const vaultContract = new ethers.Contract(escrowDb.contractAddress, ['function escrowId() view returns (bytes32)'], provider);
+    const trueChainEscrowId = await vaultContract.escrowId();
+
+    // 3. Cập nhật lại vào DB để Worker lắng nghe sự kiện có thể quét đúng ID
     await prisma.escrow.update({
       where: { id: escrowId },
-      data: { chainEscrowId: escrowIdBytes }
+      data: { chainEscrowId: trueChainEscrowId }
     });
 
-    // Request random mediators with buyer/seller exclusion
-    const tx = await mediatorPool.requestRandomMediator(escrowIdBytes, buyer, seller);
+    console.log(`[VRF Request] Đang gọi VRF cho Hợp đồng thực tế: ${trueChainEscrowId}`);
+
+    // 4. Request random mediators với ĐÚNG mã ID
+    const tx = await mediatorPool.requestRandomMediator(trueChainEscrowId, buyer, seller);
     const receipt = await tx.wait();
 
     // Parse requestId from event
@@ -199,7 +207,7 @@ router.post('/request-random', authMiddleware, async (req, res) => {
       message: 'Random mediator selection requested',
       requestId: requestId.toString(),
       escrowId: escrowId,
-      chainEscrowId: escrowIdBytes,
+      chainEscrowId: trueChainEscrowId,
       buyerAddress: buyer,
       sellerAddress: seller,
       txHash: receipt.hash
@@ -249,61 +257,50 @@ router.get('/pool-status', async (req, res) => {
 });
 
 /**
- * @route   GET /api/mediator/random-result/:escrowId
+ * @route   GET /api/mediator/random-result/:chainEscrowId
  * @desc    Get random mediator selection result from database
  * @access  Private (authenticated)
  */
-router.get('/random-result/:escrowId', authMiddleware, async (req, res) => {
+router.get('/random-result/:chainEscrowId', authMiddleware, async (req, res) => {
   try {
-    const { escrowId } = req.params;
+    const raw = req.params.chainEscrowId;
+    if (!raw) return res.status(400).json({ error: 'chainEscrowId required' });
 
-    // Generate escrowId bytes32 from string if needed
-    const escrowIdBytes32 = ethers.isBytesLike(escrowId) ? escrowId : ethers.keccak256(ethers.toUtf8Bytes(escrowId));
+    // Normalize to bytes32: param có thể là bytes32 hoặc UUID (sẽ bị băm)
+    const chainEscrowId = ethers.isBytesLike(raw) ? raw : ethers.keccak256(ethers.toUtf8Bytes(raw));
 
-    // Find escrow by chainEscrowId
+    // Tìm Escrow bằng chainEscrowId
     const escrow = await prisma.escrow.findFirst({
-      where: { chainEscrowId: escrowIdBytes32 },
-      select: { id: true, status: true }
+      where: { chainEscrowId },
+      select: { id: true }
     });
 
     if (!escrow) {
-      return res.status(404).json({ error: 'Escrow not found' });
+      return res.status(404).json({ success: false, status: 'not_found', message: 'Escrow not found' });
     }
 
-    // Get mediators from EscrowMediator table
+    // Lấy danh sách Mediator đã được gán
     const escrowMediators = await prisma.escrowMediator.findMany({
       where: { escrowId: escrow.id },
-      include: {
-        mediator: {
-          select: { walletAddress: true }
-        }
-      },
+      include: { mediator: { select: { walletAddress: true } } },
       orderBy: { slot: 'asc' }
     });
 
-    if (escrowMediators.length === 0) {
-      return res.json({
-        success: true,
-        status: 'pending',
-        message: 'Random selection in progress'
-      });
-    }
-
     const mediators = escrowMediators.map(em => ({
-      address: em.mediator.walletAddress,
-      slot: em.slot
+      slot: em.slot,
+      address: em.mediator?.walletAddress || null
     }));
 
-    res.json({
-      success: true,
-      status: 'completed',
-      escrowId: escrow.id,
-      chainEscrowId: escrowIdBytes32,
-      mediators
-    });
+    // BẮT BUỘC PHẢI ĐỦ 5 TRỌNG TÀI MỚI BÁO COMPLETED
+    if (escrowMediators.length === 5) {
+      return res.json({ success: true, status: 'completed', escrowId: escrow.id, chainEscrowId, mediators });
+    }
+
+    // Nếu chưa đủ, tiếp tục báo pending để Frontend chờ
+    return res.json({ success: true, status: 'pending', escrowId: escrow.id, chainEscrowId, mediators });
   } catch (error) {
     console.error('[Get Random Result Error]:', error);
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message || String(error) });
   }
 });
 

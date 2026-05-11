@@ -26,6 +26,9 @@ import api from '../lib/api';
 import { clearPrivKey, getPubKey, getPrivKey, unlockEncryptedPrivKey } from '../lib/storage';
 import { socket } from '../lib/socket';
 
+import { getStoredAccessToken } from '../store/authStore';
+import { useSIWE } from '../hooks/useSIWE';
+
 function normalizeAddress(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -86,8 +89,8 @@ export default function EscrowDetail() {
 
   // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm deployEscrowVault)
   const { isRecovering } = useSessionRecovery(escrowId, address);
-  const { submitPubKey, submitNonce, submitZShare, resetSigning } = useEscrowSync(escrowId);
-  const { executeTssAction, fundEscrow, getVaultStatus, isPending, isConfirming, isConfirmed } = useContractCall(); 
+  const { submitPubKey, submitNonce, submitZShare, resetSigning } = useEscrowSync(escrowId, escrow?.status);
+  const { executeTssAction, fundEscrow, getVaultStatus, isPending, isConfirming, isConfirmed, deployEscrowVault, hash: hookTxHash } = useContractCall();
   const { computeNonce, computeZShare, hasNonce, clearNonce } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
@@ -101,6 +104,9 @@ export default function EscrowDetail() {
   const selectedAction = useAtomValue(selectedActionAtom);
   const nonceRound1 = useAtomValue(nonceRound1Atom);
   const setSelectedAction = useSetAtom(selectedActionAtom);
+
+  const { login } = useSIWE();
+  const hasLocalToken = Boolean(getStoredAccessToken());
 
   const activeRole = useMemo(() => {
     return resolveRoleFromEscrow(escrow, address);
@@ -132,6 +138,40 @@ export default function EscrowDetail() {
   // Auto-scroll cho Terminal & Biến cờ Auto-Submit (Phase 1)
   const logsEndRef = useRef(null);
   const autoSubmitAttempted = useRef(false);
+
+  // Fallback Polling: Nếu kẹt ở DRAFT nhưng đã có Vault Address, tự động quét Backend mỗi 5s
+  useEffect(() => {
+    if (!escrowId) return;
+    let interval = null;
+    let attempts = 0;
+    const maxAttempts = 12; // Thử tối đa 1 phút
+
+    const shouldPoll = () => {
+      const currentStatus = String(escrow?.status || '').toUpperCase();
+      return currentStatus === 'DRAFT' && Boolean(escrow?.contractAddress || escrow?.vaultAddress);
+    };
+
+    if (shouldPoll()) {
+      interval = setInterval(async () => {
+        attempts += 1;
+        try {
+          const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+          setEscrow(fresh);
+          // Nếu status đã thoát khỏi DRAFT, dừng quét
+          if (String(fresh?.status || '').toUpperCase() !== 'DRAFT') {
+            clearInterval(interval);
+          }
+        } catch (err) {
+          console.warn('[EscrowDetail] Poll fetch failed:', err?.message || err);
+        }
+        if (attempts >= maxAttempts) clearInterval(interval);
+      }, 5000);
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [escrowId, escrow?.status, escrow?.contractAddress, escrow?.vaultAddress]);
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -204,127 +244,231 @@ export default function EscrowDetail() {
 
   // --- BẢN VÁ PHASE 1: LUỒNG AUTO-SUBMIT KEY ---
   useEffect(() => {
-    if (
-      activeRole !== 'Unknown' &&
-      localPubKey &&
-      !hasSubmitted &&
-      !isSubmittingKey &&
-      progress < 7 &&
-      !autoSubmitAttempted.current
-    ) {
-      autoSubmitAttempted.current = true;
-      addLog({ message: 'Auto-submitting local Public Key...', type: 'info' });
-      handleSubmitMyPubKey();
-    }
-  }, [activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey, addLog, handleSubmitMyPubKey]);
+  // Chỉ cho phép DKG khi Escrow đã có Trọng tài
+  const escrowStatus = String(escrow?.status || '').toUpperCase();
+  const dkgAllowed = escrowStatus === 'DISPUTED' || escrowStatus === 'VOTING';
 
-  // --- BẢN VÁ PHASE 1.5 TỪ MAIN: AUTO-TRIGGER DEPLOY (ASYNC/AWAIT CHUẨN) ---
-  useEffect(() => {
-    let isMounted = true; 
+  if (
+    dkgAllowed &&
+    activeRole !== 'Unknown' &&
+    localPubKey &&
+    !hasSubmitted &&
+    !isSubmittingKey &&
+    progress < 7 &&
+    !autoSubmitAttempted.current
+  ) {
+    autoSubmitAttempted.current = true;
+    addLog({ message: 'Auto-submitting local Public Key...', type: 'info' });
+    handleSubmitMyPubKey();
+  }
+}, [escrow?.status, activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey, addLog, handleSubmitMyPubKey]);
 
-    const triggerDeploy = async () => {
-      try {
-        addLog({ message: "DKG Complete! Auto-triggering Backend to deploy Vault Contract...", type: 'info' });
-        
-        // Gọi API không dùng .then() để chặn lỗi
-        const res = await api.post('/escrow/deploy-vault', { escrowId });
-        
-        if (isMounted && res && res.data) {
-          addLog({ message: `Deployment TX submitted by Backend! Hash: ${res.data.txHash}. Chờ Backend update Database...`, type: 'warning' });
-        }
-      } catch (err) {
-        if (isMounted) {
-          console.error("Chi tiết lỗi Deploy:", err);
-          if (err.response?.status === 410) {
-             addLog({ message: "SESSION EXPIRED (410). RAM Backend đã tự hủy. Vui lòng tạo Escrow mới.", type: 'error' });
-          } else {
-             const errorMsg = err.response?.data?.error || err.message || 'Unknown Error';
-             addLog({ message: `Backend Deploy failed: ${errorMsg}`, type: 'error' });
-          }
-        }
-      }
-    };
-
-    if (progress >= 7 && activeRole === 'buyer' && !hasVaultAddress) {
-      triggerDeploy();
-    }
-
-    return () => { isMounted = false; };
-  }, [progress, activeRole, hasVaultAddress, escrowId, addLog]);
+  
 
   // Lắng nghe sự kiện vault_deployed từ WebSocket
   useEffect(() => {
-    if (!escrowId) return;
+  if (!escrowId) return;
 
-    const handleVaultDeployed = (data) => {
+  const handleVaultDeployed = async (data) => {
+    try {
       if (data?.escrowId !== escrowId) return;
-      
-      addLog({ 
-        message: `Vault deployed! Address: ${data.contractAddress}. Block: ${data.blockNumber}`, 
-        type: 'success' 
-      });
-      
-      // Update escrow state with contract address
-      setEscrow(prev => ({ 
-        ...prev, 
-        contractAddress: data.contractAddress,
-        status: data.status || 'INITIALIZED'
-      }));
-    };
 
-    socket.on('vault_deployed', handleVaultDeployed);
-    
+      addLog({
+        message: `Vault đã được Deploy! Địa chỉ: ${data.contractAddress}. Block: ${data.blockNumber}`,
+        type: 'success'
+      });
+
+      // Tải lại dữ liệu Escrow từ Backend để tự động hiện nút Deposit
+      const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+      setEscrow(fresh);
+
+      // Cập nhật thêm trạng thái On-chain (nếu có)
+      try {
+        const vaultAddr = fresh.contractAddress || fresh.vaultAddress;
+        if (vaultAddr) {
+          const onChain = await getVaultStatus(vaultAddr);
+          setOnChainVaultStatus(Number(onChain));
+        }
+      } catch (innerErr) {
+        console.warn('Chưa đọc được trạng thái on-chain sau deploy:', innerErr);
+      }
+    } catch (err) {
+      console.error('Lỗi khi bắt sự kiện vault_deployed:', err);
+    }
+  };
+
+  socket.on('vault_deployed', handleVaultDeployed);
+
+  return () => {
+    socket.off('vault_deployed', handleVaultDeployed);
+  };
+}, [escrowId, addLog, getVaultStatus]);
+
+// Ép buộc kết nối phòng Socket để nhận tín hiệu realtime
+  useEffect(() => {
+    if (!escrowId) return;
+    const token = getStoredAccessToken();
+    if (!token) return;
+
+    if (!socket.connected) socket.connect();
+
+    socket.emit('join_escrow', { escrowId, token }, (response) => {
+      if (response?.ok) {
+        addLog({ message: `Joined secure room for Escrow #${escrowId} (explicit join)`, type: 'success' });
+        return;
+      }
+      addLog({ message: `Explicit join room failed: ${response?.error || 'unknown error'}`, type: 'warning' });
+    });
+
     return () => {
-      socket.off('vault_deployed', handleVaultDeployed);
+      socket.emit('leave_escrow', escrowId);
     };
   }, [escrowId, addLog]);
 
-  // --- BẢN VÁ PHASE 2.5: ĐỒNG BỘ TRẠNG THÁI LOCKED LÊN DATABASE ---
-  useEffect(() => {
-    if (isConfirmed && escrow?.status !== 'LOCKED' && !selectedAction) {
-      addLog({ message: "Deposit On-chain confirmed! Syncing 'LOCKED' status to Database...", type: 'info' });
-      
-      api.patch(`/escrows/${escrowId}/status`, { status: 'LOCKED' })
-        .then(() => {
-          addLog({ message: "Database updated to LOCKED! You can now safely F5 without losing progress.", type: 'success' });
-          setEscrow(prev => ({ ...prev, status: 'LOCKED' }));
-        })
-        .catch(err => {
-          // --- BẮT ĐẦU XỬ LÝ LỖI 409 (RACE CONDITION) ---
-          if (err.response?.status === 409) {
-            console.log('✅ Worker đã cập nhật DB thành LOCKED trước, bỏ qua lỗi Conflict.');
-            addLog({ message: "Worker đã đồng bộ trạng thái, tiền đã vào Smart Contract an toàn.", type: 'info' });
-            // Cập nhật lại UI state vì thực tế DB đã được Worker khóa thành công
-            setEscrow(prev => ({ ...prev, status: 'LOCKED' }));
-          } else {
-            // --- CÁC LỖI KHÁC VẪN BÁO BÌNH THƯỜNG ---
-            console.error("Lỗi đồng bộ DB:", err);
-            addLog({ message: "Lỗi đồng bộ DB, nhưng tiền đã vào Smart Contract.", type: 'warning' });
-          }
-        });
-    }
-  }, [isConfirmed, escrow?.status, selectedAction, escrowId, addLog]);
+// --- KHỐI XỬ LÝ DEPLOY TỪ VÍ BUYER ---
+  const [isDeploying, setIsDeploying] = useState(false);
 
-  // --- BẢN VÁ PHASE 2: LUỒNG NẠP TIỀN CHO BUYER ---
-  const handleDepositFunds = async () => {
-    try {
-      // ÉP BUỘC LẤY ĐỊA CHỈ TỪ DATABASE (Loại bỏ cái bẫy .env)
-      const vaultAddress = escrow?.contractAddress || escrow?.vaultAddress; 
-      
-      if (!vaultAddress) {
-         addLog({ 
-           message: "CRITICAL: Escrow chưa được gán địa chỉ Smart Contract. Vui lòng F5 tải lại trang.", 
-           type: 'error' 
-         });
-         return;
-      }
-      
-      addLog({ message: `Đang gọi Smart Contract đích: ${vaultAddress}`, type: 'info' });
-      await fundEscrow(vaultAddress, escrow?.amount);
-    } catch (error) {
-      addLog({ message: `Deposit action failed: ${error.message}`, type: 'error' });
+  const handleDeploy = useCallback(async () => {
+    if (!escrowId || !escrow) return;
+    if (activeRole !== 'buyer') {
+      addLog({ message: 'Chỉ Buyer mới có quyền Deploy Vault.', type: 'warning' });
+      return;
     }
-  };
+
+    setIsDeploying(true);
+    try {
+      addLog({ message: 'Vui lòng xác nhận giao dịch Deploy trên MetaMask...', type: 'info' });
+
+      const zeroAddr = '0x0000000000000000000000000000000000000000';
+      const zeroMediators = [zeroAddr, zeroAddr, zeroAddr, zeroAddr, zeroAddr];
+      const zeroPkAgg = [0n, 0n];
+
+      const factoryAddress = import.meta.env.VITE_ESCROW_CONTRACT_ADDRESS;
+
+      let deploymentResult;
+      try {
+        deploymentResult = await deployEscrowVault(
+          factoryAddress,
+          normalizeAddress(escrow.seller?.walletAddress || escrow.sellerAddress),
+          zeroMediators,
+          zeroPkAgg,
+          escrow.amount
+        );
+      } catch (innerErr) {
+        console.warn('deployEscrowVault ném lỗi nội bộ nhưng có thể giao dịch đã gửi:', innerErr);
+      }
+
+      let txHash = null;
+      if (typeof deploymentResult === 'string') {
+        txHash = deploymentResult;
+      } else if (deploymentResult && typeof deploymentResult === 'object') {
+        if (typeof deploymentResult.hash === 'string') txHash = deploymentResult.hash;
+        else if (typeof deploymentResult.transactionHash === 'string') txHash = deploymentResult.transactionHash;
+      }
+
+      if (!txHash && hookTxHash) txHash = hookTxHash;
+
+      if (!txHash) {
+        for (let i = 0; i < 8 && !txHash; i++) {
+          await new Promise((r) => setTimeout(r, 500));
+          if (hookTxHash) txHash = hookTxHash;
+        }
+      }
+
+      if (!txHash) {
+        addLog({ message: 'Giao dịch đã gửi nhưng chưa lấy được hash. Vui lòng chờ Socket cập nhật.', type: 'warning' });
+      } else {
+        addLog({ message: `Đã gửi TX: ${txHash}. Đang chờ Blockchain...`, type: 'warning' });
+        
+        await api.post('/escrow/record-deploy', { escrowId, txHash });
+        addLog({ message: 'Triển khai đã ghi nhận. Đang cập nhật UI...', type: 'success' });
+
+        // Ép Socket vào phòng ngay lập tức để không rớt thông báo
+        const token = getStoredAccessToken();
+        if (token) {
+          socket.emit('join_escrow', { escrowId, token }, (response) => {
+            if (response?.ok) {
+              addLog({ message: 'Socket room joined after deploy.', type: 'info' });
+            }
+          });
+        }
+
+        // Kéo dữ liệu tươi nhất từ backend để ép render nút Deposit
+        try {
+          const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+          setEscrow(fresh);
+        } catch (fetchErr) {
+          console.warn('Could not refresh escrow immediately after deploy:', fetchErr);
+        }
+      }
+    } catch (err) {
+      // Xóa bỏ đoạn Fallback reload ở đây, chỉ in log lỗi
+      console.error('[handleDeploy] Lỗi tàn khốc:', err);
+      const msg = err?.response?.data?.error || err?.message || String(err);
+      addLog({ message: `Lỗi Deploy: ${msg}`, type: 'error' });
+    } finally {
+      setIsDeploying(false);
+    }
+  }, [escrowId, escrow, activeRole, deployEscrowVault, addLog, hookTxHash]);
+
+  // --- BẢN VÁ PHASE 2: LUỒNG NẠP TIỀN CHO BUYER  ---
+  const handleDepositFunds = useCallback(async () => {
+    try {
+      const vaultAddress = escrow?.contractAddress || escrow?.vaultAddress;
+      if (!vaultAddress) {
+        addLog({ message: "CRITICAL: Escrow chưa được gán địa chỉ Smart Contract. Vui lòng F5.", type: 'error' });
+        return;
+      }
+
+      addLog({ message: `Đang yêu cầu MetaMask khóa ${normalizeDisplayAmount(escrow?.amount)} ETH on-chain...`, type: 'warning' });
+
+      let depositResult;
+      try {
+        depositResult = await fundEscrow(vaultAddress, escrow?.amount);
+      } catch (onchainErr) {
+        console.warn('fundEscrow threw:', onchainErr);
+      }
+
+      let txHash = null;
+      if (typeof depositResult === 'string') txHash = depositResult;
+      else if (depositResult && typeof depositResult === 'object') {
+        if (typeof depositResult.hash === 'string') txHash = depositResult.hash;
+        else if (typeof depositResult.transactionHash === 'string') txHash = depositResult.transactionHash;
+      }
+      if (!txHash && hookTxHash) txHash = hookTxHash;
+
+      // 1. ÉP DB CHUYỂN SANG LOCKED NGAY LẬP TỨC (Sửa lỗi kẹt INITIALIZED)
+      try {
+        await api.patch(`/escrows/${escrowId}/status`, { status: 'LOCKED' });
+        addLog({ message: 'Local UI: Đã ép DB cập nhật trạng thái thành LOCKED.', type: 'success' });
+      } catch (err) {
+        if (err?.response?.status === 409) {
+          addLog({ message: 'Worker đã cập nhật DB thành LOCKED trước; đang đồng bộ UI...', type: 'info' });
+        } else {
+          console.warn('Patch status failed:', err);
+        }
+      }
+
+      // 2. KÉO DỮ LIỆU MỚI VỀ ĐỂ ÉP REACT RENDER LẠI (Không cần F5)
+      try {
+        const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+        setEscrow(fresh);
+        
+        try {
+          const onChain = await getVaultStatus(fresh.contractAddress || fresh.vaultAddress);
+          setOnChainVaultStatus(Number(onChain));
+        } catch (inner) {
+          console.warn('Cannot read on-chain status after deposit:', inner);
+        }
+        addLog({ message: 'Nạp tiền ghi nhận & UI đã được làm mới!', type: 'success' });
+      } catch (fetchErr) {
+        addLog({ message: 'Nạp tiền thành công nhưng UI refresh lỗi. Vui lòng chờ Socket.', type: 'warning' });
+      }
+    } catch (error) {
+      console.error('[handleDepositFunds] Lỗi tàn khốc:', error);
+      addLog({ message: `Deposit action failed: ${error.message || String(error)}`, type: 'error' });
+    }
+  }, [escrowId, escrow, fundEscrow, getVaultStatus, hookTxHash, addLog]);
 
   // --- BẢN VÁ TSS CHUẨN MỰC: TÔN TRỌNG ĐỐI TƯỢNG BIGNUMBER ---
   const extractTrueHex = (val) => {
@@ -499,40 +643,51 @@ export default function EscrowDetail() {
   // Hàm xử lý kích hoạt luồng Dispute
   const handleRaiseDispute = async () => {
     try {
-      // 1. Lấy lý do từ người dùng
       const reasonInput = window.prompt("Vui lòng nhập lý do tạo tranh chấp:", "Sản phẩm không đúng như mô tả");
       if (reasonInput === null) return; 
       const reason = reasonInput.trim() || "Không cung cấp lý do cụ thể";
 
       addLog({ message: 'Đang khởi tạo hồ sơ Dispute...', type: 'info' });
 
-      // 2. BƯỚC 1: Lưu thông tin Dispute vào Database
-      // Lưu ý: api instance đã có sẵn tiền tố /api nên chỉ cần truyền /disputes
-      const response = await api.post('/disputes', { 
-        escrowId: id, 
-        reason: reason 
-      });
-      
+      const response = await api.post('/disputes', { escrowId: id, reason: reason });
       const disputeId = response.data?.id || response.data?.disputeId;
 
       addLog({ message: 'Đang gửi yêu cầu chọn 5 Trọng tài lên Blockchain (VRF)...', type: 'info' });
 
-      // BƯỚC 2: Gọi Route mới để trigger Chainlink VRF
-      await api.post('/mediator/request-random', { 
+      // Gọi Backend gọi Chainlink
+      const reqRes = await api.post('/mediator/request-random', { 
         escrowId: id,
-        buyerAddress: escrow.buyer.walletAddress,   // Đổi từ 'buyer' thành 'buyerAddress'
-        sellerAddress: escrow.seller.walletAddress  // Đổi từ 'seller' thành 'sellerAddress'
+        buyerAddress: escrow.buyer.walletAddress,
+        sellerAddress: escrow.seller.walletAddress
       });
 
-      addLog({ message: 'Yêu cầu On-chain đã được gửi thành công!', type: 'success' });
+      const chainEscrowId = reqRes.data?.chainEscrowId || reqRes.data?.chainEscrowIdHex;
+      
+      // Chờ (Polling) Chainlink trả kết quả
+      if (chainEscrowId) {
+        addLog({ message: 'Đang chờ Chainlink bốc thăm ngẫu nhiên (1-2 blocks)...', type: 'warning' });
+        const maxPoll = 15;
+        for (let i = 0; i < maxPoll; i++) {
+          try {
+            const res = await api.get(`/mediator/random-result/${encodeURIComponent(chainEscrowId)}`);
+            if (res.data?.status === 'completed') {
+              addLog({ message: '✅ VRF đã phân công xong 5 Trọng tài! Đang cập nhật giao diện...', type: 'success' });
+              const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+              setEscrow(fresh);
+              break;
+            }
+          } catch (e) { /* Bỏ qua lỗi 404 khi đang chờ */ }
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
 
-      // 4. Chuyển hướng sang giao diện quản lý Dispute
+      addLog({ message: 'Yêu cầu hoàn tất. Chuyển hướng sang trang Tranh chấp...', type: 'success' });
       navigate(`/disputes/${disputeId || id}`);
 
     } catch (error) {
+      console.error('[handleRaiseDispute] Lỗi:', error);
       const errorMsg = error.response?.data?.error || error.message;
-      addLog({ message: `Lỗi: ${errorMsg}`, type: 'error' });
-      console.error("Dispute Integration Error:", error);
+      addLog({ message: `Lỗi Dispute: ${errorMsg}`, type: 'error' });
     }
   };
 
@@ -634,6 +789,10 @@ export default function EscrowDetail() {
     );
   }
 
+  const mediationAssigned = ['DISPUTED', 'VOTING', 'RESOLVED'].includes(
+  String(escrow?.status || '').toUpperCase()
+  );
+
   // --- RENDER GIAO DIỆN CHÍNH ---
   return (
     <div className="min-h-screen bg-slate-900 text-slate-50 font-sans pb-20">
@@ -652,33 +811,16 @@ export default function EscrowDetail() {
       </nav>
 
       <main className="max-w-4xl mx-auto mt-10 flex flex-col gap-8 px-6">
-        {/* --- START DEBUG PANEL --- */}
-        <div className="bg-red-900 text-yellow-300 p-6 rounded-xl font-mono text-sm border-2 border-yellow-500 shadow-2xl mb-4">
-          <h3 className="text-xl font-bold text-white mb-4 border-b border-red-700 pb-2">🔍 X-RAY DEBUG PANEL</h3>
-          <div className="grid grid-cols-2 gap-2">
-            <p>1. DKG Progress: <span className="text-white">{progress}/7</span></p>
-            <p>2. Active Role: <span className="text-white px-2 bg-black/50">{activeRole}</span></p>
-            <p>3. Connected Wallet: <span className="text-white">{address || 'Not connected'}</span></p>
-            <p>4. Buyer in DB: <span className="text-white">{escrow?.buyer?.walletAddress || 'Loading...'}</span></p>
-            <p>5. DB Status: <span className="text-white">{escrow?.status || 'Loading...'}</span></p>
-            <p>5.5 On-chain Vault Status: <span className="text-white">{onChainVaultStatus === null ? 'N/A' : onChainVaultStatus}</span></p>
-            <p>6. Tx Confirmed: <span className="text-white">{String(isConfirmed)}</span></p>
-            <p>7. Vault Deployed (hasVaultAddress): <span className="text-white">{String(hasVaultAddress)}</span></p>
+        {/* BẢNG YÊU CẦU ĐĂNG NHẬP (PHẦN 3) */}
+        {!hasLocalToken && (
+          <div className="bg-yellow-900/50 border border-yellow-600 p-6 rounded-xl shadow-lg mb-2">
+            <h3 className="text-yellow-400 font-bold text-xl mb-2">⚠️ Yêu Cầu Đăng Nhập (SIWE)</h3>
+            <p className="text-yellow-200 mb-4">Phiên đăng nhập đã hết hạn. Bạn cần ký tên bằng ví MetaMask để tải dữ liệu và cấp quyền thao tác.</p>
+            <button onClick={login} className="px-6 py-3 bg-yellow-600 hover:bg-yellow-500 text-black font-bold rounded-lg transition-colors">
+              Sign In with Ethereum
+            </button>
           </div>
-          <div className="mt-4 pt-4 border-t border-red-700 text-lg flex flex-col gap-2">
-            <p>=&gt; Show Deploy Button?: 
-              <span className={progress >= 7 && activeRole === 'buyer' && !hasVaultAddress ? "text-green-400 ml-2 font-bold" : "text-red-400 ml-2 font-bold"}>
-                {String(progress >= 7 && activeRole === 'buyer' && !hasVaultAddress)}
-              </span>
-            </p>
-            <p>=&gt; Show Deposit Button?: 
-              <span className={progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'LOCKED' && !isVaultLockedOnChain ? "text-green-400 ml-2 font-bold" : "text-red-400 ml-2 font-bold"}>
-                {String(progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'LOCKED' && !isVaultLockedOnChain)}
-              </span>
-            </p>
-          </div>
-        </div>
-        {/* --- END DEBUG PANEL --- */}
+        )}
         
         {!localPubKey && address && (
           <div className="bg-red-900/50 border-2 border-red-500 p-6 rounded-xl shadow-[0_0_20px_rgba(239,68,68,0.3)] flex flex-col items-center gap-3">
@@ -798,6 +940,7 @@ export default function EscrowDetail() {
         </section>
 
         {/* KHỐI 2: THANH TIẾN TRÌNH TSS 5-OF-7 */}
+        {mediationAssigned && (
         <section className="flex flex-col gap-4">
           <div className="flex justify-between items-end">
             <h3 className="text-slate-300 font-medium text-lg">Public Key Collection Progress</h3>
@@ -822,6 +965,7 @@ export default function EscrowDetail() {
             })}
           </div>
         </section>
+      )}
 
         {/* KHỐI 3: TERMINAL LOGS */}
         <section className="bg-[#0A0F1C] p-5 rounded-xl border border-slate-800 h-64 overflow-y-auto font-mono text-sm shadow-2xl relative group">
@@ -850,7 +994,7 @@ export default function EscrowDetail() {
         </section>
 
         {/* KHỐI 4: CỤM NÚT HÀNH ĐỘNG PUBKEY */}
-        {progress < 7 && (
+        {mediationAssigned &&progress < 7 && (
           <section className="flex gap-6 justify-center mt-4">
             <button 
               onClick={handleSubmitMyPubKey}
@@ -874,9 +1018,34 @@ export default function EscrowDetail() {
             </a>
           </section>
         )}
-
+        {/* KHỐI 4.1: DEPLOY VAULT (CHỈ HIỆN KHI CHƯA CÓ CONTRACT) */}
+        {!hasVaultAddress && (
+          <section className="bg-slate-800 p-8 rounded-2xl border border-yellow-500/30 shadow-sm mt-6">
+            {activeRole === 'buyer' ? (
+              <div className="flex flex-col items-center text-center gap-4">
+                <h3 className="text-xl font-bold text-yellow-400">Bước 1: Triển khai Hợp đồng (Deploy)</h3>
+                <p className="text-slate-300">Hợp đồng Escrow chưa được tạo trên mạng lưới Blockchain.</p>
+                <p className="text-sm text-slate-400 mb-2">Với tư cách là Buyer, bạn cần ký giao dịch (trả phí Gas) để tạo Hợp đồng.</p>
+                <button
+                  onClick={handleDeploy}
+                  disabled={isDeploying}
+                  className={`px-8 py-4 w-full max-w-sm rounded-xl font-bold text-white transition-all ${
+                    isDeploying ? 'bg-amber-600 cursor-wait opacity-70' : 'bg-linear-to-r from-blue-600 to-emerald-600 hover:scale-105 shadow-lg'
+                  }`}
+                >
+                  {isDeploying ? 'Đang Deploy (Chờ MetaMask)...' : 'Deploy Vault Contract'}
+                </button>
+              </div>
+            ) : (
+              <div className="text-center text-slate-400">
+                <p className="mb-2 text-lg font-bold text-yellow-500/80">⏳ Đang chờ Buyer triển khai Hợp đồng...</p>
+                <p className="text-sm text-slate-500">Sau khi Buyer tạo Hợp đồng thành công, các chức năng khác sẽ được mở khóa.</p>
+              </div>
+            )}
+          </section>
+        )}
         {/* KHỐI 4.5 (PHASE 2): ĐỘC QUYỀN HIỂN THỊ NÚT DEPOSIT CHỈ KHI ĐÃ CÓ VAULT ADDRESS */}
-        {progress >= 7 && activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'LOCKED' && !isVaultLockedOnChain && (
+        {activeRole === 'buyer' && hasVaultAddress && !isConfirmed && escrow?.status !== 'LOCKED' && !isVaultLockedOnChain && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-emerald-500/50 shadow-[0_0_30px_rgba(16,185,129,0.15)] mt-8 relative overflow-hidden">
             <div className="absolute top-0 right-0 p-4 opacity-10">
               <span className="text-8xl">💎</span>
@@ -902,27 +1071,41 @@ export default function EscrowDetail() {
           </section>
         )}
 
+        {/* KHỐI 4.8: CÁC NÚT HÀNH ĐỘNG HAPPY PATH & DISPUTE */}
+        {(activeRole === 'buyer' || activeRole === 'seller') && (
+          // Nút sẽ hiện ngay lập tức khi tiền đã được khóa an toàn
+          ['LOCKED', 'FUNDED'].includes(String(escrow?.status || '').toUpperCase()) && (
+            <section className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl mt-6 flex flex-col md:flex-row gap-4 justify-center items-center">
+              <button
+                onClick={handleStartRelease}
+                className="w-full md:w-auto px-6 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-white font-bold shadow-lg shadow-emerald-500/20 transform transition hover:-translate-y-1"
+              >
+                Start Release
+              </button>
+
+              <button
+                onClick={handleStartRefund}
+                className="w-full md:w-auto px-6 py-3 bg-amber-600 hover:bg-amber-500 rounded-xl text-white font-bold shadow-lg shadow-amber-500/20 transform transition hover:-translate-y-1"
+              >
+                Start Refund
+              </button>
+
+              <button
+                onClick={handleRaiseDispute}
+                className="w-full md:w-auto px-6 py-3 bg-rose-600 hover:bg-rose-500 rounded-xl text-white font-bold shadow-lg shadow-rose-500/20 transform transition hover:-translate-y-1"
+              >
+                Raise Dispute
+              </button>
+            </section>
+          )
+        )}
+
         {/* KHỐI 5: LUỒNG KÝ ĐA PHẦN (TSS SIGNING ORCHESTRATION) */}
         {/* Điều kiện: Đã có Vault và (Các Role khác sẽ thấy ngay. Riêng Buyer chỉ thấy khi isConfirmed = true HOẶC db đã báo LOCKED) */}
-        {progress >= 7 && hasVaultAddress && !isSigningFlowClosed && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'LOCKED' || isVaultLockedOnChain) && (
+        {mediationAssigned && progress >= 7 && hasVaultAddress && !isSigningFlowClosed && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'LOCKED' || isVaultLockedOnChain) && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-blue-500/30 shadow-[0_0_30px_rgba(59,130,246,0.1)] mt-8">
             <h3 className="text-xl font-bold mb-6 text-blue-400 border-b border-slate-700 pb-4">TSS Signing Orchestration</h3>
-            
-            {/* STATE 0: SELECT ACTION */}
-            {!signingPhase && (
-              <div className="flex gap-4">
-                <button onClick={handleStartRelease} className="flex-1 bg-emerald-600 hover:bg-emerald-500 py-3 rounded-lg font-bold text-white shadow-lg">
-                  Start Release
-                </button>
-                <button onClick={handleStartRefund} className="flex-1 bg-amber-600 hover:bg-amber-500 py-3 rounded-lg font-bold text-white shadow-lg">
-                  Start Refund
-                </button>
-                <button onClick={handleRaiseDispute} className="flex-1 bg-rose-600 hover:bg-rose-500 py-3 rounded-lg font-bold text-white shadow-lg shadow-rose-500/20">
-                  Raise Dispute
-                </button>
-              </div>
-            )}
-
+        
             {/* TRẠNG THÁI 1: ROUND 1 (NONCE) */}
             {signingPhase === 'nonce' && (
               <div className="flex flex-col gap-4">

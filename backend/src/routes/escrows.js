@@ -70,11 +70,10 @@ function emitDisputeEvent(io, escrow, eventName, payload) {
  */
 router.post('/draft', authMiddleware, async (req, res) => {
   try {
-    const { title, description, amount, sellerAddress, mediatorAddresses } = req.body;
-    const normalizedMediatorAddresses = normalizeMediatorAddresses(mediatorAddresses);
+    const { title, description, amount, sellerAddress } = req.body;
 
-    if (!title || !amount || !sellerAddress || !normalizedMediatorAddresses) {
-      return res.status(400).json({ error: 'title, amount, sellerAddress, mediatorAddresses[5] are required' });
+    if (!title || !amount || !sellerAddress) {
+      return res.status(400).json({ error: 'title, amount, sellerAddress are required' });
     }
     if (typeof amount !== 'number' || amount <= 0) {
       return res.status(400).json({ error: 'amount must be a positive number' });
@@ -86,44 +85,22 @@ router.post('/draft', authMiddleware, async (req, res) => {
     if (buyerAddr === normalizedSellerAddress) {
       return res.status(400).json({ error: 'Buyer and Seller cannot be the same address' });
     }
-    if (new Set(normalizedMediatorAddresses).size !== normalizedMediatorAddresses.length) {
-      return res.status(400).json({ error: 'Mediator addresses must be unique' });
-    }
-    if (normalizedMediatorAddresses.some((address) => !address)) {
-      return res.status(400).json({ error: 'Mediator addresses cannot be empty' });
-    }
-    if (normalizedMediatorAddresses.some((address) => address === buyerAddr || address === normalizedSellerAddress)) {
-      return res.status(400).json({ error: 'Mediator addresses must differ from buyer/seller' });
-    }
 
-    // Upsert seller & mediator (tạo tài khoản nếu chưa có)
+    // Upsert seller (create user if not exists)
     const seller = await prisma.user.upsert({
       where: { walletAddress: normalizedSellerAddress },
       update: {},
       create: { walletAddress: normalizedSellerAddress }
     });
 
-    const mediatorUsers = await Promise.all(
-      normalizedMediatorAddresses.map((address) => prisma.user.upsert({
-        where: { walletAddress: address },
-        update: { role: 'MEDIATOR' },
-        create: { walletAddress: address, role: 'MEDIATOR' }
-      }))
-    );
-
+    // Create escrow WITHOUT any escrowMediators. Mediators will be assigned by VRF during a dispute.
     const escrow = await prisma.escrow.create({
       data: {
         title,
         description: description || '',
         amount,
         buyerId: req.user.id,
-        sellerId: seller.id,
-        escrowMediators: {
-          create: mediatorUsers.map((mediator, index) => ({
-            mediatorId: mediator.id,
-            slot: index + 1
-          }))
-        }
+        sellerId: seller.id
       },
       include: {
         buyer: { select: { id: true, walletAddress: true, name: true } },

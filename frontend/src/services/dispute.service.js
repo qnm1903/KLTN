@@ -1,17 +1,4 @@
-import axios from 'axios';
-
-const API_BASE = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_URL
-  ? import.meta.env.VITE_API_URL
-  : '/api';
-
-const api = axios.create({
-  baseURL: API_BASE,
-  headers: {
-    Accept: 'application/json'
-    // Authorization header có thể được thêm ở runtime nếu cần
-  },
-  timeout: 30_000
-});
+import api from '../lib/api.js';
 
 /**
  * createDispute
@@ -74,7 +61,9 @@ export async function getEvidenceList(disputeId) {
  * @returns {Promise<Object>} AcceptMediatorResponse
  */
 export async function acceptMediator(disputeId, payload) {
-  const res = await api.post(`/disputes/${encodeURIComponent(disputeId)}/accept-mediator`, payload);
+  const path = `/disputes/${encodeURIComponent(disputeId)}/accept-mediator`;
+  console.log('🚀 [dispute.service] POST ->', path); // Log đường dẫn để kiểm tra
+  const res = await api.post(path, payload);
   return res.data;
 }
 

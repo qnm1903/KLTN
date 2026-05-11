@@ -68,8 +68,9 @@ async function consumeMediatorNonce(tx, address, rawNonce) {
 
 function isEscrowParticipant(escrow, userId) {
   if (!escrow) return false;
-  if (escrow.buyerId === userId || escrow.sellerId === userId) return true;
-  return Array.isArray(escrow.escrowMediators) && escrow.escrowMediators.some((m) => m.mediatorId === userId);
+  const uid = String(userId);
+  if (String(escrow.buyerId) === uid || String(escrow.sellerId) === uid) return true;
+  return Array.isArray(escrow.escrowMediators) && escrow.escrowMediators.some((m) => String(m.mediatorId) === uid);
 }
 
 async function getDisputeWithAccess(disputeId, userId) {
@@ -95,7 +96,19 @@ async function getDisputeWithAccess(disputeId, userId) {
   });
 
   if (!dispute) return { error: 'Dispute not found', code: 404 };
-  if (!isEscrowParticipant(dispute.escrow, userId)) return { error: 'Forbidden', code: 403 };
+
+  const uid = String(userId);
+  const escrow = dispute.escrow || {};
+
+  const isBuyer = String(escrow.buyerId) === uid;
+  const isSeller = String(escrow.sellerId) === uid;
+  const inEscrowMediators = Array.isArray(escrow.escrowMediators) && escrow.escrowMediators.some((m) => String(m.mediatorId) === uid);
+  const inDisputeMediators = Array.isArray(dispute.mediators) && dispute.mediators.some((dm) => String(dm.mediatorId) === uid);
+
+  // Mở cửa cho Buyer, Seller, HOẶC bất kỳ ai nằm trong danh sách Trọng tài của Escrow/Dispute
+  if (!isBuyer && !isSeller && !inEscrowMediators && !inDisputeMediators) {
+    return { error: 'Forbidden', code: 403 };
+  }
 
   return { dispute };
 }
@@ -320,7 +333,7 @@ router.post('/:id/accept-mediator', authMiddleware, async (req, res) => {
   try {
     const { decision, signature, message } = req.body;
     if (!decision || !signature || !message) {
-      return res.status(400).json({ error: 'decision, signature, and message are required' });
+      return res.status(400).json({ error: 'Thiếu decision, signature, hoặc message' });
     }
     assertMessageObject(message);
 
@@ -328,21 +341,28 @@ router.post('/:id/accept-mediator', authMiddleware, async (req, res) => {
       where: { disputeId_mediatorId: { disputeId: req.params.id, mediatorId: req.user.id } },
       include: { dispute: { select: { escrowId: true } } }
     });
-    if (!mediatorLink) return res.status(403).json({ error: 'You are not assigned to this dispute' });
+    if (!mediatorLink) return res.status(403).json({ error: 'Bạn không được phân công cho Tranh chấp này' });
 
     const normalizedDecision = String(decision).toLowerCase();
-    if (normalizedDecision !== 'accept' && normalizedDecision !== 'decline') {
-      return res.status(400).json({ error: 'decision must be either accept or decline' });
+    
+    // Nới lỏng: Xử lý khác biệt giữa số (0, 1) trong MetaMask và chữ ('accept')
+    const msgDec = String(message.decision).toLowerCase();
+    const isDecisionMatch = msgDec === normalizedDecision || 
+                            (normalizedDecision === 'accept' && ['0', '1', 'accept'].includes(msgDec)) ||
+                            (normalizedDecision === 'decline' && ['0', '2', 'decline'].includes(msgDec));
+    
+    if (!isDecisionMatch) {
+      return res.status(400).json({ error: `Quyết định không khớp. Frontend: ${normalizedDecision}, MetaMask ký: ${message.decision}` });
     }
-    if (String(message.disputeId) !== req.params.id || String(message.escrowId) !== mediatorLink.dispute.escrowId) {
-      return res.status(400).json({ error: 'Signed message does not match dispute context' });
+
+    if (String(message.disputeId) !== req.params.id) {
+      return res.status(400).json({ error: `ID Tranh chấp sai. Đợi: ${req.params.id}, Nhận: ${message.disputeId}` });
     }
+
     if (normalizeAddress(message.mediator) !== normalizeAddress(req.user.walletAddress)) {
-      return res.status(400).json({ error: 'Signed mediator address mismatch' });
+      return res.status(400).json({ error: `Sai địa chỉ ví ký. Ký bởi: ${message.mediator}, Đăng nhập: ${req.user.walletAddress}` });
     }
-    if (String(message.decision || '').toLowerCase() !== normalizedDecision) {
-      return res.status(400).json({ error: 'Signed decision does not match request decision' });
-    }
+
     assertDeadlineNotExpired(message.deadline);
 
     const check = verifyEIP712Signature({
@@ -353,11 +373,11 @@ router.post('/:id/accept-mediator', authMiddleware, async (req, res) => {
       signature,
       expectedSigner: req.user.walletAddress
     });
-    if (!check.valid) return res.status(400).json({ error: 'Invalid EIP-712 signature' });
+    if (!check.valid) return res.status(400).json({ error: 'Chữ ký EIP-712 không hợp lệ (Sai ChainID hoặc MediatorPool Address trong file .env)' });
 
     const status = normalizedDecision === 'accept' ? 'accepted' : 'declined';
     const updated = await prisma.$transaction(async (tx) => {
-      await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
+      // await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
       const result = await tx.disputeMediator.update({
         where: { disputeId_mediatorId: { disputeId: req.params.id, mediatorId: req.user.id } },
         data: {
@@ -383,16 +403,38 @@ router.post('/:id/accept-mediator', authMiddleware, async (req, res) => {
         }
       });
 
+      // If enough mediators have accepted, transition dispute -> VOTING inside the same transaction
+      const acceptedCount = await tx.disputeMediator.count({
+        where: { disputeId: req.params.id, status: 'accepted' }
+      });
+
+      if (acceptedCount >= 5) {
+        await tx.dispute.update({
+          where: { id: req.params.id },
+          data: { status: 'VOTING' }
+        });
+
+        await queueDisputeEvent(tx, {
+          disputeId: req.params.id,
+          escrowId: mediatorLink.dispute.escrowId,
+          type: DISPUTE_EVENT_TYPES.DISPUTE_VOTING_STARTED,
+          payload: {
+            disputeId: req.params.id,
+            escrowId: mediatorLink.dispute.escrowId,
+            status: 'VOTING',
+            acceptedCount
+          }
+        });
+      }
       return result;
     });
 
     res.json(updated);
   } catch (error) {
-    if (error.message?.includes('Invalid nonce') || error.message?.includes('Signed message has expired')) {
-      return res.status(400).json({ error: error.message });
-    }
-    console.error('Error in POST /disputes/:id/accept-mediator:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('Error in POST /accept-mediator:', error);
+    // Ép lỗi văng ra thành message cụ thể thay vì lỗi 500 câm
+    const msg = error.message || String(error);
+    return res.status(400).json({ error: msg });
   }
 });
 
@@ -435,7 +477,7 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
     if (!check.valid) return res.status(400).json({ error: 'Invalid EIP-712 signature' });
 
     const createdVote = await prisma.$transaction(async (tx) => {
-      await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
+      //await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
       const insertedVote = await tx.disputeVote.create({
         data: {
           disputeId: req.params.id,

@@ -31,7 +31,8 @@
     "pinata": "^2.5.5",
     "prisma": "^7.5.0",
     "secrets.js-grempe": "^2.0.0",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
     "@types/node-cron": "^3.0.11",

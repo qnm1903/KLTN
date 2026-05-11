@@ -30,7 +30,7 @@ function submittedRolesFromCollection(collection) {
   return PARTICIPANT_ROLES.filter((role) => !missing.has(role));
 }
 
-export const useEscrowSync = (escrowId) => {
+export const useEscrowSync = (escrowId, escrowStatus) => {
   const [, setProgress] = useAtom(signatureProgressAtom);
   const [, setSignedNodes] = useAtom(signedNodesAtom);
   const setStatus = useSetAtom(escrowStatusAtom);
@@ -65,7 +65,15 @@ export const useEscrowSync = (escrowId) => {
       }
     };
 
-    bootstrapCollection();
+    // Only initialize TSS/pubkey collection when mediators have been assigned (escrow disputed)
+    const normalizedStatus = String(escrowStatus || '').toUpperCase();
+    const tssAllowed = normalizedStatus === 'DISPUTED' || normalizedStatus === 'VOTING';
+    
+    if (!tssAllowed) {
+      addLog({ message: 'TSS sync disabled: escrow not disputed yet.', type: 'info' });
+    } else {
+      bootstrapCollection();
+    }
 
     if (!currentToken) {
       addLog({ message: 'Waiting for SIWE authentication to join Socket Room...', type: 'warning' });
@@ -162,15 +170,21 @@ export const useEscrowSync = (escrowId) => {
       socket.off('schnorr_complete', handleSchnorrComplete);
       socket.emit('leave_escrow', escrowId);
     };
-  }, [escrowId, setProgress, setSignedNodes, setStatus, addLog, applyCollectionSnapshot, setSigningPhase, setNonceRound1, setSigningProgress, setAggregatedSignature]);
-
+  }, [escrowId, escrowStatus, setProgress, setSignedNodes, setStatus, addLog, applyCollectionSnapshot, setSigningPhase, setNonceRound1, setSigningProgress, setAggregatedSignature]);
   const submitPubKey = useCallback(async ({ role, pubKey }) => {
     if (!escrowId) throw new Error('Escrow id is required');
     if (!role || !pubKey) throw new Error('role and pubKey are required');
 
+    // Guard: only allow pubkey submission after escrow mediators are assigned
+    const normalizedStatus = String(escrowStatus || '').toUpperCase();
+    if (normalizedStatus !== 'DISPUTED' && normalizedStatus !== 'VOTING') {
+      addLog({ message: 'Cannot submit pubkey: escrow not disputed / mediators not assigned.', type: 'warning' });
+      throw new Error('Escrow not ready for pubkey submission');
+    }
+
     addLog({ message: `Submitting pubkey for role ${role}...`, type: 'warning' });
 
-    const { data } = await api.post('/escrow/pubkey/submit', { escrowId, role, pubKey });
+    const { data } = await api.post('/escrows/pubkey/submit', { escrowId, role, pubKey }); // Đã sửa /escrow/ thành /escrows/
     applyCollectionSnapshot(data?.collection);
 
     if (data?.isIdempotent) {
@@ -179,7 +193,7 @@ export const useEscrowSync = (escrowId) => {
       addLog({ message: `Pubkey accepted for role ${role}.`, type: 'success' });
     }
     return data;
-  }, [escrowId, addLog, applyCollectionSnapshot]);
+  }, [escrowId, escrowStatus, addLog, applyCollectionSnapshot]);
 
   const submitNonce = useCallback(async (escrowId, role, action, signerBitmap, R_x, R_y) => {
     addLog({ message: `Submitting Nonce for action: ${action}...`, type: 'warning' });

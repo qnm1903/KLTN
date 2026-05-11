@@ -146,32 +146,40 @@ contract EscrowVault {
     }
 
     function _validateParticipants(address _buyer, address _seller, address[5] memory _mediators) private pure {
-        if (_buyer == address(0) || _seller == address(0)) revert ZeroAddress();
-        if (_buyer == _seller) revert ParticipantConflict();
+    if (_buyer == address(0) || _seller == address(0)) revert ZeroAddress();
+    if (_buyer == _seller) revert ParticipantConflict();
 
-        for (uint8 i = 0; i < 5; i++) {
-            address mediatorAddr = _mediators[i];
-            if (mediatorAddr == address(0)) revert ZeroAddress();
-            if (mediatorAddr == _buyer || mediatorAddr == _seller) revert ParticipantConflict();
+    bool allZero = true;
+    for (uint8 k = 0; k < 5; k++) {
+        if (_mediators[k] != address(0)) { allZero = false; break; }
+    }
+    if (allZero) return;
 
-            for (uint8 j = i + 1; j < 5; j++) {
-                if (mediatorAddr == _mediators[j]) revert DuplicateMediator();
-            }
+    for (uint8 i = 0; i < 5; i++) {
+        address mediatorAddr = _mediators[i];
+        if (mediatorAddr == address(0)) continue;
+        if (mediatorAddr == _buyer || mediatorAddr == _seller) revert ParticipantConflict();
+
+        for (uint8 j = i + 1; j < 5; j++) {
+            if (mediatorAddr == _mediators[j]) revert DuplicateMediator();
         }
     }
+}
 
     function _validateAggregateKey(uint256[2] memory coords) private pure {
-        uint256 x = coords[0];
-        uint256 y = coords[1];
-        if (x == 0 || y == 0 || x >= FIELD_MODULUS || y >= FIELD_MODULUS) {
-            revert InvalidAggregateKey();
-        }
+    if (coords[0] == 0 && coords[1] == 0) return;
 
-        uint256 lhs = mulmod(y, y, FIELD_MODULUS);
-        uint256 x2 = mulmod(x, x, FIELD_MODULUS);
-        uint256 rhs = addmod(mulmod(x2, x, FIELD_MODULUS), 7, FIELD_MODULUS);
-        if (lhs != rhs) revert InvalidAggregateKey();
+    uint256 x = coords[0];
+    uint256 y = coords[1];
+    if (x == 0 || y == 0 || x >= FIELD_MODULUS || y >= FIELD_MODULUS) {
+        revert InvalidAggregateKey();
     }
+
+    uint256 lhs = mulmod(y, y, FIELD_MODULUS);
+    uint256 x2 = mulmod(x, x, FIELD_MODULUS);
+    uint256 rhs = addmod(mulmod(x2, x, FIELD_MODULUS), 7, FIELD_MODULUS);
+    if (lhs != rhs) revert InvalidAggregateKey();
+}
 
     function _payout(address recipient) private {
         (bool success, ) = payable(recipient).call{value: amount}("");

@@ -37,6 +37,7 @@ export function useSIWE() {
       const validToken = data.accessToken || data.token;
       setSession({
         accessToken: validToken,
+        refreshToken: data.refreshToken || null,
         user: data.user,
       });
 

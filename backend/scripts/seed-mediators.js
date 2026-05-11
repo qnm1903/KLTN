@@ -1,5 +1,3 @@
-// escrow-tss/scripts/seed-mediators.js
-
 import { ethers } from 'ethers';
 // Persist on-chain registrations into backend DB
 import prisma from '../src/lib/prisma.js';

@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { getStoredAccessToken, clearSession, setSession } from '../store/authStore';
+import { getStoredAccessToken, getStoredRefreshToken, clearSession, setSession } from '../store/authStore';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api',
@@ -44,6 +44,17 @@ api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
+    // If the refresh endpoint itself failed (or any request explicitly to /auth/refresh), don't try to refresh again
+    if (originalRequest && originalRequest.url && originalRequest.url.includes('/auth/refresh')) {
+      try {
+        clearSession();
+      } catch (e) {}
+      // Redirect to login immediately to prevent loops
+      if (typeof window !== 'undefined') {
+        window.location.replace('/login');
+      }
+      return Promise.reject(error);
+    }
 
     if (error.response?.status === 401 && !originalRequest._retry) {
       if (isRefreshing) {
@@ -62,12 +73,16 @@ api.interceptors.response.use(
 
       try {
         console.log("[Refresh Token]: Đang refresh access token...");
-        const refreshRes = await api.post('/auth/refresh');
-        const newAccessToken = refreshRes.data.accessToken || refreshRes.data.token;
+        // Use the raw axios client to call refresh so we bypass this instance's interceptors
+        const refreshRes = await axios.post(`${api.defaults.baseURL}/auth/refresh`, { refreshToken: getStoredRefreshToken() }, { withCredentials: true });
 
-        // Lưu access token mới
+        const newAccessToken = refreshRes.data.accessToken || refreshRes.data.token;
+        const newRefreshToken = refreshRes.data.refreshToken || null;
+
+        // Update session with both new tokens
         setSession({ 
           accessToken: newAccessToken, 
+          refreshToken: newRefreshToken, 
           user: refreshRes.data.user 
         });
 
@@ -78,7 +93,12 @@ api.interceptors.response.use(
       } catch (refreshError) {
         console.error("[Refresh Failed]:", refreshError);
         processQueue(refreshError, null);
-        clearSession();
+        try {
+          clearSession();
+        } catch (e) {}
+        if (typeof window !== 'undefined') {
+          window.location.replace('/login');
+        }
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;

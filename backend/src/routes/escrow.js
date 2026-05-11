@@ -834,99 +834,84 @@ router.get('/:id/approvals', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── API DEPLOY VAULT ĐẦY ĐỦ (CỦA TECH LEAD - TỪ 1 ĐẾN 10) ─────────────────────────
-router.post('/deploy-vault', authMiddleware, async (req, res) => {
+// ─── API LƯU ĐỊA CHỈ VAULT SAU KHI BUYER DEPLOY (VRF ARCHITECTURE) ─────────
+// POST /api/escrow/record-deploy
+// Body: { escrowId, txHash }
+router.post('/record-deploy', authMiddleware, async (req, res) => {
   try {
-    const { escrowId } = req.body;
-    console.log("\n------------------------------------------------");
-    console.log(`[Deploy] 1. Nhận yêu cầu deploy cho Escrow ID: ${escrowId}`);
-    
-    const session = await getSession(escrowId);
-    if (!session) return res.status(404).json({ error: 'Session not found' });
+    const { escrowId, txHash } = req.body;
+    if (!escrowId || !txHash) return res.status(400).json({ error: 'escrowId and txHash are required' });
 
-    console.log("[Deploy] 2. Query TOÀN BỘ dữ liệu từ DB...");
-    const escrowDb = await prisma.escrow.findUnique({
-      where: { id: escrowId },
-      include: {
-        seller: true,
-        escrowMediators: {
-          include: { mediator: true },
-          orderBy: { slot: 'asc' }
+    console.log(`[Record Deploy] Bắt đầu xác nhận giao dịch ${txHash} cho Escrow ${escrowId}`);
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+
+    // Chờ biên lai (receipt) từ mạng lưới (thử tối đa 8 lần)
+    let receipt = await provider.getTransactionReceipt(txHash);
+    const maxAttempts = 8;
+    let attempt = 0;
+    while (!receipt && attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 1500));
+      receipt = await provider.getTransactionReceipt(txHash);
+      attempt += 1;
+    }
+
+    if (!receipt) return res.status(404).json({ error: 'Transaction receipt not found yet' });
+    if (receipt.status === 0) return res.status(400).json({ error: 'Transaction failed on-chain' });
+
+    // Phân tích Logs để tìm sự kiện EscrowCreatedEvent và lấy luôn chainEscrowId
+    const iface = new ethers.Interface(factoryAbi);
+    let foundVaultAddress = null;
+    let foundChainEscrowId = null;
+
+    for (const log of receipt.logs) {
+      try {
+        const parsed = iface.parseLog(log);
+        if (parsed && (parsed.name === 'EscrowCreatedEvent' || parsed.name === 'EscrowCreated')) {
+          foundVaultAddress = parsed.args?.escrowAddress || parsed.args?.[0];
+          foundChainEscrowId = parsed.args?.escrowId || parsed.args?.[1];
+          break;
         }
+      } catch (e) {
+        // Bỏ qua các log không thuộc về Factory
+      }
+    }
+
+    if (!foundVaultAddress) {
+      return res.status(404).json({ error: 'EscrowCreatedEvent not found in tx logs' });
+    }
+
+    console.log(`[Record Deploy] Két sắt: ${foundVaultAddress}. Mã định danh Blockchain (chainEscrowId): ${foundChainEscrowId}. Đang lưu DB...`);
+
+    // LƯU CẢ ĐỊA CHỈ LẪN MÃ ĐỊNH DANH VÀO DATABASE
+    await prisma.escrow.update({
+      where: { id: escrowId },
+      data: { 
+        contractAddress: foundVaultAddress,
+        chainEscrowId: foundChainEscrowId
       }
     });
 
-    if (!escrowDb) return res.status(404).json({ error: 'Escrow not found in DB' });
-    if (escrowDb.contractAddress) {
-      console.log(`[Deploy] -> Đã có sẵn Contract: ${escrowDb.contractAddress}`);
-      return res.json({ alreadyDeployed: true, contractAddress: escrowDb.contractAddress });
+    // Bắn sự kiện Socket để Giao diện Buyer/Seller tự động mở nút Nạp tiền
+    const io = req.app.get('io');
+    if (io) {
+      io.to(escrowId).emit('vault_deployed', {
+        escrowId,
+        contractAddress: foundVaultAddress,
+        txHash,
+        blockNumber: receipt.blockNumber,
+        status: 'INITIALIZED'
+      });
+    }
+    // Báo cho Worker biết có Vault mới để nó đưa vào danh sách theo dõi (Chữa bệnh Treo Deploy lần 2)
+    if (io) {
+      io.emit('subscribe_vault', { contractAddress: foundVaultAddress });
     }
 
-    console.log("[Deploy] 3. Kết nối mạng Sepolia...");
-    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-    const adminWallet = new ethers.Wallet(process.env.ADMIN_PRIVATE_KEY, provider);
-    const factory = new ethers.Contract(process.env.FACTORY_ADDRESS, factoryAbi, adminWallet);
-
-    console.log("[Deploy] 4. Đang trích xuất tham số...");
-    const sellerAddress = escrowDb.seller?.walletAddress;
-    const mediators = escrowDb.escrowMediators.map(row => row.mediator?.walletAddress);
-    
-    // VÁ LỖI CHÍ MẠNG: Deploy Két sắt với đúng Ổ KHÓA CỦA 5 NGƯỜI (trước đó nhánh main nhét 7 người vào đây gây Revert).
-    const releaseSignersDeploy = getActionSigners('release');
-    const pkAgg = aggregatePubKeysForRoles(session.pubKeys, releaseSignersDeploy);
-    const pkX = String(pkAgg.x);
-    const pkY = String(pkAgg.y);
-    const amountInWei = ethers.parseEther(String(escrowDb.amount));
-
-    console.log("[Deploy] 5. Đang lấy trước địa chỉ Vault (staticCall)...");
-    const expectedVaultAddress = await factory.createEscrow.staticCall(
-      sellerAddress, mediators, [pkX, pkY], amountInWei, 7, 14
-    );
-    console.log(`[Deploy] -> Địa chỉ Vault mới sẽ là: ${expectedVaultAddress}`);
-
-    console.log("[Deploy] 6. Đang bắn giao dịch thật lên Blockchain (Vui lòng chờ)...");
-    const tx = await factory.createEscrow(
-      sellerAddress, mediators, [pkX, pkY], amountInWei, 7, 14
-    );
-
-    console.log(`[Deploy] 7. Giao dịch đã gửi thành công! Hash: ${tx?.hash}`);
-    res.json({ txHash: tx?.hash, status: 'pending' });
-
-    // Tiến trình ngầm TỰ ĐỘNG LƯU DATABASE
-    (async () => {
-      try {
-        if (tx && typeof tx.wait === 'function') {
-          const receipt = await tx.wait(1);
-          console.log(`[Deploy] 8. Block đã xác nhận! Hash: ${tx.hash}, Block: ${receipt.blockNumber}`);
-
-          console.log(`[Deploy] 9. Đang lưu Vault Address vào Database...`);
-          await prisma.escrow.update({
-            where: { id: escrowId },
-            data: { contractAddress: expectedVaultAddress }
-          });
-
-          // Emit socket event to notify all clients in the escrow room
-          const io = req.app.get('io');
-          io.to(escrowId).emit('vault_deployed', {
-            escrowId,
-            contractAddress: expectedVaultAddress,
-            txHash: tx.hash,
-            blockNumber: receipt.blockNumber,
-            status: 'INITIALIZED'
-          });
-          console.log(`[Deploy] 9b. Socket event 'vault_deployed' emitted to room: ${escrowId}`);
-
-          console.log(`[Deploy] 10. HOÀN TẤT 100%! Frontend có thể nhấn F5 để tiếp tục.`);
-          console.log("------------------------------------------------\n");
-        }
-      } catch (bgErr) {
-        console.error("[Deploy] Lỗi Background tx wait:", bgErr);
-      }
-    })();
-
+    console.log(`[Record Deploy] Thành công! Escrow ${escrowId} -> ${foundVaultAddress}`);
+    return res.json({ ok: true, contractAddress: foundVaultAddress });
   } catch (error) {
-    console.error('[Deploy] LỖI CẤP ĐỘ HỆ THỐNG:', error);
-    res.status(500).json({ error: error.message || String(error) });
+    console.error('Error in POST /escrow/record-deploy:', error);
+    return res.status(500).json({ error: error.message || String(error) });
   }
 });
 

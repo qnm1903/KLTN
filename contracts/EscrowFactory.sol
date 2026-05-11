@@ -71,34 +71,45 @@ contract EscrowFactory {
     }
 
     function _validateParticipants(
-        address buyer,
-        address seller,
-        address[5] calldata mediators
+    address buyer,
+    address seller,
+    address[5] calldata mediators
     ) private pure {
-        if (buyer == address(0) || seller == address(0)) revert ZeroAddress();
-        if (buyer == seller) revert ParticipantConflict();
+    if (buyer == address(0) || seller == address(0)) revert ZeroAddress();
+    if (buyer == seller) revert ParticipantConflict();
 
-        for (uint8 i = 0; i < 5; i++) {
-            address mediatorAddr = mediators[i];
-            if (mediatorAddr == address(0)) revert ZeroAddress();
-            if (mediatorAddr == buyer || mediatorAddr == seller) revert ParticipantConflict();
+    // Cho phép trường hợp đặc biệt: 5 Trọng tài đều là ví rỗng (Kiến trúc VRF)
+    bool allZero = true;
+    for (uint8 k = 0; k < 5; k++) {
+        if (mediators[k] != address(0)) { allZero = false; break; }
+    }
+    if (allZero) return;
 
-            for (uint8 j = i + 1; j < 5; j++) {
-                if (mediatorAddr == mediators[j]) revert DuplicateMediator();
-            }
+    // Nếu có truyền Trọng tài thật, thì mới tiến hành kiểm tra trùng lặp
+    for (uint8 i = 0; i < 5; i++) {
+        address mediatorAddr = mediators[i];
+        if (mediatorAddr == address(0)) continue; 
+        if (mediatorAddr == buyer || mediatorAddr == seller) revert ParticipantConflict();
+
+        for (uint8 j = i + 1; j < 5; j++) {
+            if (mediatorAddr == mediators[j]) revert DuplicateMediator();
         }
+    }
     }
 
     function _validateAggregateKey(uint256[2] calldata coords) private pure {
-        uint256 x = coords[0];
-        uint256 y = coords[1];
-        if (x == 0 || y == 0 || x >= FIELD_MODULUS || y >= FIELD_MODULUS) {
-            revert InvalidAggregateKey();
-        }
+    // Cho phép tọa độ (0,0) - Tức là Khóa TSS chưa được tạo
+    if (coords[0] == 0 && coords[1] == 0) return;
 
-        uint256 lhs = mulmod(y, y, FIELD_MODULUS);
-        uint256 x2 = mulmod(x, x, FIELD_MODULUS);
-        uint256 rhs = addmod(mulmod(x2, x, FIELD_MODULUS), 7, FIELD_MODULUS);
-        if (lhs != rhs) revert InvalidAggregateKey();
+    uint256 x = coords[0];
+    uint256 y = coords[1];
+    if (x == 0 || y == 0 || x >= FIELD_MODULUS || y >= FIELD_MODULUS) {
+        revert InvalidAggregateKey();
     }
+
+    uint256 lhs = mulmod(y, y, FIELD_MODULUS);
+    uint256 x2 = mulmod(x, x, FIELD_MODULUS);
+    uint256 rhs = addmod(mulmod(x2, x, FIELD_MODULUS), 7, FIELD_MODULUS);
+    if (lhs != rhs) revert InvalidAggregateKey();
+}
 }

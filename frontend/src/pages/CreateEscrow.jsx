@@ -6,8 +6,6 @@ import { ESCROW_CONTRACT_ADDRESS } from '../lib/wagmi';
 import { getPubKey } from '../lib/storage';
 import { getStoredAccessToken } from '../store/authStore';
 
-const MEDIATOR_COUNT = 5;
-
 function normalizeAddress(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -19,9 +17,6 @@ export default function CreateEscrow() {
   
   const [buyerPubKey, setBuyerPubKey] = useState('');
   const [formData, setFormData] = useState({ title: '', amount: '', sellerAddress: '' });
-  const [mediators, setMediators] = useState(
-    Array.from({ length: MEDIATOR_COUNT }, () => ({ address: '' }))
-  );
   const [isInitializing, setIsInitializing] = useState(false);
 
   useEffect(() => {
@@ -32,100 +27,57 @@ export default function CreateEscrow() {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
-  const handleMediatorChange = (index, value) => {
-    const newMediators = [...mediators];
-    newMediators[index].address = value;
-    setMediators(newMediators);
-  };
-
-  const validateMediatorCommittee = (buyerAddress, sellerAddress, mediatorAddresses) => {
-    if (new Set(mediatorAddresses).size !== mediatorAddresses.length) {
-      throw new Error('5 địa chỉ Mediators không được trùng nhau.');
-    }
-    if (buyerAddress === sellerAddress) {
-      throw new Error('Địa chỉ Buyer và Seller phải khác nhau.');
-    }
-    if (mediatorAddresses.some((medi) => medi === buyerAddress || medi === sellerAddress)) {
-      throw new Error('Mediators không được trùng với Buyer hoặc Seller.');
-    }
-  };
-
   const handleSubmit = async (e) => {
-    e.preventDefault();
-    setIsInitializing(true);
+  e.preventDefault();
+  setIsInitializing(true);
 
-    try {
-      // BƯỚC 1: CLIENT-SIDE AUTHENTICATION GUARD
-      if (!address) throw new Error('Vui lòng kết nối ví MetaMask.');
-      if (!getStoredAccessToken()) throw new Error('Bạn chưa xác thực! Vui lòng nhấn nút "Sign In (SIWE)".');
-      if (!buyerPubKey) throw new Error('Thiếu Public Key. Hãy vào trang /generate-key để tạo khóa.');
+  try {
+    // CLIENT-SIDE AUTHENTICATION GUARD
+    if (!address) throw new Error('Vui lòng kết nối ví MetaMask.');
+    if (!getStoredAccessToken()) throw new Error('Bạn chưa xác thực! Vui lòng nhấn nút "Sign In (SIWE)".');
+    if (!buyerPubKey) throw new Error('Thiếu Public Key. Hãy vào trang /generate-key để tạo khóa.');
 
-      // BƯỚC 2: DATA SANITIZATION
-      const title = formData.title.trim();
-      const amount = Number(formData.amount);
-      const sellerAddress = normalizeAddress(formData.sellerAddress);
+    // DATA SANITIZATION
+    const title = formData.title.trim();
+    const amount = Number(formData.amount);
+    const sellerAddress = normalizeAddress(formData.sellerAddress);
 
-      if (!title) throw new Error('Vui lòng nhập Tiêu đề Escrow.');
-      if (!amount || amount <= 0) throw new Error('Số tiền phải lớn hơn 0.');
-      if (!sellerAddress || sellerAddress.length < 40) throw new Error('Địa chỉ Seller không hợp lệ.');
+    if (!title) throw new Error('Vui lòng nhập Tiêu đề Escrow.');
+    if (!amount || amount <= 0) throw new Error('Số tiền phải lớn hơn 0.');
+    if (!sellerAddress || sellerAddress.length < 40) throw new Error('Địa chỉ Seller không hợp lệ.');
+    if (normalizeAddress(address) === sellerAddress) throw new Error('Địa chỉ Buyer và Seller phải khác nhau.');
 
-      // BƯỚC 3: TSS ARRAY INTEGRITY CHECK (Chống lỗi 400 Missing Fields)
-      const normalizedMediatorAddresses = mediators.map((m) => normalizeAddress(m.address));
-      const emptyIndex = normalizedMediatorAddresses.findIndex(addr => addr === '');
-      
-      if (emptyIndex !== -1) {
-        throw new Error(`Chưa nhập địa chỉ cho Mediator số ${emptyIndex + 1} (Yêu cầu đủ 5).`);
-      }
+    // Create draft escrow WITHOUT starting DKG / init — mediators are assigned later via VRF on dispute
+    const { data: draftEscrow } = await api.post('/escrows/draft', {
+      title,
+      description: title,
+      amount,
+      sellerAddress
+    });
+    if (!draftEscrow?.id) throw new Error('Backend không trả về ID Draft.');
 
-      validateMediatorCommittee(normalizeAddress(address), sellerAddress, normalizedMediatorAddresses);
+    // Do NOT call /escrow/init or /escrow/pubkey/submit here.
+    // DKG/init should only start when participants (including mediators) are known.
+    alert('✅ Escrow draft created. Mediators will be assigned by VRF when needed.');
+    navigate(`/escrow/${draftEscrow.id}`);
 
-      // BƯỚC 4: EXECUTE API PIPELINE
-      console.log("📦 [Payload]:", { title, amount, sellerAddress, normalizedMediatorAddresses });
-      
-      const { data: draftEscrow } = await api.post('/escrows/draft', {
-        title,
-        description: title,
-        amount,
-        sellerAddress,
-        mediatorAddresses: normalizedMediatorAddresses
-      });
-      if (!draftEscrow?.id) throw new Error('Backend không trả về ID Draft.');
-
-      const currentChainId = String(chainId || import.meta.env.VITE_CHAIN_ID || 11155111);
-      const contractAddr = ESCROW_CONTRACT_ADDRESS || "0x0000000000000000000000000000000000000000";
-      
-      await api.post('/escrow/init', {
-        escrowId: draftEscrow.id,
-        chainId: currentChainId,
-        contractAddress: contractAddr
-      });
-
-      await api.post('/escrow/pubkey/submit', {
-        escrowId: draftEscrow.id,
-        role: 'buyer',
-        pubKey: buyerPubKey
-      });
-
-      alert('✅ Khởi tạo Escrow thành công! Đang chuyển hướng...');
-      navigate(`/escrow/${draftEscrow.id}`);
-
-    } catch (err) {
-      console.error("🔥 [CREATE ESCROW FAILED]:", err);
-      let errorMsg = err.message;
-      if (err.isAxiosError) {
-        errorMsg = `[API Failed]: ${err.config?.url}\n[Chi tiết]: ${err.response?.data?.error || JSON.stringify(err.response?.data)}`;
-      }
-      alert("LỖI KHỞI TẠO:\n\n" + errorMsg);
-    } finally {
-      setIsInitializing(false);
+  } catch (err) {
+    console.error("🔥 [CREATE ESCROW FAILED]:", err);
+    let errorMsg = err.message;
+    if (err.isAxiosError) {
+      errorMsg = `[API Failed]: ${err.config?.url}\n[Chi tiết]: ${err.response?.data?.error || JSON.stringify(err.response?.data)}`;
     }
-  };
+    alert("LỖI KHỞI TẠO:\n\n" + errorMsg);
+  } finally {
+    setIsInitializing(false);
+  }
+};
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-50 font-sans py-10">
       <div className="max-w-3xl mx-auto">
         <div className="bg-slate-800 p-8 rounded-2xl border border-slate-700 shadow-2xl">
-          <h2 className="text-3xl font-bold mb-8">Initialize 5-of-7 Escrow</h2>
+          <h2 className="text-3xl font-bold mb-8">Initialize Escrow</h2>
 
           <div className="mb-8 p-4 bg-slate-900 rounded-lg border border-slate-700">
             <p className="text-sm text-slate-400 mb-2">Your TSS Public Key (Buyer)</p>
@@ -153,25 +105,9 @@ export default function CreateEscrow() {
               </div>
             </div>
 
-            <div className="bg-slate-900 p-6 rounded-xl border border-slate-700 flex flex-col gap-4">
-              <h3 className="text-slate-400 text-sm font-medium uppercase tracking-wider mb-2">Mediators (5 required)</h3>
-              {mediators.map((mediator, index) => (
-                <div key={index} className="flex gap-4 items-start">
-                  <div className="w-8 h-10 mt-1 flex items-center justify-center bg-slate-800 rounded-full text-slate-400 font-bold text-sm shrink-0">
-                    {index + 1}
-                  </div>
-                  <div className="flex-1 grid grid-cols-1 gap-4">
-                    <input type="text" placeholder={`Địa chỉ Mediator ${index + 1} (0x...)`} value={mediator.address} 
-                      onChange={(e) => handleMediatorChange(index, e.target.value)}
-                      className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 font-mono text-sm focus:border-blue-500 w-full" required />
-                  </div>
-                </div>
-              ))}
-            </div>
-
             <button type="submit" disabled={isInitializing} 
               className="w-full py-4 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-lg transition-colors mt-2 disabled:opacity-50 disabled:cursor-not-allowed">
-              {isInitializing ? 'Đang khởi tạo hệ thống DKG...' : 'Create Draft & Start Key Collection'}
+              {isInitializing ? 'Đang khởi tạo hệ thống...' : 'Create Draft & Start Key Collection'}
             </button>
           </form>
         </div>

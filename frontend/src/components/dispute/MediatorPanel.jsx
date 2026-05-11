@@ -2,12 +2,12 @@ import React from 'react';
 import { useAccount, useWalletClient } from 'wagmi';
 import { useAtomValue, useSetAtom } from 'jotai';
 import { mediatorsListAtom, voteTallyAtom, currentDisputeAtom } from '../../store/disputeAtoms.js';
-import { MEDIATOR_STATUS } from '../../constants/dispute.constants.js';
-import { acceptMediator } from '../../services/dispute.service.js';
+import { MEDIATOR_STATUS, DISPUTE_STATUS, VOTE_CHOICE } from '../../constants/dispute.constants.js';
+import { acceptMediator, getDispute, submitVote } from '../../services/dispute.service.js';
 
 /**
  * MediatorPanel
- * - Hiển thị danh sách 7 mediators với giao diện Dark Cyber / Glassmorphism.
+ * - Hiển thị danh sách 5 mediators với giao diện Dark Cyber / Glassmorphism.
  * - KHÔNG thay đổi logic Web3 (useWalletClient / signTypedData) hay Jotai state logic.
  * - Chỉ thay đổi UI: màu sắc, background, button style, badges, progress bar.
  *
@@ -17,6 +17,7 @@ const MediatorPanel = () => {
   const { address } = useAccount();
   const { data: walletClient } = useWalletClient();
   const setMediators = useSetAtom(mediatorsListAtom);
+  const setCurrentDispute = useSetAtom(currentDisputeAtom);
   const currentDispute = useAtomValue(currentDisputeAtom);
   const [processingMediator, setProcessingMediator] = React.useState(null);
   const mediators = useAtomValue(mediatorsListAtom) || [];
@@ -77,22 +78,127 @@ const handleMediatorDecision = async (mediatorAddr, action) => {
       message,
       account: address
     });
+  // --- 1. LOG DỮ LIỆU GỬI ĐI ---
+    console.log('🚀 [Accept] Đang gửi payload lên Backend:', { decision, disputeId: message.disputeId });
 
-    // Call backend with exactly the fields it expects
-    await acceptMediator(message.disputeId, {
+    // --- 2. GỌI BACKEND ---
+    const acceptRes = await acceptMediator(message.disputeId, {
       decision,
       signature,
       message
     });
+    console.log('✅ [Accept] Backend đã xử lý thành công (DB Update):', acceptRes);
 
-    // Update local mediators list UI optimistically
-    setMediators((prev) => prev.map((m) =>
-      (m.address || (m.mediator && m.mediator.walletAddress) || m.mediatorId || '').toLowerCase() === mediatorAddr.toLowerCase()
-        ? { ...m, status: decision === 'accept' ? 'ACCEPTED' : 'DECLINED', acceptedAt: decision === 'accept' ? new Date().toISOString() : null, declinedAt: decision === 'decline' ? new Date().toISOString() : null }
-        : m
-    ));
+    // --- 3. KÉO DỮ LIỆU MỚI NHẤT VỀ ---
+    try {
+      const fresh = await getDispute(message.disputeId);
+      console.log('🔄 [Refresh] Dữ liệu Dispute mới từ DB:', fresh);
+
+      if (fresh && fresh.mediators && fresh.mediators.length > 0) {
+        setCurrentDispute(fresh);
+        setMediators(fresh.mediators);
+        console.log('✨ [4] Đã cập nhật giao diện thành công từ Backend!');
+      } else {
+        console.warn('⚠️ [4] Backend trả về rỗng, dùng fallback Optimistic Update');
+        // Bản vá Copilot: Dùng MEDIATOR_STATUS.ACCEPTED ('accepted' chữ thường) để tránh lỗi Component không nhận diện được
+        setMediators((prev) => prev.map((m) =>
+          (m.address || (m.mediator && m.mediator.walletAddress) || m.mediatorId || '').toLowerCase() === mediatorAddr.toLowerCase()
+            ? {
+                ...m,
+                status: decision === 'accept' ? MEDIATOR_STATUS.ACCEPTED : MEDIATOR_STATUS.DECLINED,
+                acceptedAt: decision === 'accept' ? new Date().toISOString() : null,
+                declinedAt: decision === 'decline' ? new Date().toISOString() : null
+              }
+            : m
+        ));
+      }
+    } catch (refreshErr) {
+      console.error('❌ [Refresh] Lỗi khi kéo dữ liệu mới:', refreshErr);
+    }
   } catch (err) {
-    console.error('Decision error', err);
+      // Bóc trần sự thật từ Axios
+      const backendMsg = err.response?.data?.error || err.message || 'Lỗi không xác định';
+      console.error('❌❌❌ Lỗi Ký/Gửi Decision (CHI TIẾT):', backendMsg);
+      
+      // Bắn popup đập thẳng vào mắt để không phải F12 nữa
+      alert(`GIAO DỊCH BỊ TỪ CHỐI BỞI BACKEND:\n\n${backendMsg}`);
+      
+    } finally {
+      setProcessingMediator(null);
+    }
+};
+
+const handleSubmitVote = async (mediatorAddr, choice) => {
+  if (!mediatorAddr || !walletClient || !address || !currentDispute) return;
+  setProcessingMediator(mediatorAddr);
+
+  try {
+    const voteValue = choice;
+    const nonce = 0; // frontend relies on backend nonce verification
+    const deadline = Math.floor(Date.now() / 1000) + 300;
+
+    const message = {
+      disputeId: currentDispute?.disputeId || currentDispute?.id || '',
+      escrowId: currentDispute?.escrowId || '',
+      mediatorsHash: '0x' + '0'.repeat(64),
+      vote: voteValue,
+      justificationHash: '0x' + '0'.repeat(64),
+      evidenceRoot: '0x' + '0'.repeat(64),
+      nonce,
+      deadline
+    };
+
+    const domain = {
+      name: 'KLTNDisputeVoting',
+      version: '1',
+      chainId: 11155111,
+      verifyingContract: '0x0000000000000000000000000000000000000000'
+    };
+
+    const types = {
+      Vote: [
+        { name: 'disputeId', type: 'string' },
+        { name: 'escrowId', type: 'string' },
+        { name: 'mediatorsHash', type: 'bytes32' },
+        { name: 'vote', type: 'string' },
+        { name: 'justificationHash', type: 'bytes32' },
+        { name: 'evidenceRoot', type: 'bytes32' },
+        { name: 'nonce', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' }
+      ]
+    };
+
+    const signature = await walletClient.signTypedData({
+      domain,
+      types,
+      primaryType: 'Vote',
+      message,
+      account: address
+    });
+
+    // Call backend submitVote
+    const res = await submitVote(message.disputeId, {
+      vote: voteValue,
+      justification: '',
+      evidenceRefs: [],
+      signature,
+      message
+    });
+
+    // Refresh dispute state
+    try {
+      const fresh = await getDispute(message.disputeId);
+      if (fresh) {
+        setCurrentDispute(fresh);
+        setMediators(fresh.mediators);
+      }
+    } catch (e) {
+      console.warn('Failed to refresh after vote', e);
+    }
+  } catch (err) {
+    const backendMsg = err.response?.data?.error || err.message || 'Lỗi không xác định khi vote';
+    console.error('Vote failed:', backendMsg);
+    alert(`Vote failed: ${backendMsg}`);
   } finally {
     setProcessingMediator(null);
   }
@@ -155,7 +261,17 @@ const padded = Array.from({ length: COMMITTEE_SIZE }).map((_, i) => {
             </div>
 
             <div className="flex items-center space-x-3">
-              {address && m.address && address.toLowerCase() === m.address.toLowerCase() && m.status === MEDIATOR_STATUS.ASSIGNED ? (
+              {/**
+               * If current dispute is in VOTING state and this user is the mediator and accepted,
+               * show voting options. Otherwise show accept/decline when assigned, or status badge.
+               */}
+              {address && m.address && address.toLowerCase() === m.address.toLowerCase() && currentDispute?.status === DISPUTE_STATUS.VOTING && m.status === MEDIATOR_STATUS.ACCEPTED && !m.votedAt ? (
+                <div className="flex items-center space-x-2">
+                  <button onClick={() => handleSubmitVote(m.address, VOTE_CHOICE.RELEASE_TO_BUYER)} disabled={processingMediator === m.address} className="px-3 py-1 rounded-md bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 text-sm hover:bg-emerald-500/40 disabled:opacity-50">{processingMediator === m.address ? '...' : 'Release'}</button>
+                  <button onClick={() => handleSubmitVote(m.address, VOTE_CHOICE.RETURN_TO_SELLER)} disabled={processingMediator === m.address} className="px-3 py-1 rounded-md bg-rose-500/20 text-rose-400 border border-rose-500/50 text-sm hover:bg-rose-500/40 disabled:opacity-50">{processingMediator === m.address ? '...' : 'Return'}</button>
+                  <button onClick={() => handleSubmitVote(m.address, VOTE_CHOICE.SPLIT)} disabled={processingMediator === m.address} className="px-3 py-1 rounded-md bg-amber-500/20 text-amber-400 border border-amber-500/50 text-sm hover:bg-amber-500/40 disabled:opacity-50">{processingMediator === m.address ? '...' : 'Split'}</button>
+                </div>
+              ) : address && m.address && address.toLowerCase() === m.address.toLowerCase() && m.status === MEDIATOR_STATUS.ASSIGNED ? (
                 <div className="flex items-center space-x-2">
                   <button
                     onClick={() => handleMediatorDecision(m.address, 'ACCEPT')}

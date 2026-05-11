@@ -181,7 +181,7 @@ export const useContractCall = () => {
       throw new Error(`Vault already ${statusLabel} on-chain.`);
     }
 
-    addLog({ message: `Requesting MetaMask to lock ${amountEth} ETH on-chain...`, type: 'warning' });
+    // addLog({ message: `Requesting MetaMask to lock ${amountEth} ETH on-chain...`, type: 'warning' });
 
     await writeContractAsync({
       address: vaultContractAddress,

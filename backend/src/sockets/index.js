@@ -81,6 +81,18 @@ export function setupSockets(server) {
   io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
 
+    // Cầu nối Worker -> Server -> Trình duyệt
+    socket.on('worker:mediators_selected', (payload) => {
+      try {
+        const { escrowId, chainEscrowId, mediators } = payload || {};
+        if (!escrowId || !mediators) return;
+        console.log(`[socket] Nhận được mediators_selected từ Worker cho Escrow ${escrowId}`);
+        io.to(escrowId).emit('mediators_selected', { escrowId, chainEscrowId, mediators });
+      } catch (err) {
+        console.error('[socket] Lỗi khi re-broadcasting:', err);
+      }
+    });
+
     // Client tham gia room của escrow sau khi xác thực JWT và quyền participant.
     socket.on('join_escrow', async (payload, ack) => {
       const respond = typeof ack === 'function' ? ack : () => {};

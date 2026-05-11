@@ -227,13 +227,10 @@ router.post('/verify', authVerifyRateLimiter, async (req, res) => {
     res.json({
       token: sessionTokens.accessToken,
       accessToken: sessionTokens.accessToken,
+      // Trả về refreshToken để client lưu
+      refreshToken: sessionTokens.refreshToken,
       refreshTokenExpiresAt: sessionTokens.refreshTokenExpiresAt,
-      user: {
-        id: user.id,
-        walletAddress: user.walletAddress,
-        name: user.name,
-        role: user.role
-      }
+      user: { id: user.id, walletAddress: user.walletAddress, name: user.name, role: user.role }
     });
   } catch (error) {
     console.error('Error in /auth/verify:', error);
@@ -243,24 +240,18 @@ router.post('/verify', authVerifyRateLimiter, async (req, res) => {
 
 router.post('/refresh', authVerifyRateLimiter, async (req, res) => {
   try {
-    const refreshToken = getRefreshTokenFromCookie(req);
+    // Ưu tiên cookie, nhưng cho phép client gửi refreshToken qua body
+    const refreshTokenFromCookie = getRefreshTokenFromCookie(req);
+    const refreshToken = refreshTokenFromCookie || (req.body && req.body.refreshToken) || null;
+
     if (!refreshToken) {
-      return res.status(401).json({ error: 'Missing refresh token cookie' });
+      return res.status(401).json({ error: 'Missing refresh token (cookie or request body)' });
     }
 
     const tokenHash = hashRefreshToken(refreshToken);
     const stored = await prisma.refreshToken.findUnique({
       where: { tokenHash },
-      include: {
-        user: {
-          select: {
-            id: true,
-            walletAddress: true,
-            name: true,
-            role: true
-          }
-        }
-      }
+      include: { user: { select: { id: true, walletAddress: true, name: true, role: true } } }
     });
 
     if (!stored || stored.revokedAt || stored.expiresAt.getTime() <= Date.now() || !stored.user) {
@@ -268,6 +259,7 @@ router.post('/refresh', authVerifyRateLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid or expired refresh token' });
     }
 
+    // Thu hồi token cũ, cấp token mới
     const nextRefreshToken = crypto.randomBytes(48).toString('hex');
     const nextRefreshTokenExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
 
@@ -277,24 +269,18 @@ router.post('/refresh', authVerifyRateLimiter, async (req, res) => {
     });
 
     await prisma.refreshToken.create({
-      data: {
-        tokenHash: hashRefreshToken(nextRefreshToken),
-        userId: stored.user.id,
-        expiresAt: nextRefreshTokenExpiresAt
-      }
+      data: { tokenHash: hashRefreshToken(nextRefreshToken), userId: stored.user.id, expiresAt: nextRefreshTokenExpiresAt }
     });
 
-    const accessToken = signToken({
-      id: stored.user.id,
-      walletAddress: stored.user.walletAddress,
-      role: stored.user.role
-    });
+    const accessToken = signToken({ id: stored.user.id, walletAddress: stored.user.walletAddress, role: stored.user.role });
 
     setRefreshCookie(res, nextRefreshToken, REFRESH_TOKEN_TTL_MS);
 
+    // Trả về refreshToken qua body để Frontend lưu dự phòng
     return res.json({
       token: accessToken,
       accessToken,
+      refreshToken: nextRefreshToken,
       refreshTokenExpiresAt: nextRefreshTokenExpiresAt.toISOString(),
       user: stored.user
     });

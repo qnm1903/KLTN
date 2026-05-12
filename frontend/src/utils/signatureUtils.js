@@ -56,6 +56,24 @@ async function _resolveChainId(walletClient, fallback = 1) {
 }
 
 /**
+ * sha256Hex
+ * Tính SHA-256 cho một File/Blob và trả về hex string có prefix 0x.
+ *
+ * @param {File|Blob} file
+ * @returns {Promise<string>}
+ */
+export async function sha256Hex(file) {
+  if (!file || typeof file.arrayBuffer !== 'function') {
+    throw new Error('sha256Hex requires a File or Blob input');
+  }
+
+  const buffer = await file.arrayBuffer();
+  const hash = await crypto.subtle.digest('SHA-256', buffer);
+  const bytes = Array.from(new Uint8Array(hash));
+  return '0x' + bytes.map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/**
  * signVotePayload
  *
  * Tạo EIP-712 signature cho Vote payload bằng viem WalletClient.signTypedData.
@@ -168,6 +186,7 @@ export default {
   DISPUTE_DOMAIN,
   VOTE_TYPES,
   EVIDENCE_TYPES,
+  sha256Hex,
   signVotePayload,
   signEvidenceMetadata
 };

@@ -8,9 +8,8 @@ import {
   voteTallyAtom
 } from '../store/disputeAtoms.js';
 
-// Giả sử có một socket instance chung được export từ src/lib/socket.js
-// Socket có thể là socket.io-client hoặc wrapper tương tự với API .on/.off/.emit
-import socket from '../lib/socket.js';
+import { socket } from '../lib/socket.js';
+import { getStoredAccessToken } from '../store/authStore.js';
 
 import {
   MEDIATOR_STATUS,
@@ -41,11 +40,20 @@ export function useDisputeWebSocket(disputeId) {
 
     // Helper: subscribe to dispute channel if backend supports it
     try {
-      if (typeof socket.emit === 'function') {
-        socket.emit('subscribe', { channel: `dispute:${disputeId}` });
+      const token = getStoredAccessToken();
+      if (token && typeof socket.emit === 'function') {
+        if (!socket.connected) {
+          socket.connect();
+        }
+
+        socket.emit('join_escrow', { escrowId: disputeId, token }, (response) => {
+          if (!response?.ok) {
+            console.warn('join_escrow failed:', response?.error || 'unknown');
+          }
+        });
       }
     } catch (err) {
-      // ignore subscription errors
+      console.warn('useDisputeWebSocket: join_escrow error:', err);
     }
 
     // ---- Event handlers ----
@@ -107,8 +115,8 @@ export function useDisputeWebSocket(disputeId) {
     };
 
     const handleEvidenceAdded = (payload) => {
-      // payload expected: { disputeId, evidence: Evidence }
-      const evidence = payload && payload.evidence ? payload.evidence : null;
+      // payload expected: { disputeId, evidence } hoặc evidence object trực tiếp
+      const evidence = payload && payload.evidence ? payload.evidence : payload;
       if (!evidence) return;
 
       // Append to evidenceListAtom (avoid duplicates)
@@ -171,10 +179,17 @@ export function useDisputeWebSocket(disputeId) {
 
     const handleVoteProgress = (payload) => {
       // payload expected: { disputeId, tally: VoteTally, totalVotes, threshold }
-      const tally = payload && payload.tally ? payload.tally : null;
-      if (!tally) return;
+      const incoming = payload || {};
+      const base = incoming.tally || {};
 
-      setVoteTally(tally);
+      setVoteTally({
+        RELEASE_TO_BUYER: Number(base.RELEASE_TO_BUYER || 0),
+        RETURN_TO_SELLER: Number(base.RETURN_TO_SELLER || 0),
+        SPLIT: Number(base.SPLIT || 0),
+        OTHER: Number(base.OTHER || 0),
+        totalVotes: Number(incoming.totalVotes ?? 0),
+        threshold: Number(incoming.threshold ?? 5)
+      });
 
       // Ensure dispute status set to VOTING
       setCurrentDispute((prev) => {
@@ -254,12 +269,12 @@ export function useDisputeWebSocket(disputeId) {
     // ---- Register listeners (socket.io style) ----
     try {
       if (typeof socket.on === 'function') {
-        socket.on('dispute:created', handleDisputeCreated);
-        socket.on('mediators:assigned', handleMediatorsAssigned);
-        socket.on('evidence:added', handleEvidenceAdded);
-        socket.on('vote:submitted', handleVoteSubmitted);
-        socket.on('vote:progress', handleVoteProgress);
-        socket.on('dispute:resolved', handleDisputeResolved);
+        socket.on('dispute-created', handleDisputeCreated);
+        socket.on('mediator-assigned', handleMediatorsAssigned);
+        socket.on('dispute-evidence-added', handleEvidenceAdded);
+        socket.on('vote-submitted', handleVoteSubmitted);
+        socket.on('vote-tally-updated', handleVoteProgress);
+        socket.on('dispute-finalized', handleDisputeResolved);
       } else if (typeof socket.addEventListener === 'function') {
         // fallback: if socket is native WebSocket and server sends stringified messages,
         // we listen to 'message' and route based on event field in payload.
@@ -269,49 +284,49 @@ export function useDisputeWebSocket(disputeId) {
             const evt = msg.event;
             const payload = msg.payload;
             switch (evt) {
-              case 'dispute:created':
+              case 'dispute-created':
                 handleDisputeCreated(payload);
                 break;
-              case 'mediators:assigned':
+              case 'mediator-assigned':
                 handleMediatorsAssigned(payload);
                 break;
-              case 'evidence:added':
+              case 'dispute-evidence-added':
                 handleEvidenceAdded(payload);
                 break;
-              case 'vote:submitted':
+              case 'vote-submitted':
                 handleVoteSubmitted(payload);
                 break;
-              case 'vote:progress':
+              case 'vote-tally-updated':
                 handleVoteProgress(payload);
                 break;
-              case 'dispute:resolved':
+              case 'dispute-finalized':
                 handleDisputeResolved(payload);
                 break;
               default:
                 break;
             }
           } catch (err) {
-            // ignore parse errors
+            console.warn('useDisputeWebSocket: message parse error:', err);
           }
         });
       } else {
         // socket has no known API
-        // console.warn('Socket instance does not support .on or .addEventListener');
+        console.warn('Socket instance does not support .on or .addEventListener');
       }
     } catch (err) {
-      // swallow errors during registration
+      console.warn('useDisputeWebSocket: listener registration error:', err);
     }
 
     // Cleanup: remove listeners and unsubscribe from channel
     return () => {
       try {
         if (typeof socket.off === 'function') {
-          socket.off('dispute:created', handleDisputeCreated);
-          socket.off('mediators:assigned', handleMediatorsAssigned);
-          socket.off('evidence:added', handleEvidenceAdded);
-          socket.off('vote:submitted', handleVoteSubmitted);
-          socket.off('vote:progress', handleVoteProgress);
-          socket.off('dispute:resolved', handleDisputeResolved);
+          socket.off('dispute-created', handleDisputeCreated);
+          socket.off('mediator-assigned', handleMediatorsAssigned);
+          socket.off('dispute-evidence-added', handleEvidenceAdded);
+          socket.off('vote-submitted', handleVoteSubmitted);
+          socket.off('vote-tally-updated', handleVoteProgress);
+          socket.off('dispute-finalized', handleDisputeResolved);
         } else if (typeof socket.removeEventListener === 'function') {
           // cannot remove message-specific listener easily if anonymous; in production keep named reference
           socket.removeEventListener('message', () => {});
@@ -322,7 +337,7 @@ export function useDisputeWebSocket(disputeId) {
           socket.emit('unsubscribe', { channel: `dispute:${disputeId}` });
         }
       } catch (err) {
-        // ignore cleanup errors
+        console.warn('useDisputeWebSocket: cleanup error:', err);
       }
     };
   }, [disputeId, setCurrentDispute, setEvidenceList, setMediatorsList, setVoteTally]);

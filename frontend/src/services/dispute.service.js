@@ -33,13 +33,21 @@ export async function getDispute(disputeId) {
  * @returns {Promise<Object>} EvidenceUploadResponse
  */
 export async function uploadEvidence(disputeId, formData) {
-  // Khi dùng axios với FormData, không set Content-Type boundary thủ công; axios sẽ tự thêm.
-  const res = await api.post(`/disputes/${encodeURIComponent(disputeId)}/evidence`, formData, {
+  // Fetch dispute to get escrowId
+  const disputeRes = await api.get(`/disputes/${encodeURIComponent(disputeId)}`);
+  const dispute = disputeRes.data;
+  if (!dispute?.escrowId) {
+    throw new Error('Cannot determine escrowId from dispute');
+  }
+
+  // Call escrow evidence endpoint (Khi dùng axios với FormData, không set Content-Type boundary thủ công; axios sẽ tự thêm.)
+  const res = await api.post(`/escrows/${encodeURIComponent(dispute.escrowId)}/evidence`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data'
     }
   });
-  return res.data;
+  // Add escrowId + disputeId to response for FE convenience
+  return { ...res.data, escrowId: dispute.escrowId, disputeId };
 }
 
 /**
@@ -80,6 +88,32 @@ export async function submitVote(disputeId, payload) {
 }
 
 /**
+ * getCurrentMediatorNonce
+ * GET /api/disputes/nonce/current
+ * @returns {Promise<Object>} CurrentMediatorNonceResponse
+ */
+export async function getCurrentMediatorNonce() {
+  const res = await api.get('/disputes/nonce/current');
+  return res.data;
+}
+
+/**
+ * signEvidence
+ * POST /api/disputes/:id/evidence/:evidenceId/signature
+ * @param {string} disputeId
+ * @param {string} evidenceId
+ * @param {Object} payload - { signature, message }
+ * @returns {Promise<Object>} SignedEvidence
+ */
+export async function signEvidence(disputeId, evidenceId, payload) {
+  const res = await api.post(
+    `/disputes/${encodeURIComponent(disputeId)}/evidence/${encodeURIComponent(evidenceId)}/signature`,
+    payload
+  );
+  return res.data;
+}
+
+/**
  * Convenience default export
  */
 const disputeService = {
@@ -88,7 +122,9 @@ const disputeService = {
   uploadEvidence,
   getEvidenceList,
   acceptMediator,
-  submitVote
+  submitVote,
+  getCurrentMediatorNonce,
+  signEvidence
 };
 
 export default disputeService;

@@ -143,7 +143,32 @@ function buildEvidenceResponse(evidence) {
   };
 }
 
+function buildCurrentTallyFromVotes(votes = []) {
+  const tally = {
+    RELEASE_TO_BUYER: 0,
+    RETURN_TO_SELLER: 0,
+    SPLIT: 0,
+    OTHER: 0
+  };
+
+  for (const vote of votes) {
+    const key = vote?.vote;
+    if (Object.prototype.hasOwnProperty.call(tally, key)) tally[key] += 1;
+    else tally.OTHER += 1;
+  }
+
+  const totalVotes = Object.values(tally).reduce((sum, value) => sum + Number(value || 0), 0);
+
+  return {
+    ...tally,
+    totalVotes,
+    threshold: 5
+  };
+}
+
 function buildDisputeDetailResponse(dispute, evidences = []) {
+  const currentTally = buildCurrentTallyFromVotes(dispute.votes || []);
+
   return {
     disputeId: dispute.id,
     escrowId: dispute.escrowId,
@@ -151,6 +176,7 @@ function buildDisputeDetailResponse(dispute, evidences = []) {
     initiatorAddress: normalizeAddress(dispute.initiatorAddress),
     mediators: (dispute.mediators || []).map(buildMediatorResponse),
     evidence: (evidences || []).map(buildEvidenceResponse),
+    currentTally,
     createdAt: dispute.createdAt?.toISOString() || null,
     assignedAt: dispute.assignedAt?.toISOString() || null,
     finalizedAt: dispute.finalizedAt?.toISOString() || null,
@@ -300,6 +326,31 @@ router.get('/', authMiddleware, async (req, res) => {
   }
 });
 
+router.get('/nonce/current', authMiddleware, async (req, res) => {
+  try {
+    const address = normalizeAddress(req.user?.walletAddress);
+    if (!address) {
+      return res.status(400).json({ error: 'Wallet address is required' });
+    }
+
+    const row = await prisma.mediatorNonce.upsert({
+      where: { address },
+      create: { address, currentNonce: 0 },
+      update: {},
+      select: { currentNonce: true, updatedAt: true }
+    });
+
+    return res.json({
+      address,
+      currentNonce: row.currentNonce,
+      updatedAt: row.updatedAt
+    });
+  } catch (error) {
+    console.error('Error in GET /disputes/nonce/current:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 router.get('/:id', authMiddleware, async (req, res) => {
   try {
     const access = await getDisputeWithAccess(req.params.id, req.user.id);
@@ -377,7 +428,7 @@ router.post('/:id/accept-mediator', authMiddleware, async (req, res) => {
 
     const status = normalizedDecision === 'accept' ? 'accepted' : 'declined';
     const updated = await prisma.$transaction(async (tx) => {
-      // await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
+      await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
       const result = await tx.disputeMediator.update({
         where: { disputeId_mediatorId: { disputeId: req.params.id, mediatorId: req.user.id } },
         data: {
@@ -477,7 +528,7 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
     if (!check.valid) return res.status(400).json({ error: 'Invalid EIP-712 signature' });
 
     const createdVote = await prisma.$transaction(async (tx) => {
-      //await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
+      await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
       const insertedVote = await tx.disputeVote.create({
         data: {
           disputeId: req.params.id,

@@ -174,7 +174,15 @@ router.post('/:id/evidence', authMiddleware, handleEvidenceUpload, async (req, r
       }
     }
 
-    res.status(201).json(evidence);
+    res.status(201).json({
+      evidenceId: evidence.id,
+      ipfsHash: evidence.fileUrl,
+      fileHash: evidence.fileHash,
+      uploadedAt: evidence.createdAt?.toISOString() || null,
+      uploader: evidence.uploader?.walletAddress || null,
+      description: evidence.description || '',
+      escrowId: evidence.escrowId
+    });
   } catch (error) {
     console.error('Error in POST /evidence:', error.message);
     res.status(500).json({ error: error.message });

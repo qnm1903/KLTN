@@ -3,11 +3,13 @@ import VRFLoadingState from '../components/dispute/VRFLoadingState.jsx';
 import EvidenceTimeline from '../components/dispute/EvidenceTimeline.jsx';
 import MediatorPanel from '../components/dispute/MediatorPanel.jsx';
 import useDisputeDetail from '../hooks/useDisputeDetail.js';
+import { useDisputeWebSocket } from '../hooks/useDisputeWebSocket.js';
 import { DISPUTE_STATUS } from '../constants/dispute.constants.js';
 import { useParams } from 'react-router-dom';
 
 const DisputeDetail = () => {
   const { id } = useParams();
+  useDisputeWebSocket(id);
   const { currentDispute, status } = useDisputeDetail(id);
   const displayStatus = status ?? DISPUTE_STATUS.PENDING_VRF;
 

@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useAccount, useWalletClient } from 'wagmi';
-import { uploadEvidence } from '../../services/dispute.service.js';
-import signatureUtils from '../../utils/signatureUtils.js';
+import { getCurrentMediatorNonce, signEvidence, uploadEvidence } from '../../services/dispute.service.js';
+import { sha256Hex } from '../../utils/signatureUtils.js';
 
 /**
  * Props:
@@ -45,9 +45,13 @@ export default function EvidenceUploadModal({ isOpen, onClose, onUpload, dispute
     setUploading(true);
 
     try {
+      // 0. Calculate file hash trước upload
+      const fileHash = await sha256Hex(file);
+
       // 1. Upload file trước để lấy IPFS Hash
       const formData = new FormData();
       formData.append('file', file);
+      formData.append('fileHash', fileHash);
       formData.append('uploaderAddress', address || '');
       formData.append('description', description || '');
       formData.append('confidential', confidential ? 'true' : 'false');
@@ -65,20 +69,51 @@ export default function EvidenceUploadModal({ isOpen, onClose, onUpload, dispute
           return;
         }
 
-        const metadata = {
-          ipfsHash: uploadRes.ipfsHash,
+        // Fetch current nonce trước ký
+        const nonceRes = await getCurrentMediatorNonce();
+        const nonce = Number(nonceRes?.currentNonce ?? 0);
+
+        const deadline = Math.floor(Date.now() / 1000) + 300; // 5 minutes
+        const metadataHash = '0x' + '0'.repeat(64);
+
+
+        const message = {
           disputeId: targetDisputeId,
-          timestamp: new Date().toISOString()
+          escrowId: uploadRes.escrowId || '',
+          evidenceId: uploadRes.evidenceId,
+          fileHash,
+          metadataHash,
+          nonce,
+          deadline
         };
 
-        const signature = await signatureUtils.signEvidenceMetadata(walletClient, address, metadata);
-        
-        // Gửi chữ ký lên Backend (Backend cần API hứng signature này)
-        const signatureEndpoint = `/api/disputes/${targetDisputeId}/evidence/${uploadRes.evidenceId}/signature`;
-        await fetch(signatureEndpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uploaderAddress: address, signature, timestamp: metadata.timestamp })
+        const signature = await walletClient.signTypedData({
+          domain: {
+            name: 'KLTNDisputeVoting',
+            version: '1',
+            chainId: 11155111,
+            verifyingContract: '0x0000000000000000000000000000000000000000'
+          },
+          types: {
+            EvidenceMeta: [
+              { name: 'disputeId', type: 'string' },
+              { name: 'escrowId', type: 'string' },
+              { name: 'evidenceId', type: 'string' },
+              { name: 'fileHash', type: 'bytes32' },
+              { name: 'metadataHash', type: 'bytes32' },
+              { name: 'nonce', type: 'uint256' },
+              { name: 'deadline', type: 'uint256' }
+            ]
+          },
+          primaryType: 'EvidenceMeta',
+          message,
+          account: address
+        });
+
+        // Gửi chữ ký lên Backend dùng api instance
+        await signEvidence(targetDisputeId, uploadRes.evidenceId, {
+          signature,
+          message
         });
       }
     } catch (err) {

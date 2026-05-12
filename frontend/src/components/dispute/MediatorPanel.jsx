@@ -3,7 +3,7 @@ import { useAccount, useWalletClient } from 'wagmi';
 import { useAtomValue, useSetAtom } from 'jotai';
 import { mediatorsListAtom, voteTallyAtom, currentDisputeAtom } from '../../store/disputeAtoms.js';
 import { MEDIATOR_STATUS, DISPUTE_STATUS, VOTE_CHOICE } from '../../constants/dispute.constants.js';
-import { acceptMediator, getDispute, submitVote } from '../../services/dispute.service.js';
+import { acceptMediator, getCurrentMediatorNonce, getDispute, submitVote } from '../../services/dispute.service.js';
 
 /**
  * MediatorPanel
@@ -17,6 +17,7 @@ const MediatorPanel = () => {
   const { address } = useAccount();
   const { data: walletClient } = useWalletClient();
   const setMediators = useSetAtom(mediatorsListAtom);
+  const setVoteTally = useSetAtom(voteTallyAtom);
   const setCurrentDispute = useSetAtom(currentDisputeAtom);
   const currentDispute = useAtomValue(currentDisputeAtom);
   const [processingMediator, setProcessingMediator] = React.useState(null);
@@ -39,7 +40,8 @@ const handleMediatorDecision = async (mediatorAddr, action) => {
     const decision = String(action || '').toLowerCase() === 'accept' ? 'accept' : 'decline';
 
     // Build EIP-712 message matching backend's ACCEPT_MEDIATOR_TYPE
-    const nonce = 0; // first-time mediator nonce; backend will verify/consume
+    const nonceRes = await getCurrentMediatorNonce();
+    const nonce = Number(nonceRes?.currentNonce ?? 0); // first-time mediator nonce; backend will verify/consume
     const deadline = Math.floor(Date.now() / 1000) + 300; // 5 minutes into the future
 
     const message = {
@@ -134,7 +136,8 @@ const handleSubmitVote = async (mediatorAddr, choice) => {
 
   try {
     const voteValue = choice;
-    const nonce = 0; // frontend relies on backend nonce verification
+    const nonceRes = await getCurrentMediatorNonce();
+    const nonce = Number(nonceRes?.currentNonce ?? 0); // frontend relies on backend nonce verification
     const deadline = Math.floor(Date.now() / 1000) + 300;
 
     const message = {
@@ -185,12 +188,33 @@ const handleSubmitVote = async (mediatorAddr, choice) => {
       message
     });
 
+    if (res?.currentTally) {
+      setVoteTally({
+        RELEASE_TO_BUYER: Number(res.currentTally.RELEASE_TO_BUYER || 0),
+        RETURN_TO_SELLER: Number(res.currentTally.RETURN_TO_SELLER || 0),
+        SPLIT: Number(res.currentTally.SPLIT || 0),
+        OTHER: Number(res.currentTally.OTHER || 0),
+        totalVotes: Number(res.currentTally.totalVotes ?? 0),
+        threshold: Number(res.currentTally.threshold ?? 5)
+      });
+    }
+
     // Refresh dispute state
     try {
       const fresh = await getDispute(message.disputeId);
       if (fresh) {
         setCurrentDispute(fresh);
         setMediators(fresh.mediators);
+        if (fresh.currentTally) {
+          setVoteTally({
+            RELEASE_TO_BUYER: Number(fresh.currentTally.RELEASE_TO_BUYER || 0),
+            RETURN_TO_SELLER: Number(fresh.currentTally.RETURN_TO_SELLER || 0),
+            SPLIT: Number(fresh.currentTally.SPLIT || 0),
+            OTHER: Number(fresh.currentTally.OTHER || 0),
+            totalVotes: Number(fresh.currentTally.totalVotes ?? 0),
+            threshold: Number(fresh.currentTally.threshold ?? 5)
+          });
+        }
       }
     } catch (e) {
       console.warn('Failed to refresh after vote', e);

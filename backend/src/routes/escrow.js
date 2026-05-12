@@ -841,6 +841,7 @@ router.post('/record-deploy', authMiddleware, async (req, res) => {
   try {
     const { escrowId, txHash } = req.body;
     if (!escrowId || !txHash) return res.status(400).json({ error: 'escrowId and txHash are required' });
+    if (!FACTORY_ADDRESS) return res.status(500).json({ error: 'FACTORY_ADDRESS is not configured' });
 
     console.log(`[Record Deploy] Bắt đầu xác nhận giao dịch ${txHash} cho Escrow ${escrowId}`);
     const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
@@ -857,6 +858,9 @@ router.post('/record-deploy', authMiddleware, async (req, res) => {
 
     if (!receipt) return res.status(404).json({ error: 'Transaction receipt not found yet' });
     if (receipt.status === 0) return res.status(400).json({ error: 'Transaction failed on-chain' });
+    if (!isSameAddress(receipt.to, FACTORY_ADDRESS)) {
+      return res.status(400).json({ error: 'Transaction is not sent to the factory contract' });
+    }
 
     // Phân tích Logs để tìm sự kiện EscrowCreatedEvent và lấy luôn chainEscrowId
     const iface = new ethers.Interface(factoryAbi);
@@ -878,6 +882,37 @@ router.post('/record-deploy', authMiddleware, async (req, res) => {
 
     if (!foundVaultAddress) {
       return res.status(404).json({ error: 'EscrowCreatedEvent not found in tx logs' });
+    }
+    
+    if (!foundChainEscrowId) {
+      return res.status(422).json({ error: 'EscrowCreated event does not contain chainEscrowId' });
+    }
+
+    // idempotency check: Nếu đã có cùng contractAddress trong DB thì trả về thành công luôn, không lỗi, tránh UI update lại
+    const existingEscrow = await prisma.escrow.findUnique({
+      where: { id: escrowId },
+      select: { id: true, contractAddress: true, chainEscrowId: true }
+    });
+
+    if (!existingEscrow) {
+      return res.status(404).json({ error: 'Escrow not found in database' });
+    }
+
+    if (existingEscrow.contractAddress) {
+      if (isSameAddress(existingEscrow.contractAddress, foundVaultAddress)) {
+        return res.json({
+          ok: true,
+          contractAddress: foundVaultAddress,
+          chainEscrowId: foundChainEscrowId,
+          isIdempotent: true
+        });
+      }
+
+      return res.status(409).json({
+        error: 'Escrow already has a different contractAddress',
+        currentContractAddress: existingEscrow.contractAddress,
+        newContractAddress: foundVaultAddress
+      });
     }
 
     console.log(`[Record Deploy] Két sắt: ${foundVaultAddress}. Mã định danh Blockchain (chainEscrowId): ${foundChainEscrowId}. Đang lưu DB...`);

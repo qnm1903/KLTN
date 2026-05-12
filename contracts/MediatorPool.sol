@@ -236,6 +236,16 @@ contract MediatorPool is
         emit RandomMediatorSelected(details.escrowId, selectedMediators);
     }
 
+    /* ========== ADMIN MEDIATOR MANAGEMENT ========== */
+    function adminUnregisterMediator(address mediator) external onlyRole(ADMIN_ROLE) {
+        require(mediators[mediator].isActive, "Mediator not active");
+        
+        _removeFromArray(mediator);
+        delete mediators[mediator];
+
+        emit MediatorUnregistered(mediator, 0);
+    }
+
     /* ========== XỬ LÝ TIMEOUT ========== */
     function slashForTimeout(address _mediator) external onlyRole(ADMIN_ROLE) nonReentrant {
         require(mediators[_mediator].isActive, "Not active");

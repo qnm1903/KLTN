@@ -9,6 +9,13 @@
       "txHash": "0x6299adfd7fc8327ce63c87da2a0f5b377195a5003f3dea1ba0395c8ef7b51030",
       "blockNumber": 10820884,
       "constructorArgs": []
+    },
+    "MediatorPool": {
+      "address": "0xb3585dD66a67081f0558e3858ca8925a9e88036C",
+      "proxyType": "UUPS",
+      "upgradedAt": "2026-05-11T04:02:52.034Z",
+      "txHash": null,
+      "blockNumber": null
     }
   }
 }

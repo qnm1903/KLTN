@@ -8,9 +8,12 @@ export const factoryAbi = [
 
 // 2. ABI của MediatorPool (cho event listener)
 export const mediatorPoolAbi = [
+  'function mediators(address) external view returns (address wallet, uint256 stakeAmount, bool isActive, uint256 timeoutCount, uint256 reputationScore, uint256 totalVotes, uint256 successfulVotes)',
   'function requestRandomMediator(bytes32 escrowId, address buyer, address seller) external',
   'event RandomMediatorSelected(bytes32 indexed escrowId, address[] mediators)',
-  'event RandomnessRequested(uint256 requestId, bytes32 indexed escrowId)'
+  'event RandomnessRequested(uint256 requestId, bytes32 indexed escrowId)',
+  'event ReputationUpdated(address indexed mediator, uint256 oldScore, uint256 newScore)',
+  'event MediatorSlashed(address indexed mediator, uint256 amount)'
 ];
 
 // 3. ABI của Vault

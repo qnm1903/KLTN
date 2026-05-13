@@ -2,8 +2,22 @@ import express from 'express';
 import { ethers } from 'ethers';
 import { authMiddleware } from '../middleware/auth.js';
 import prisma from '../lib/prisma.js';
+import {
+  ServiceError,
+  getHistory,
+  getMediatorReputationSnapshot,
+  getSlashes
+} from '../services/mediator-reputation-service.js';
 
 const router = express.Router();
+
+function handleMediatorError(res, error, fallbackMessage) {
+  if (error instanceof ServiceError) {
+    return res.status(error.statusCode).json({ error: error.message });
+  }
+  console.error('[Mediator Route Error]:', error);
+  return res.status(500).json({ error: fallbackMessage || error.message || 'Internal server error' });
+}
 
 // ABI cho MediatorPool
 const MEDIATOR_POOL_ABI = [
@@ -335,6 +349,72 @@ router.get('/all', async (req, res) => {
   } catch (error) {
     console.error('[Get All Mediators Error]:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @route   GET /api/mediator/:address/reputation
+ * @desc    Get mediator on-chain score with latest reputation/slash context
+ * @access  Public
+ */
+router.get('/:address/reputation', async (req, res) => {
+  try {
+    const { address } = req.params;
+    const { historyLimit, slashLimit } = req.query;
+
+    const result = await getMediatorReputationSnapshot(address, { historyLimit, slashLimit });
+    return res.json(result);
+  } catch (error) {
+    return handleMediatorError(res, error, 'Failed to fetch mediator reputation');
+  }
+});
+
+/**
+ * @route   GET /api/mediator/:address/reputation-history
+ * @desc    Get paginated mediator reputation history
+ * @access  Public
+ */
+router.get('/:address/reputation-history', async (req, res) => {
+  try {
+    const { address } = req.params;
+    const { limit, offset } = req.query;
+    const data = await getHistory(address, limit, offset);
+
+    return res.json({
+      items: data.items,
+      pagination: {
+        limit: data.limit,
+        offset: data.offset,
+        total: data.total
+      }
+    });
+  } catch (error) {
+    return handleMediatorError(res, error, 'Failed to fetch reputation history');
+  }
+});
+
+/**
+ * @route   GET /api/mediator/:address/slash-records
+ * @desc    Get paginated slash records with computed appeal state
+ * @access  Public
+ */
+router.get('/:address/slash-records', async (req, res) => {
+  try {
+    const { address } = req.params;
+    const { limit, offset, status } = req.query;
+
+    const data = await getSlashes(address, { limit, offset, status });
+
+    return res.json({
+      items: data.items,
+      pagination: {
+        limit: data.limit,
+        offset: data.offset,
+        total: data.total
+      }
+    });
+  } catch (error) {
+    return handleMediatorError(res, error, 'Failed to fetch slash records');
   }
 });
 

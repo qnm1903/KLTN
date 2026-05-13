@@ -5,6 +5,7 @@ import usersRouter from './users.js';       // User profile & mediator list
 import escrowsRouter from './escrows.js';   // Business Escrow CRUD
 import evidenceRouter from './evidence.js'; // Dispute Evidence upload
 import mediatorRouter from './mediator.js'; // Mediator Pool management
+import adminMediatorRouter from './admin-mediator.js'; // Mediator appeal admin APIs
 import disputesRouter from './disputes.js'; // Dispute voting APIs (EIP-712)
 
 const router = express.Router();
@@ -20,6 +21,7 @@ router.use('/users', usersRouter);
 router.use('/escrows', escrowsRouter);
 router.use('/escrows', evidenceRouter);
 router.use('/mediator', mediatorRouter);
+router.use('/admin/mediator', adminMediatorRouter);
 router.use('/disputes', disputesRouter);
 
 export default router;

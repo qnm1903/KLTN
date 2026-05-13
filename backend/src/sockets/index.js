@@ -1,5 +1,6 @@
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import { ethers } from 'ethers';
 import prisma from '../lib/prisma.js';
 
 function parseToken(rawToken) {
@@ -156,6 +157,42 @@ export function setupSockets(server) {
           escrowId,
           error: 'Failed to join escrow room'
         });
+      }
+    });
+
+    socket.on('join_mediator', (payload, ack) => {
+      const respond = typeof ack === 'function' ? ack : () => {};
+
+      try {
+        const rawAddress = typeof payload === 'string' ? payload : payload?.address;
+        const token = extractSocketToken(socket, payload?.token || null);
+        const jwtSecret = process.env.JWT_SECRET;
+
+        if (!rawAddress || !ethers.isAddress(rawAddress)) {
+          respond({ ok: false, error: 'Valid mediator address is required' });
+          return;
+        }
+
+        if (!token || !jwtSecret) {
+          respond({ ok: false, error: 'Authentication is required' });
+          return;
+        }
+
+        const decoded = jwt.verify(token, jwtSecret);
+        const requesterAddress = String(decoded?.walletAddress || '').toLowerCase();
+        const targetAddress = ethers.getAddress(rawAddress).toLowerCase();
+        const isAdmin = decoded?.role === 'ADMIN';
+
+        if (!isAdmin && requesterAddress !== targetAddress) {
+          respond({ ok: false, error: 'Forbidden' });
+          return;
+        }
+
+        const room = `mediator:${targetAddress}`;
+        socket.join(room);
+        respond({ ok: true, room });
+      } catch {
+        respond({ ok: false, error: 'Failed to join mediator room' });
       }
     });
 

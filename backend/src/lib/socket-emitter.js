@@ -27,6 +27,19 @@ export function getIO() {
   return ioInstance;
 }
 
+export function emitToRoom(room, eventName, data) {
+  if (!ioInstance) {
+    console.warn('[Socket] IO not initialized, skipping room event:', eventName);
+    return;
+  }
+
+  try {
+    ioInstance.to(room).emit(eventName, data);
+  } catch (err) {
+    console.error('[Socket] Failed to emit room event:', eventName, err?.message || err);
+  }
+}
+
 export function emitToEscrow(escrowId, eventName, data) {
   if (!ioInstance) {
     console.warn('[Socket] IO not initialized, queueing event:', eventName);

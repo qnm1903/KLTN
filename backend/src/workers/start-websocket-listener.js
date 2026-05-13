@@ -1,17 +1,20 @@
 import dotenv from 'dotenv';
 import prisma from '../lib/prisma.js';
 import { startWebSocketEventListener } from './websocket-event-listener.js';
+import { startMediatorReputationListener } from './mediator-reputation-listener.js';
 import { startCronJobs, stopCronJobs } from './cron-jobs.js';
 
 dotenv.config();
 
 async function main() {
   const worker = startWebSocketEventListener({ prisma, logger: console });
+  const reputationWorker = startMediatorReputationListener({ prisma, logger: console });
   startCronJobs(prisma, { logger: console });
 
   const shutdown = async (signal) => {
     console.info(`[websocket] Received ${signal}. Shutting down...`);
     stopCronJobs({ logger: console });
+    await reputationWorker.stop();
     await worker.stop();
     await prisma.$disconnect();
     process.exit(0);

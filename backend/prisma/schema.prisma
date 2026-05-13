@@ -338,3 +338,40 @@ model NonceSubmission {
   @@index([escrowId, action])
   @@index([expiresAt])
 }
+
+model MediatorReputationHistory {
+  id              String   @id @default(uuid())
+  mediatorAddress String
+  oldScore        Int
+  newScore        Int
+  delta           Int
+  reason          String?
+  txHash          String
+  logIndex        Int
+  blockNumber     Int
+  createdAt       DateTime @default(now())
+
+  @@unique([txHash, logIndex])
+  @@index([mediatorAddress, createdAt])
+  @@index([blockNumber])
+}
+
+model MediatorSlash {
+  id               String   @id @default(uuid())
+  mediatorAddress  String
+  amount           String
+  reason           String?
+  status           String   @default("PENDING") // PENDING | CANCELLED | FINALIZED
+  appealDeadlineAt DateTime
+  txHash           String
+  logIndex         Int
+  blockNumber      Int
+  resolutionNote   String?
+  resolvedBy       String?
+  resolvedAt       DateTime?
+  createdAt        DateTime @default(now())
+
+  @@unique([txHash, logIndex])
+  @@index([mediatorAddress, createdAt])
+  @@index([status, appealDeadlineAt])
+}

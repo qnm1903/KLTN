@@ -72,3 +72,16 @@ export function emitDisputeFinalized(escrowId, payload) {
 export function emitEvidenceSigned(escrowId, payload) {
   emitToEscrow(escrowId, 'evidence-signed', payload);
 }
+
+// Execution events
+export function emitExecutionTriggered(escrowId, payload) {
+  emitToEscrow(escrowId, 'execution-triggered', payload);
+}
+
+export function emitExecutionCompleted(escrowId, payload) {
+  emitToEscrow(escrowId, 'execution-completed', payload);
+}
+
+export function emitExecutionFailed(escrowId, payload) {
+  emitToEscrow(escrowId, 'execution-failed', payload);
+}

@@ -7,7 +7,10 @@ import {
   emitMediatorAssigned,
   emitMediatorDeclined,
   emitVoteSubmitted,
-  emitVoteTallyUpdated
+  emitVoteTallyUpdated,
+  emitExecutionTriggered,
+  emitExecutionCompleted,
+  emitExecutionFailed
 } from '../lib/socket-emitter.js';
 
 const DEFAULT_INTERVAL_MS = Number(process.env.DISPUTE_OUTBOX_INTERVAL_MS ?? 1000);
@@ -47,6 +50,15 @@ function emitOutboxEvent(event, logger = console) {
       return;
     case 'EVIDENCE_SIGNED':
       emitEvidenceSigned(event.escrowId, payload);
+      return;
+    case 'EXECUTION_TRIGGERED':
+      emitExecutionTriggered(event.escrowId, payload);
+      return;
+    case 'EXECUTION_COMPLETED':
+      emitExecutionCompleted(event.escrowId, payload);
+      return;
+    case 'EXECUTION_FAILED':
+      emitExecutionFailed(event.escrowId, payload);
       return;
     default:
       logger?.warn?.(`[outbox] Unknown event type ${event.type}, skipping event ${event.id}`);

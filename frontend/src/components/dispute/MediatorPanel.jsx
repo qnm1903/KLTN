@@ -179,13 +179,21 @@ const handleSubmitVote = async (mediatorAddr, choice) => {
       account: address
     });
 
+    const preSignedOutcomeSignatures =
+      currentDispute?.preSignedOutcomeSignatures ||
+      currentDispute?.schnorrSignatures ||
+      currentDispute?.outcomeSignatures ||
+      {};
+
     // Call backend submitVote
     const res = await submitVote(message.disputeId, {
       vote: voteValue,
       justification: '',
       evidenceRefs: [],
       signature,
-      message
+      message,
+      schnorrSigRefund: preSignedOutcomeSignatures.schnorrSigRefund,
+      schnorrSigRelease: preSignedOutcomeSignatures.schnorrSigRelease
     });
 
     if (res?.currentTally) {

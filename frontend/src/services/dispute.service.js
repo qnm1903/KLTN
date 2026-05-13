@@ -79,7 +79,7 @@ export async function acceptMediator(disputeId, payload) {
  * submitVote
  * POST /api/disputes/:id/vote
  * @param {string} disputeId
- * @param {Object} payload - VoteSubmitRequest { mediator, vote, justification, evidenceRefs, timestamp, signature }
+ * @param {Object} payload - VoteSubmitRequest { mediator, vote, justification, evidenceRefs, timestamp, signature, schnorrSigRefund?, schnorrSigRelease? }
  * @returns {Promise<Object>} VoteSubmitResponse
  */
 export async function submitVote(disputeId, payload) {

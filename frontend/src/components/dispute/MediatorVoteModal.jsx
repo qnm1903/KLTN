@@ -10,8 +10,9 @@ import signatureUtils from '../../utils/signatureUtils.js';
  * - onSubmit: optional async function(payload) - nếu provided sẽ được gọi khi submit
  * - mediatorAddress: optional string - hiển thị address của mediator đang vote
  * - disputeId: optional string - dispute id hiện tại
+ * - preSignedOutcomeSignatures: optional object - { schnorrSigRefund?, schnorrSigRelease? }
  */
-export default function MediatorVoteModal({ isOpen, onClose, onSubmit, mediatorAddress = null, disputeId = '' }) {
+export default function MediatorVoteModal({ isOpen, onClose, onSubmit, mediatorAddress = null, disputeId = '', preSignedOutcomeSignatures = null }) {
   const [choice, setChoice] = useState('RELEASE_TO_BUYER');
   const [justification, setJustification] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -55,7 +56,9 @@ export default function MediatorVoteModal({ isOpen, onClose, onSubmit, mediatorA
       justification,
       evidenceRefs: votePayload.evidenceRefs,
       timestamp: votePayload.timestamp,
-      signature
+      signature,
+      ...(preSignedOutcomeSignatures?.schnorrSigRefund ? { schnorrSigRefund: preSignedOutcomeSignatures.schnorrSigRefund } : {}),
+      ...(preSignedOutcomeSignatures?.schnorrSigRelease ? { schnorrSigRelease: preSignedOutcomeSignatures.schnorrSigRelease } : {})
     };
 
     // Gọi API submitVote
@@ -115,6 +118,7 @@ export default function MediatorVoteModal({ isOpen, onClose, onSubmit, mediatorA
 
           <div className="p-3 bg-gray-50 rounded text-sm text-gray-600">
             <strong>Note:</strong> Khi Mediator submit, hệ thống yêu cầu một EIP-712 signature từ wallet để đảm bảo integrity của vote.
+            Nếu dispute flow đã có pre-signed Schnorr outcomes, modal sẽ gửi kèm `schnorrSigRefund` và `schnorrSigRelease`.
             Trong mock này chữ ký được giả lập và payload sẽ được logged ở console.
           </div>
         </div>

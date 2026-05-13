@@ -13,6 +13,7 @@ import {
   queueDisputeEvent
 } from '../lib/dispute-outbox.js';
 import { finalizeDisputeVotes } from '../services/dispute-finalize.js';
+import { executeDisputeOutcome } from '../services/dispute-contract-executor.js';
 
 const router = express.Router();
 
@@ -302,30 +303,6 @@ router.post('/', authMiddleware, async (req, res) => {
   }
 });
 
-router.get('/', authMiddleware, async (req, res) => {
-  try {
-    const disputes = await prisma.dispute.findMany({
-      where: {
-        OR: [
-          { escrow: { buyerId: req.user.id } },
-          { escrow: { sellerId: req.user.id } },
-          { mediators: { some: { mediatorId: req.user.id } } }
-        ]
-      },
-      include: {
-        escrow: { select: { id: true, title: true } },
-        _count: { select: { votes: true } }
-      },
-      orderBy: { createdAt: 'desc' }
-    });
-
-    res.json(disputes);
-  } catch (error) {
-    console.error('Error in GET /disputes:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 router.get('/nonce/current', authMiddleware, async (req, res) => {
   try {
     const address = normalizeAddress(req.user?.walletAddress);
@@ -497,10 +474,12 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
     }
     assertMessageObject(message);
 
+    // Only mediators can vote in dispute phase
     const mediatorLink = await prisma.disputeMediator.findUnique({
       where: { disputeId_mediatorId: { disputeId: req.params.id, mediatorId: req.user.id } },
       include: { dispute: { select: { id: true, escrowId: true, status: true } } }
     });
+
     if (!mediatorLink) return res.status(403).json({ error: 'You are not assigned to this dispute' });
     if (mediatorLink.status !== 'accepted') {
       return res.status(403).json({ error: 'Mediator must accept assignment before voting' });
@@ -509,6 +488,7 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
       return res.status(409).json({ error: `Dispute is not in votable state: ${mediatorLink.dispute.status}` });
     }
 
+    // Validate message context
     if (String(message.disputeId) !== req.params.id || String(message.escrowId) !== mediatorLink.dispute.escrowId) {
       return res.status(400).json({ error: 'Signed message does not match dispute context' });
     }
@@ -517,6 +497,7 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
     }
     assertDeadlineNotExpired(message.deadline);
 
+    // Verify EIP-712 signature
     const check = verifyEIP712Signature({
       domain: buildDisputeDomain(),
       types: VOTE_TYPE,
@@ -527,6 +508,7 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
     });
     if (!check.valid) return res.status(400).json({ error: 'Invalid EIP-712 signature' });
 
+    // Store vote in transaction
     const createdVote = await prisma.$transaction(async (tx) => {
       await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
       const insertedVote = await tx.disputeVote.create({
@@ -541,6 +523,7 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
         }
       });
 
+      // Update mediator status to voted
       await tx.disputeMediator.update({
         where: { disputeId_mediatorId: { disputeId: req.params.id, mediatorId: req.user.id } },
         data: {
@@ -552,6 +535,7 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
         }
       });
 
+      // Emit event: keep mediator field for frontend compatibility
       await queueDisputeEvent(tx, {
         disputeId: req.params.id,
         escrowId: mediatorLink.dispute.escrowId,
@@ -559,7 +543,7 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
         payload: {
           disputeId: req.params.id,
           escrowId: mediatorLink.dispute.escrowId,
-          mediatorId: req.user.id,
+          mediator: normalizeAddress(req.user.walletAddress),
           vote: insertedVote.vote,
           votedAt: insertedVote.votedAt
         }
@@ -568,7 +552,16 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
       return insertedVote;
     });
 
+    // Finalize and return current tally
     const finalizeResult = await finalizeDisputeVotes(req.params.id);
+    
+    // Trigger execution asynchronously if dispute finalized
+    if (finalizeResult.finalized === true) {
+      executeDisputeOutcome(req.params.id).catch((error) => {
+        console.error(`Failed to execute dispute ${req.params.id}:`, error.message);
+      });
+    }
+    
     res.status(201).json(buildVoteResponse(finalizeResult));
   } catch (error) {
     if (error?.code === 'P2002') return res.status(409).json({ error: 'Mediator already voted for this dispute' });
@@ -681,70 +674,15 @@ router.get('/:id/evidence', authMiddleware, async (req, res) => {
   }
 });
 
-router.post('/:id/evidence/:evidenceId/signature', authMiddleware, async (req, res) => {
+router.post('/:id/execute-outcome', authMiddleware, async (req, res) => {
   try {
-    const { signature, message } = req.body;
-    if (!signature || !message) {
-      return res.status(400).json({ error: 'signature and message are required' });
-    }
-    assertMessageObject(message);
-
     const access = await getDisputeWithAccess(req.params.id, req.user.id);
     if (access.error) return res.status(access.code).json({ error: access.error });
 
-    const evidence = await prisma.evidence.findUnique({ where: { id: req.params.evidenceId } });
-    if (!evidence || evidence.escrowId !== access.dispute.escrowId) {
-      return res.status(404).json({ error: 'Evidence not found in dispute escrow' });
-    }
-
-    if (
-      String(message.disputeId) !== req.params.id
-      || String(message.escrowId) !== access.dispute.escrowId
-      || String(message.evidenceId) !== req.params.evidenceId
-    ) {
-      return res.status(400).json({ error: 'Signed message does not match evidence context' });
-    }
-    assertDeadlineNotExpired(message.deadline);
-
-    const check = verifyEIP712Signature({
-      domain: buildDisputeDomain(),
-      types: EVIDENCE_META_TYPE,
-      primaryType: 'EvidenceMeta',
-      message,
-      signature,
-      expectedSigner: req.user.walletAddress
-    });
-    if (!check.valid) return res.status(400).json({ error: 'Invalid EIP-712 signature' });
-
-    const updatedEvidence = await prisma.$transaction(async (tx) => {
-      await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
-      const updated = await tx.evidence.update({
-        where: { id: req.params.evidenceId },
-        data: { signature, messageRaw: message },
-        include: { uploader: { select: { walletAddress: true } } }
-      });
-
-      await queueDisputeEvent(tx, {
-        disputeId: req.params.id,
-        escrowId: access.dispute.escrowId,
-        type: DISPUTE_EVENT_TYPES.EVIDENCE_SIGNED,
-        payload: {
-          disputeId: req.params.id,
-          escrowId: access.dispute.escrowId,
-          evidenceId: updated.id,
-          signer: normalizeAddress(req.user.walletAddress)
-        }
-      });
-
-      return updated;
-    });
-
-    res.json(buildEvidenceResponse(updatedEvidence));
+    const result = await executeDisputeOutcome(req.params.id);
+    res.json(result);
   } catch (error) {
-    if (error.message?.includes('Invalid nonce') || error.message?.includes('Signed message has expired')) {
-      return res.status(400).json({ error: error.message });
-    }
-    console.error('Error in POST /disputes/:id/evidence/:evidenceId/signature:', error.message);
+    console.error('Error in POST /disputes/:id/execute-outcome:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

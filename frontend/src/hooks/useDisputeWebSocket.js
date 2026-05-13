@@ -266,6 +266,62 @@ export function useDisputeWebSocket(disputeId) {
       toast.success('Dispute resolved! Threshold reached.');
     };
 
+    const handleExecutionTriggered = (payload) => {
+      const p = payload || {};
+      setCurrentDispute((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          executionStatus: 'TRIGGERED',
+          executionError: null,
+          executionMethod: p.method || prev.executionMethod || null,
+          executionStartedAt: p.startedAt || p.triggeredAt || new Date().toISOString()
+        };
+      });
+      toast.info('Execution started: collecting TSS shares.');
+    };
+
+    const handleExecutionCompleted = (payload) => {
+      const p = payload || {};
+      setCurrentDispute((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          executionStatus: 'COMPLETED',
+          executionError: null,
+          onChainTxHash: p.txHash || p.onChainTxHash || prev.onChainTxHash || null,
+          executedAt: p.executedAt || new Date().toISOString(),
+          onChain: {
+            ...(prev.onChain || {}),
+            events: [
+              ...(prev.onChain?.events || []),
+              {
+                name: 'ExecutionCompleted',
+                txHash: p.txHash || p.onChainTxHash || null,
+                blockNumber: p.blockNumber || null,
+                timestamp: p.executedAt || new Date().toISOString()
+              }
+            ]
+          }
+        };
+      });
+      toast.success('Execution completed on-chain.');
+    };
+
+    const handleExecutionFailed = (payload) => {
+      const p = payload || {};
+      setCurrentDispute((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          executionStatus: 'FAILED',
+          executionError: p.error || 'Execution failed',
+          executionFailedAt: p.failedAt || new Date().toISOString()
+        };
+      });
+      toast.error(`Execution failed: ${p.error || 'unknown error'}`);
+    };
+
     // ---- Register listeners (socket.io style) ----
     try {
       if (typeof socket.on === 'function') {
@@ -275,6 +331,9 @@ export function useDisputeWebSocket(disputeId) {
         socket.on('vote-submitted', handleVoteSubmitted);
         socket.on('vote-tally-updated', handleVoteProgress);
         socket.on('dispute-finalized', handleDisputeResolved);
+        socket.on('execution-triggered', handleExecutionTriggered);
+        socket.on('execution-completed', handleExecutionCompleted);
+        socket.on('execution-failed', handleExecutionFailed);
       } else if (typeof socket.addEventListener === 'function') {
         // fallback: if socket is native WebSocket and server sends stringified messages,
         // we listen to 'message' and route based on event field in payload.
@@ -302,6 +361,15 @@ export function useDisputeWebSocket(disputeId) {
               case 'dispute-finalized':
                 handleDisputeResolved(payload);
                 break;
+              case 'execution-triggered':
+                handleExecutionTriggered(payload);
+                break;
+              case 'execution-completed':
+                handleExecutionCompleted(payload);
+                break;
+              case 'execution-failed':
+                handleExecutionFailed(payload);
+                break;
               default:
                 break;
             }
@@ -327,6 +395,9 @@ export function useDisputeWebSocket(disputeId) {
           socket.off('vote-submitted', handleVoteSubmitted);
           socket.off('vote-tally-updated', handleVoteProgress);
           socket.off('dispute-finalized', handleDisputeResolved);
+          socket.off('execution-triggered', handleExecutionTriggered);
+          socket.off('execution-completed', handleExecutionCompleted);
+          socket.off('execution-failed', handleExecutionFailed);
         } else if (typeof socket.removeEventListener === 'function') {
           // cannot remove message-specific listener easily if anonymous; in production keep named reference
           socket.removeEventListener('message', () => {});

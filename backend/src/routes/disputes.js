@@ -111,7 +111,12 @@ async function getDisputeWithAccess(disputeId, userId) {
     return { error: 'Forbidden', code: 403 };
   }
 
-  return { dispute };
+  let viewerRole = 'unknown';
+  if (isBuyer) viewerRole = 'buyer';
+  else if (isSeller) viewerRole = 'seller';
+  else if (inDisputeMediators || inEscrowMediators) viewerRole = 'mediator';
+
+  return { dispute, viewerRole };
 }
 
 function buildMediatorResponse(mediator) {
@@ -167,13 +172,14 @@ function buildCurrentTallyFromVotes(votes = []) {
   };
 }
 
-function buildDisputeDetailResponse(dispute, evidences = []) {
+function buildDisputeDetailResponse(dispute, evidences = [], viewerRole = 'unknown') {
   const currentTally = buildCurrentTallyFromVotes(dispute.votes || []);
 
   return {
     disputeId: dispute.id,
     escrowId: dispute.escrowId,
     status: dispute.status,
+    viewerRole,
     initiatorAddress: normalizeAddress(dispute.initiatorAddress),
     mediators: (dispute.mediators || []).map(buildMediatorResponse),
     evidence: (evidences || []).map(buildEvidenceResponse),
@@ -339,7 +345,7 @@ router.get('/:id', authMiddleware, async (req, res) => {
       orderBy: { createdAt: 'asc' }
     });
     
-    res.json(buildDisputeDetailResponse(access.dispute, evidences));
+    res.json(buildDisputeDetailResponse(access.dispute, evidences, access.viewerRole));
   } catch (error) {
     console.error('Error in GET /disputes/:id:', error.message);
     res.status(500).json({ error: error.message });

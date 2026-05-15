@@ -52,12 +52,19 @@ export async function uploadEvidence(disputeId, formData) {
 
 /**
  * getEvidenceList
- * GET /api/disputes/:id/evidence
+ * Lấy danh sách evidence dựa trên escrowId của dispute
  * @param {string} disputeId
  * @returns {Promise<Array>} array of Evidence
  */
 export async function getEvidenceList(disputeId) {
-  const res = await api.get(`/disputes/${encodeURIComponent(disputeId)}/evidence`);
+  const disputeRes = await api.get(`/disputes/${encodeURIComponent(disputeId)}`);
+  const dispute = disputeRes.data;
+  
+  if (!dispute?.escrowId) {
+    return []; 
+  }
+
+  const res = await api.get(`/escrows/${encodeURIComponent(dispute.escrowId)}/evidence`);
   return res.data;
 }
 

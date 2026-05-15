@@ -196,31 +196,23 @@ const handleSubmitVote = async (mediatorAddr, choice) => {
       schnorrSigRelease: preSignedOutcomeSignatures.schnorrSigRelease
     });
 
-    if (res?.currentTally) {
-      setVoteTally({
-        RELEASE_TO_BUYER: Number(res.currentTally.RELEASE_TO_BUYER || 0),
-        RETURN_TO_SELLER: Number(res.currentTally.RETURN_TO_SELLER || 0),
-        SPLIT: Number(res.currentTally.SPLIT || 0),
-        OTHER: Number(res.currentTally.OTHER || 0),
-        totalVotes: Number(res.currentTally.totalVotes ?? 0),
-        threshold: Number(res.currentTally.threshold ?? 5)
-      });
-    }
-
-    // Refresh dispute state
+    // Refresh dispute state 
     try {
       const fresh = await getDispute(message.disputeId);
       if (fresh) {
         setCurrentDispute(fresh);
         setMediators(fresh.mediators);
-        if (fresh.currentTally) {
+        
+        const backendTally = fresh.tally || fresh.voteTally || fresh.currentTally || res?.tally || res?.currentTally;
+        
+        if (backendTally) {
           setVoteTally({
-            RELEASE_TO_BUYER: Number(fresh.currentTally.RELEASE_TO_BUYER || 0),
-            RETURN_TO_SELLER: Number(fresh.currentTally.RETURN_TO_SELLER || 0),
-            SPLIT: Number(fresh.currentTally.SPLIT || 0),
-            OTHER: Number(fresh.currentTally.OTHER || 0),
-            totalVotes: Number(fresh.currentTally.totalVotes ?? 0),
-            threshold: Number(fresh.currentTally.threshold ?? 5)
+            RELEASE_TO_BUYER: Number(backendTally.RELEASE_TO_BUYER || 0),
+            RETURN_TO_SELLER: Number(backendTally.RETURN_TO_SELLER || 0),
+            SPLIT: Number(backendTally.SPLIT || 0),
+            OTHER: Number(backendTally.OTHER || 0),
+            totalVotes: Number(backendTally.totalVotes ?? 0),
+            threshold: Number(backendTally.threshold ?? 5)
           });
         }
       }

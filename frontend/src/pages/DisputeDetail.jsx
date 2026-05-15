@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useAccount } from 'wagmi';
 import VRFLoadingState from '../components/dispute/VRFLoadingState.jsx';
 import EvidenceTimeline from '../components/dispute/EvidenceTimeline.jsx';
+import EvidenceUploadModal from '../components/dispute/EvidenceUploadModal.jsx';
 import MediatorPanel from '../components/dispute/MediatorPanel.jsx';
 import useDisputeDetail from '../hooks/useDisputeDetail.js';
 import { useDisputeWebSocket } from '../hooks/useDisputeWebSocket.js';
@@ -15,6 +16,7 @@ const DisputeDetail = () => {
   const { currentDispute, status } = useDisputeDetail(id);
   const displayStatus = status ?? DISPUTE_STATUS.PENDING_VRF;
   const viewerRole = deriveViewerRole(currentDispute, address);
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
 
   return (
     <div className="min-h-screen py-8 px-6 bg-linear-to-br from-slate-900 via-slate-800 to-indigo-950">
@@ -53,9 +55,23 @@ const DisputeDetail = () => {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* Left / Center: Evidence (span 2 cols on large) */}
               <div className="lg:col-span-2">
-                <div className="mb-4">
-                  <h3 className="text-lg font-medium text-slate-200">Evidence Timeline</h3>
-                  <p className="text-sm text-slate-400">Danh sách Evidence đã upload (off-chain/IPFS).</p>
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-medium text-slate-200">Evidence Timeline</h3>
+                    <p className="text-sm text-slate-400">Danh sách Evidence đã upload (off-chain/IPFS).</p>
+                  </div>
+                  {/* Chỉ Buyer hoặc Seller mới có quyền Upload */}
+                  {(viewerRole === 'buyer/seller' || viewerRole === 'buyer' || viewerRole === 'seller') && (
+                    <button
+                      onClick={() => setIsUploadModalOpen(true)}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm rounded-lg shadow-md transition-colors flex items-center"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                      </svg>
+                      Upload Evidence
+                    </button>
+                  )}
                 </div>
                 <div className="p-4 rounded-xl bg-linear-to-tr from-white/4 to-white/2 border border-white/5 backdrop-blur-md">
                   <EvidenceTimeline />
@@ -75,6 +91,16 @@ const DisputeDetail = () => {
               </div>
             </div>
           )}
+          {/* Nhúng Modal Upload */}
+          <EvidenceUploadModal
+            isOpen={isUploadModalOpen}
+            onClose={() => setIsUploadModalOpen(false)}
+            disputeId={id}
+            onUpload={() => {
+              setIsUploadModalOpen(false);
+              window.location.reload(); 
+            }}
+          />
         </main>
       </div>
     </div>

@@ -177,15 +177,25 @@ router.post('/request-random', authMiddleware, async (req, res) => {
     const buyer = buyerAddress ? ethers.getAddress(buyerAddress) : ethers.ZeroAddress;
     const seller = sellerAddress ? ethers.getAddress(sellerAddress) : ethers.ZeroAddress;
 
-    // 1. Kéo Escrow từ Database lên để lấy địa chỉ Hợp đồng (Vault)
     const escrowDb = await prisma.escrow.findUnique({ where: { id: escrowId } });
-    if (!escrowDb || !escrowDb.contractAddress) {
-      return res.status(400).json({ error: 'Vault not deployed yet' });
-    }
+    if (!escrowDb) {
+        return res.status(404).json({ error: 'Escrow not found' });
+      }
 
-    // 2. Đọc ĐÚNG mã chainEscrowId thực tế từ Smart Contract
-    const vaultContract = new ethers.Contract(escrowDb.contractAddress, ['function escrowId() view returns (bytes32)'], provider);
-    const trueChainEscrowId = await vaultContract.escrowId();
+      // Nếu vault đã deploy → đọc chainEscrowId thực từ contract (giữ logic cũ)
+      // Nếu vault chưa deploy → tự sinh từ UUID để làm VRF lookup key
+    let trueChainEscrowId;
+    if (escrowDb.contractAddress) {
+        const vaultContract = new ethers.Contract(
+          escrowDb.contractAddress,
+          ['function escrowId() view returns (bytes32)'],
+          provider
+        );
+        trueChainEscrowId = await vaultContract.escrowId();
+      } else {
+        // Vault chưa deploy, dùng keccak256(uuid) làm identifier tạm
+        trueChainEscrowId = ethers.keccak256(ethers.toUtf8Bytes(escrowId));
+      }
 
     // 3. Cập nhật lại vào DB để Worker lắng nghe sự kiện có thể quét đúng ID
     await prisma.escrow.update({

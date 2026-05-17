@@ -25,14 +25,18 @@ contract EscrowFactory {
     function createEscrow(
         address seller,
         address[5] calldata mediators,
-        uint256[2] calldata pkAggCoords,
+        uint256[2] calldata pkAggRelease,
+        uint256[2] calldata pkAggRefund,
+        uint256[2] calldata pkAggTimeout,
         uint256 amount,
         uint256 confirmDays,
         uint256 timeoutDays
     ) external returns (address) {
         address buyer = msg.sender;
         _validateParticipants(buyer, seller, mediators);
-        _validateAggregateKey(pkAggCoords);
+        _validateAggregateKey(pkAggRelease);
+        _validateAggregateKey(pkAggRefund);
+        _validateAggregateKey(pkAggTimeout);
 
         bytes32 escrowId = keccak256(
             abi.encodePacked(
@@ -44,20 +48,16 @@ contract EscrowFactory {
                 mediators[2],
                 mediators[3],
                 mediators[4],
-                pkAggCoords[0],
-                pkAggCoords[1]
+                pkAggRelease[0], // <--- Sửa thành pkAggRelease
+                pkAggRelease[1]  // <--- Sửa thành pkAggRelease
             )
         );
 
         EscrowVault vault = new EscrowVault(
-            escrowId,
-            buyer,
-            seller,
-            mediators,
-            pkAggCoords,
-            amount,
-            confirmDays,
-            timeoutDays
+            escrowId, 
+            buyer, seller, mediators,
+            pkAggRelease, pkAggRefund, pkAggTimeout,
+            amount, confirmDays, timeoutDays
         );
 
         address vaultAddress = address(vault);

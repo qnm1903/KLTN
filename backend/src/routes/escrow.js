@@ -738,17 +738,19 @@ router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => 
 router.get('/:id/aggregate-key', async (req, res) => {
   const session = await checkSession(req.params.id, res);
   if (!session) return;
-  const collection = getPubKeyCollectionSummary(session);
 
-  // VÁ LỖI CÚ PHÁP: Đã xóa dòng lặp, chỉ còn 1 dòng duy nhất và chính xác.
-  const releaseSignersAggKey = getActionSigners('release');
-  const pkAgg = aggregatePubKeysForRoles(session.pubKeys, releaseSignersAggKey);
+  const pkAggRelease = aggregatePubKeysForRoles(session.pubKeys, getActionSigners('release'));
+  const pkAggRefund  = aggregatePubKeysForRoles(session.pubKeys, getActionSigners('refund'));
+  const pkAggTimeout = aggregatePubKeysForRoles(session.pubKeys, getActionSigners('timeout'));
 
   return res.json({
     ok: true,
-    pkAgg,
-    pkAggCoords: [String(pkAgg.x), String(pkAgg.y)], // Đảm bảo trả về string cho an toàn
-    collection: toCollectionPayload(collection)
+    pkAggRelease,  pkAggReleaseCoords:  [pkAggRelease.x,  pkAggRelease.y],
+    pkAggRefund,   pkAggRefundCoords:   [pkAggRefund.x,   pkAggRefund.y],
+    pkAggTimeout,  pkAggTimeoutCoords:  [pkAggTimeout.x,  pkAggTimeout.y],
+    // Backward compat
+    pkAgg: pkAggRelease,
+    pkAggCoords: [pkAggRelease.x, pkAggRelease.y]
   });
 });
 

@@ -48,7 +48,6 @@ model Escrow {
   disputePhase    String?  // OPENED | EVIDENCE_WINDOW | REVIEW_WINDOW | DECISION_PENDING | RESOLVED
 
   // Mediator Pool fields
-  mediatorPoolUsed     Boolean   @default(false)
   mediatorsSelectedAt  DateTime?
   
   // Deadlines cho timeout check

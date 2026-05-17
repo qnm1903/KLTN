@@ -13,7 +13,7 @@ import {
   queueDisputeEvent
 } from '../lib/dispute-outbox.js';
 import { finalizeDisputeVotes } from '../services/dispute-finalize.js';
-import { executeDisputeOutcome } from '../services/dispute-contract-executor.js';
+//import { executeDisputeOutcome } from '../services/dispute-contract-executor.js';
 
 const router = express.Router();
 
@@ -33,6 +33,15 @@ function assertMessageObject(message) {
   if (!message || typeof message !== 'object' || Array.isArray(message)) {
     throw new Error('message must be an object');
   }
+}
+
+function normalizeVote(raw) {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (!v) return null;
+  if (v === 'release' || v === 'release_to_buyer' || v === '0') return 'RELEASE_TO_BUYER';
+  if (v === 'refund' || v === 'return' || v === 'return_to_seller' || v === '1') return 'RETURN_TO_SELLER';
+  if (v === 'split' || v === '2') return 'SPLIT';
+  return 'OTHER';
 }
 
 function assertDeadlineNotExpired(rawDeadline) {
@@ -517,11 +526,12 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
     // Store vote in transaction
     const createdVote = await prisma.$transaction(async (tx) => {
       await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
+      const normalizedVoteDecision = normalizeVote(vote);
       const insertedVote = await tx.disputeVote.create({
         data: {
           disputeId: req.params.id,
           mediatorId: req.user.id,
-          vote,
+          vote: normalizedVoteDecision, 
           justification: justification || '',
           evidenceRefs: Array.isArray(evidenceRefs) ? evidenceRefs : [],
           signature,
@@ -563,10 +573,20 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
     
     // Trigger execution asynchronously if dispute finalized
     if (finalizeResult.finalized === true) {
-      executeDisputeOutcome(req.params.id).catch((error) => {
-        console.error(`Failed to execute dispute ${req.params.id}:`, error.message);
-      });
-    }
+  // RETURN_TO_SELLER = seller thắng → release() trả tiền seller → signer set không cần buyer
+  // RELEASE_TO_BUYER = buyer thắng → refund() trả tiền buyer → signer set không cần seller
+  const tssAction = finalizeResult.outcome === 'RETURN_TO_SELLER' ? 'timeout' : 'refund';
+
+  emitToEscrow(finalizeResult.escrowId, 'dispute_tss_needed', {
+    escrowId:    finalizeResult.escrowId,
+    disputeId:   req.params.id,
+    outcome:     finalizeResult.outcome,
+    tssAction,
+    signerRoles: getActionSigners(tssAction)
+    // 'refund'  → ['buyer', 'mediator1', 'mediator2', 'mediator3', 'mediator4']
+    // 'timeout' → ['seller', 'mediator2', 'mediator3', 'mediator4', 'mediator5']
+  });
+}
     
     res.status(201).json(buildVoteResponse(finalizeResult));
   } catch (error) {

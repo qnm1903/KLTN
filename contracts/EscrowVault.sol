@@ -7,6 +7,10 @@ contract EscrowVault {
     uint8 private constant CORE_ROLE_MASK = 0x03;
     uint8 private constant ALLOWED_BITS_MASK = 0x7F;
     uint8 private constant MIN_SIGNERS = 5;
+    uint256 public pkAggRefundX;   
+    uint256 public pkAggRefundY;
+    uint256 public pkAggTimeoutX;  
+    uint256 public pkAggTimeoutY;
 
     error ZeroAddress();
     error ParticipantConflict();
@@ -48,6 +52,8 @@ contract EscrowVault {
         address _seller,
         address[5] memory _mediators,
         uint256[2] memory _pkAggCoords,
+        uint256[2] memory _pkAggRefund,    
+        uint256[2] memory _pkAggTimeout,   
         uint256 _amount,
         uint256 _confirmDays,
         uint256 _timeoutDays
@@ -63,6 +69,10 @@ contract EscrowVault {
         mediators = _mediators;
         pkAggX = _pkAggCoords[0];
         pkAggY = _pkAggCoords[1];
+        pkAggRefundX = _pkAggRefund[0];   
+        pkAggRefundY = _pkAggRefund[1];
+        pkAggTimeoutX = _pkAggTimeout[0]; 
+        pkAggTimeoutY = _pkAggTimeout[1];
         amount = _amount;
         status = Status.CREATED;
 
@@ -86,6 +96,7 @@ contract EscrowVault {
 
     function release(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 signerBitmap) external {
         if (status != Status.LOCKED && status != Status.DISPUTED) revert InvalidStatus();
+
         _verifyAction("release", rAddr, z, e, msgHash, signerBitmap);
 
         status = Status.RELEASED;
@@ -96,6 +107,7 @@ contract EscrowVault {
 
     function refund(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 signerBitmap) external {
         if (status != Status.LOCKED && status != Status.DISPUTED) revert InvalidStatus();
+
         _verifyAction("refund", rAddr, z, e, msgHash, signerBitmap);
 
         status = Status.REFUNDED;
@@ -117,6 +129,7 @@ contract EscrowVault {
     function timeoutRelease(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 signerBitmap) external {
         if (status != Status.LOCKED) revert InvalidStatus();
         if (block.timestamp <= timeoutDeadline) revert NotTimedOut();
+
         _verifyAction("timeout", rAddr, z, e, msgHash, signerBitmap);
 
         status = Status.RELEASED;
@@ -194,14 +207,23 @@ contract EscrowVault {
         bytes32 msgHash,
         uint8 signerBitmap
     ) private view {
+        uint256 pkX; 
+        uint256 pkY;
+        bytes32 actionHash = keccak256(bytes(action));
+
+        if (actionHash == keccak256(bytes("release"))) { 
+            pkX = pkAggX;       
+            pkY = pkAggY; 
+        } else if (actionHash == keccak256(bytes("refund")))  { 
+            pkX = pkAggRefundX; 
+            pkY = pkAggRefundY; 
+        } else { // timeout
+            pkX = pkAggTimeoutX; 
+            pkY = pkAggTimeoutY; 
+        }
+
         if (!validateSignerBitmap(signerBitmap)) revert InvalidSignerBitmap();
-
-        bytes32 expectedHash = keccak256(
-            abi.encodePacked(block.chainid, address(this), escrowId, action, signerBitmap)
-        );
-        if (msgHash != expectedHash) revert InvalidMsgHash();
-
-        if (!_verifySchnorr(pkAggX, pkAggY, msgHash, rAddr, z, e)) revert InvalidSignature();
+        if (!_verifySchnorr(pkX, pkY, msgHash, rAddr, z, e)) revert InvalidSignature();
     }
 
     function _verifySchnorr(

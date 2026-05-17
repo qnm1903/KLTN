@@ -82,6 +82,11 @@ export async function finalizeDisputeVotes(disputeId, options = {}) {
       }
     });
 
+    // Xác định tssAction dựa trên outcome
+    let tssAction = 'timeout'; // Mặc định hoặc Split
+    if (outcome === 'RELEASE_TO_BUYER') tssAction = 'release';
+    if (outcome === 'RETURN_TO_SELLER') tssAction = 'refund';
+
     await queueDisputeEvent(tx, {
       disputeId: updatedDispute.id,
       escrowId: updatedDispute.escrowId,
@@ -89,20 +94,15 @@ export async function finalizeDisputeVotes(disputeId, options = {}) {
       payload: {
         disputeId: updatedDispute.id,
         escrowId: updatedDispute.escrowId,
-        outcome: updatedDispute.outcome,
-        finalizedAt: updatedDispute.finalizedAt,
         tally,
-        threshold
+        totalVotes: dispute.votes.length,
+        threshold,
+        status: updatedDispute.status,
+        outcome: updatedDispute.outcome,
+        tssAction: tssAction 
       }
     });
 
-    return {
-      finalized: true,
-      disputeId: updatedDispute.id,
-      outcome: updatedDispute.outcome,
-      finalizedAt: updatedDispute.finalizedAt,
-      tally,
-      threshold
-    };
+    return { finalized: true, disputeId: dispute.id, tally, threshold, outcome, tssAction };
   });
 }

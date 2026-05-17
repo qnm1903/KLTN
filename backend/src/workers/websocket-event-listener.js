@@ -162,154 +162,39 @@ async function handleVaultEvent(prisma, eventName, args, contractAddress, logger
 }
 
 async function handleRandomMediatorSelected(prisma, escrowId, mediators, logger) {
-  try {
-    const escrowIdHex = escrowId;
+  const escrow = await prisma.escrow.findFirst({
+    where: { chainEscrowId: escrowId }, // lookup bằng chainEscrowId đã được set ở bước 2
+    select: { id: true, status: true }
+  });
+  if (!escrow) { logger?.warn?.(`[mediator-pool] No escrow found for chainEscrowId=${escrowId}`); return; }
 
-    const escrow = await prisma.escrow.findFirst({
-      where: { chainEscrowId: escrowIdHex },
-      select: { id: true, status: true }
+  for (let i = 0; i < mediators.length; i++) {
+    const addr = normalizeAddress(mediators[i]);
+    const user = await prisma.user.upsert({
+      where: { walletAddress: addr },
+      update: { isMediator: true, role: 'MEDIATOR' },
+      create: { walletAddress: addr, role: 'MEDIATOR', isMediator: true },
+      select: { id: true }
     });
 
-    if (!escrow) {
-      logger?.warn?.(`[mediator-pool] No escrow found for chainEscrowId=${escrowIdHex}`);
-      return;
-    }
-
-    const records = [];
-    for (let i = 0; i < mediators.length; i++) {
-      const addr = normalizeAddress(mediators[i]);
-      if (!addr) continue;
-
-      // Ensure the on-chain address exists as a User (idempotent)
-      const user = await prisma.user.upsert({
-        where: { walletAddress: addr },
-        update: { isMediator: true, role: 'MEDIATOR' },
-        create: { walletAddress: addr, role: 'MEDIATOR', isMediator: true },
-        select: { id: true }
-      });
-
-      records.push({
-        escrowId: escrow.id,
-        mediatorId: user.id,
-        slot: i + 1
-      });
-    }
-
-    if (records.length > 0) {
-      logger?.info?.(`[mediator-pool] Saving ${records.length} mediators to DB...`);
-      
-      // Upsert EscrowMediator entries idempotently (handle P2002 races)
-      for (const record of records) {
-        try {
-          await prisma.escrowMediator.upsert({
-            where: {
-              escrowId_slot: {
-                escrowId: record.escrowId,
-                slot: record.slot
-              }
-            },
-            update: {
-              mediatorId: record.mediatorId
-            },
-            create: record
-          });
-          logger?.info?.(`[mediator-pool] Upserted escrowMediator slot ${record.slot} for escrow ${record.escrowId}`);
-        } catch (error) {
-          if (error?.code === 'P2002') {
-            logger?.warn?.(`[mediator-pool] Duplicate escrowMediator slot ${record.slot} for escrow ${record.escrowId}, skipping`);
-            continue;
-          }
-          logger?.error?.(`[mediator-pool] Database error saving mediator: ${error.message || error}`);
-        }
-      }
-
-      // If there's an active dispute for this escrow, upsert DisputeMediator links
-      const activeDispute = await prisma.dispute.findFirst({
-        where: { escrowId: escrow.id, status: { not: 'RESOLVED' } },
-        orderBy: { createdAt: 'desc' }
-      });
-
-      if (activeDispute) {
-        logger?.info?.(`[mediator-pool] Found active dispute ${activeDispute.id}, assigning mediators to dispute`);
-        for (const record of records) {
-          try {
-            await prisma.disputeMediator.upsert({
-              where: {
-                disputeId_mediatorId: {
-                  disputeId: activeDispute.id,
-                  mediatorId: record.mediatorId
-                }
-              },
-              update: {
-                slot: record.slot,
-                status: 'assigned'
-              },
-              create: {
-                disputeId: activeDispute.id,
-                mediatorId: record.mediatorId,
-                slot: record.slot,
-                status: 'assigned'
-              }
-            });
-            logger?.info?.(`[mediator-pool] Upserted DisputeMediator mediatorId=${record.mediatorId} slot=${record.slot} dispute=${activeDispute.id}`);
-          } catch (error) {
-            if (error?.code === 'P2002') {
-              logger?.warn?.(`[mediator-pool] Duplicate dispute mediator for dispute ${activeDispute.id} mediator ${record.mediatorId}, skipping`);
-              continue;
-            }
-            logger?.error?.(`[mediator-pool] Error upserting DisputeMediator: ${error.message || error}`);
-          }
-        }
-
-        // Move dispute to VOTING (or appropriate next state) and set assignedAt if not set
-        try {
-          await prisma.dispute.update({
-            where: { id: activeDispute.id },
-            data: { status: 'VOTING', assignedAt: new Date() }
-          });
-          logger?.info?.(`[mediator-pool] Updated Dispute ${activeDispute.id} status to VOTING`);
-        } catch (err) {
-          logger?.error?.(`[mediator-pool] Failed to update dispute status: ${err.message || err}`);
-        }
-      }
-
-      // Update escrow flags so the UI can show mediators are selected
-      try {
-        await prisma.escrow.update({
-          where: { id: escrow.id },
-          data: {
-            mediatorPoolUsed: true,
-            mediatorsSelectedAt: new Date(),
-            // If this event should also mark escrow as DISPUTED (depending on flow), don't forcibly overwrite:
-            // only set status if it's already DISPUTED or leave it as-is. Here we keep it unchanged.
-          }
-        });
-      } catch (err) {
-        logger?.warn?.(`[mediator-pool] Failed to update escrow mediator flags: ${err.message || err}`);
-      }
-
-      logger?.info?.(`[mediator-pool] Successfully saved mediators for escrow ${escrow.id}`);
-    }
-
-    // Worker báo cáo cho Backend Server thông qua Socket Client (Thay thế cho emitToEscrow bị lỗi)
-    try {
-      if (socketClient && socketClient.connected) {
-        socketClient.emit('worker:mediators_selected', {
-          escrowId: escrow.id,
-          chainEscrowId: escrowIdHex,
-          mediators: mediators.map(m => normalizeAddress(m)),
-          count: records.length
-        });
-        logger?.info?.('[mediator-pool] Đã bắn sự kiện worker:mediators_selected tới Backend');
-      } else {
-        logger?.warn?.('[mediator-pool] Socket client chưa kết nối, không thể báo cho Backend.');
-      }
-    } catch (err) {
-      logger?.warn?.('[mediator-pool] Lỗi khi bắn sự kiện tới Backend:', err?.message || err);
-    }
-  } catch (error) {
-    logger?.error?.('[mediator-pool] Failed to handle RandomMediatorSelected:', error?.message ?? error);
+    // CHỈ ghi EscrowMediator — source of truth duy nhất
+    await prisma.escrowMediator.upsert({
+      where: { escrowId_slot: { escrowId: escrow.id, slot: i + 1 } },
+      update: { mediatorId: user.id },
+      create: { escrowId: escrow.id, mediatorId: user.id, slot: i + 1 }
+    });
   }
+
+  // KHÔNG ghi DisputeMediator ở đây
+  // KHÔNG update dispute status ở đây
+
+  emitToEscrow(escrow.id, 'mediators_selected', {
+    escrowId: escrow.id,
+    mediators: mediators.map(m => normalizeAddress(m)),
+    readyForDkg: true
+  });
+
+  logger?.info?.(`[mediator-pool] Assigned ${mediators.length} mediators to escrow ${escrow.id}`);
 }
 
 export function startWebSocketEventListener({ prisma, logger = console, config = {} }) {

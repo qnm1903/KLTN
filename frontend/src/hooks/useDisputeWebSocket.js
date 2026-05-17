@@ -385,6 +385,28 @@ export function useDisputeWebSocket(disputeId) {
       console.warn('useDisputeWebSocket: listener registration error:', err);
     }
 
+    const handleTssNeeded = (payload) => {
+      console.log('📡 [SOCKET] Yêu cầu ký TSS Thực thi On-chain:', payload);
+      
+      // Hiển thị thông báo cho người dùng biết cần phải thao tác
+      toast.info('Tranh chấp đã có kết quả! Vui lòng thực hiện ký TSS để giải ngân.');
+
+      // Cập nhật State để UI (DisputeDetail/ResolvedBanner) render Form Ký TSS
+      setCurrentDispute(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          status: 'RESOLVED',
+          tssNeeded: true,
+          tssAction: payload.tssAction, // 'release', 'refund' hoặc 'timeout'
+          escrowIdForTss: payload.escrowId
+        };
+      });
+    };
+
+    // Đăng ký lắng nghe sự kiện
+    socket.on('dispute_tss_needed', handleTssNeeded);
+
     // Cleanup: remove listeners and unsubscribe from channel
     return () => {
       try {
@@ -398,6 +420,7 @@ export function useDisputeWebSocket(disputeId) {
           socket.off('execution-triggered', handleExecutionTriggered);
           socket.off('execution-completed', handleExecutionCompleted);
           socket.off('execution-failed', handleExecutionFailed);
+          socket.off('dispute_tss_needed', handleTssNeeded);
         } else if (typeof socket.removeEventListener === 'function') {
           // cannot remove message-specific listener easily if anonymous; in production keep named reference
           socket.removeEventListener('message', () => {});
@@ -411,5 +434,7 @@ export function useDisputeWebSocket(disputeId) {
         console.warn('useDisputeWebSocket: cleanup error:', err);
       }
     };
+
+
   }, [disputeId, setCurrentDispute, setEvidenceList, setMediatorsList, setVoteTally]);
 }

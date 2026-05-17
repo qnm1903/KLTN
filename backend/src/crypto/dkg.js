@@ -1,4 +1,4 @@
-import { aggregatePublicKeys } from './schnorr.js';
+import { aggregatePublicKeys, aggregatePubKeysWithLagrange } from './schnorr.js';
 
 export const SESSION_TTL_MS = 30 * 60 * 1000; // 30 phút (DKG phase)
 export const SIGNING_TTL_MS = 6 * 60 * 60 * 1000; // 6 giờ (signing phase)
@@ -12,6 +12,20 @@ export const PARTICIPANT_ROLES = [
   'mediator4',
   'mediator5'
 ];
+
+/**
+ * Mapping từ Role sang ID cho Shamir Secret Sharing (SSS).
+ * Mỗi role có một số ID cố định để tính Lagrange coefficients.
+ */
+export const ROLE_TO_ID = {
+  'buyer': 1,
+  'seller': 2,
+  'mediator1': 3,
+  'mediator2': 4,
+  'mediator3': 5,
+  'mediator4': 6,
+  'mediator5': 7
+};
 
 export const ACTION_SIGNER_SETS = {
   release: ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'],
@@ -32,6 +46,19 @@ function assertRole(role) {
   if (!ROLE_BIT_POSITIONS.has(role)) {
     throw new Error(`Invalid role: ${role}`);
   }
+}
+
+/**
+ * Lấy mảng ID từ mảng roles.
+ * @param {string[]} roles - mảng role
+ * @returns {number[]} mảng ID tương ứng
+ */
+export function getRoleIds(roles) {
+  return roles.map(role => {
+    const id = ROLE_TO_ID[role];
+    if (id === undefined) throw new Error(`Unknown role: ${role}`);
+    return id;
+  });
 }
 
 function normalizeRoles(roles) {
@@ -129,16 +156,8 @@ export function aggregatePubKeysForRoles(pubKeysByRole, roles) {
   }
 
   const orderedRoles = normalizeRoles(roles);
-  const pubKeys = orderedRoles.map((role) => {
-    assertRole(role);
-    const pubKey = pubKeysByRole[role];
-    if (!pubKey) {
-      throw new Error(`Missing public key for role: ${role}`);
-    }
-    return pubKey;
-  });
-
-  const aggregate = aggregatePublicKeys(pubKeys);
+  // Use Lagrange-weighted aggregation by default (SSS)
+  const aggregate = aggregatePubKeysWithLagrange(pubKeysByRole, orderedRoles, ROLE_TO_ID);
   return { x: aggregate.x, y: aggregate.y };
 }
 

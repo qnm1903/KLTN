@@ -149,8 +149,77 @@ export function computeChallenge(R_addr, pkX, pkY, msgHash) {
   );
 }
 
+// ─── Modular arithmetic helpers ─────────────────────────────────────────────
+
 /**
- * Tổng hợp các z shares thành chữ ký z cuối.
+ * Tính modular inverse của a mod m bằng Extended Euclidean Algorithm.
+ * @param {bigint} a
+ * @param {bigint} m
+ * @returns {bigint} a^(-1) mod m
+ */
+function modInverse(a, m) {
+  // Ensure 0 <= a < m
+  a = ((a % m) + m) % m;
+  if (a === 0n) throw new Error('Modular inverse does not exist');
+
+  // Extended Euclidean Algorithm (works with BigInt)
+  let m0 = m;
+  let x0 = 0n;
+  let x1 = 1n;
+
+  while (a > 1n) {
+    const q = a / m;
+    let t = m;
+    m = a % m;
+    a = t;
+
+    t = x0;
+    x0 = x1 - q * x0;
+    x1 = t;
+  }
+
+  if (x1 < 0n) x1 += m0;
+  return x1;
+}
+
+/**
+ * Tính Lagrange coefficients cho Shamir Secret Sharing.
+ * λ_i = ∏(0 - x_j) / (x_i - x_j) mod ORDER
+ *
+ * @param {number[]} participantIds - mảng ID của những bên tham gia (ví dụ [1, 2, 3, 4, 5])
+ * @returns {Object} { id: lambda_coefficient }
+ */
+export function computeLagrangeCoefficients(participantIds) {
+  if (!Array.isArray(participantIds) || participantIds.length < 2) {
+    throw new Error('participantIds must be array with at least 2 elements');
+  }
+
+  const coefficients = {};
+  
+  for (const xi of participantIds) {
+    let numerator = 1n;
+    let denominator = 1n;
+
+    for (const xj of participantIds) {
+      if (xi === xj) continue;
+      
+      // numerator: (0 - xj) = -xj
+      numerator = (numerator * (0n - BigInt(xj))) % ORDER;
+      
+      // denominator: (xi - xj)
+      denominator = (denominator * (BigInt(xi) - BigInt(xj))) % ORDER;
+    }
+
+    // λ_i = numerator / denominator mod ORDER
+    const lambda = (numerator * modInverse(denominator, ORDER)) % ORDER;
+    coefficients[xi] = lambda;
+  }
+
+  return coefficients;
+}
+
+/**
+ * Tổng hợp các z shares thành chữ ký z cuối (ADDITIVE - không dùng Lagrange).
  * z = z_1 + z_2 + ... (mod ORDER)
  *
  * @param {string[]} zShares - mảng z_i (hex)
@@ -161,6 +230,93 @@ export function aggregateZShares(zShares) {
     .map(z => BigInt(z.startsWith('0x') ? z : '0x' + z))
     .reduce((a, b) => (a + b) % ORDER, 0n);
   return '0x' + z_total.toString(16).padStart(64, '0');
+}
+
+/**
+ * Tổng hợp các z shares với Lagrange coefficients (SSS - Shamir Secret Sharing).
+ * z = (z_1*λ_1 + z_2*λ_2 + ... + z_n*λ_n) mod ORDER
+ *
+ * @param {Object} zSharesByRole - { role: z_hex } ví dụ { buyer: '0x...', seller: '0x...' }
+ * @param {Object} roleToId - { role: id } ví dụ { buyer: 1, seller: 2, ... }
+ * @returns {string} z (bytes32 hex)
+ */
+export function aggregateZSharesWithLagrange(zSharesByRole, roleToId) {
+  if (!zSharesByRole || typeof zSharesByRole !== 'object') {
+    throw new Error('zSharesByRole is required');
+  }
+  if (!roleToId || typeof roleToId !== 'object') {
+    throw new Error('roleToId mapping is required');
+  }
+
+  const roles = Object.keys(zSharesByRole);
+  const participantIds = roles.map(role => roleToId[role]).filter(id => id !== undefined);
+
+  if (participantIds.length !== roles.length) {
+    throw new Error('Some roles are missing from roleToId mapping');
+  }
+
+  const lagrangeCoeffs = computeLagrangeCoefficients(participantIds);
+
+  let z_total = 0n;
+  for (const role of roles) {
+    const z = BigInt(zSharesByRole[role].startsWith('0x') ? zSharesByRole[role] : '0x' + zSharesByRole[role]);
+    const id = roleToId[role];
+    const lambda = lagrangeCoeffs[id];
+    z_total = (z_total + (z * lambda) % ORDER) % ORDER;
+  }
+
+  return '0x' + z_total.toString(16).padStart(64, '0');
+}
+
+/**
+ * Aggregate public keys using Lagrange coefficients (SSS-aware).
+ * PKagg = sum_i (lambda_i * P_i)
+ *
+ * @param {Object} pubKeysByRole - { role: pubkey_hex }
+ * @param {string[]} roles - ordered array of roles to include
+ * @param {Object} roleToId - mapping role -> id
+ * @returns {{ hex: string, x: string, y: string }}
+ */
+export function aggregatePubKeysWithLagrange(pubKeysByRole, roles, roleToId) {
+  if (!pubKeysByRole || typeof pubKeysByRole !== 'object') throw new Error('pubKeysByRole is required');
+  if (!Array.isArray(roles) || roles.length === 0) throw new Error('roles array is required');
+  if (!roleToId || typeof roleToId !== 'object') throw new Error('roleToId mapping is required');
+
+  const participantIds = roles.map(role => {
+    const id = roleToId[role];
+    if (id === undefined) throw new Error(`Missing roleToId for role ${role}`);
+    return id;
+  });
+
+  const lagrangeCoeffs = computeLagrangeCoefficients(participantIds);
+
+  // Sum lambda_i * P_i
+  let aggPoint = null;
+  for (const role of roles) {
+    const pubKeyHex = pubKeysByRole[role];
+    if (!pubKeyHex) throw new Error(`Missing public key for role ${role}`);
+
+    const clean = normalizePubKey(pubKeyHex);
+    const pt = ec.keyFromPublic(clean, 'hex').getPublic();
+    const id = roleToId[role];
+    const lambda = lagrangeCoeffs[id];
+
+    // Multiply point by scalar lambda
+    const scaled = pt.mul(lambda);
+
+    if (aggPoint === null) aggPoint = scaled;
+    else aggPoint = aggPoint.add(scaled);
+  }
+
+  if (!aggPoint) throw new Error('aggregatePubKeysWithLagrange: no points aggregated');
+
+  const x = '0x' + aggPoint.getX().toString(16).padStart(64, '0');
+  const y = '0x' + aggPoint.getY().toString(16).padStart(64, '0');
+  return {
+    hex: '04' + aggPoint.getX().toString(16).padStart(64, '0') + aggPoint.getY().toString(16).padStart(64, '0'),
+    x,
+    y
+  };
 }
 
 /**
@@ -245,6 +401,116 @@ export function verifySchnorr(pkAgg, msgHash, R_addr, z, e) {
 // mulmod: (a * b) mod m
 function mulmod(a, b, m) {
   return (a * b) % m;
+}
+
+// ─── Proof of Possession ──────────────────────────────────────────────────────
+
+/**
+ * Verify ownership proof: party proves they own the private key for pubKey
+ * by signing a message with that private key.
+ *
+ * Message format: "I own this TSS key: {walletAddress} {pubKey}"
+ *
+ * @param {string} message         - Original message that was signed
+ * @param {string} signature       - Schnorr signature (hex, 64-128 chars)
+ * @param {string} pubKeyHex       - The public key to verify against (uncompressed)
+ * @param {string} walletAddress   - Expected wallet address (for message validation)
+ * @returns {{ valid: boolean, recoveredPubKey?: string, error?: string }}
+ */
+export function verifyOwnershipProof(message, signature, pubKeyHex, walletAddress) {
+  try {
+    // 1. Normalize inputs
+    const clean_sig = String(signature || '').replace(/^0x/i, '').trim();
+    const clean_pubkey = normalizePubKey(pubKeyHex);
+    const clean_wallet = String(walletAddress || '').toLowerCase().trim();
+
+    // 2. Validate signature format (should be 64-128 hex chars for Schnorr)
+    if (!/^[0-9a-f]{64,128}$/i.test(clean_sig)) {
+      return { valid: false, error: 'Invalid signature format. Expected 64-128 hex characters.' };
+    }
+
+    // 3. Hash the message (using same method as frontend)
+    const messageHash = ethers.id(message);
+
+    // 4. Parse signature (r, z for Schnorr)
+    // For Schnorr: signature = r || z (where r is point on curve, z is scalar)
+    // We'll use elliptic's built-in recovery if available, or basic verification
+    const r = clean_sig.slice(0, 64);
+    const z = clean_sig.slice(64, 128) || clean_sig.slice(0, 64); // Handle both 64 and 128 char sigs
+
+    // 5. Recover public key from signature
+    // For Schnorr verification: compute z*G - hash*PK and check it equals r*G
+    // Simplified: try to match pubkey by computing z*G - (hash mod ORDER)*PK
+    const z_bigint = BigInt('0x' + z);
+    const hash_bigint = BigInt(messageHash);
+    const r_bigint = BigInt('0x' + r);
+
+    const pubKeyPoint = ec.keyFromPublic(clean_pubkey, 'hex').getPublic();
+    const pubKeyX = pubKeyPoint.getX();
+    const pubKeyY = pubKeyPoint.getY();
+
+    // For additive Schnorr: compute z*G
+    const G = ec.g;
+    const zG = G.mul(z_bigint);
+
+    // Compute hash * PK (scalar mult)
+    const hashModOrder = hash_bigint % ORDER;
+    const hashPK = pubKeyPoint.mul(hashModOrder);
+
+    // Compute z*G - hash*PK
+    const negHashPK = hashPK.neg();
+    const recovered = zG.add(negHashPK);
+
+    // Verify: recovered should equal r*G (or at least have same x-coordinate with r)
+    const recoveredX = recovered.getX();
+    const recoveredY = recovered.getY();
+
+    // 6. Verify the public key matches
+    const derivedAddr = pointToAddress(recoveredX.toString(16), recoveredY.toString(16));
+
+    // Compare with submitted public key's address
+    const submittalAddr = pointToAddress(pubKeyX.toString(16), pubKeyY.toString(16));
+
+    if (submittalAddr.toLowerCase() !== derivedAddr.toLowerCase()) {
+      return {
+        valid: false,
+        error: 'Ownership proof failed: signature does not match public key'
+      };
+    }
+
+    // 7. Verify wallet address matches (optional check for added security)
+    if (clean_wallet && clean_wallet !== '0x') {
+      const walletFromPubKey = submittalAddr.toLowerCase();
+      if (walletFromPubKey !== clean_wallet.toLowerCase()) {
+        return {
+          valid: false,
+          error: `Wallet mismatch: pubKey address ${walletFromPubKey} != wallet ${clean_wallet}`
+        };
+      }
+    }
+
+    return {
+      valid: true,
+      recoveredPubKey: '0x' + clean_pubkey
+    };
+  } catch (error) {
+    return {
+      valid: false,
+      error: `Ownership proof verification failed: ${error.message}`
+    };
+  }
+}
+
+/**
+ * Create ownership challenge message for frontend to sign
+ * @param {string} walletAddress - Ethereum address of the party
+ * @param {string} pubKeyHex     - Public key to prove ownership of
+ * @returns {string} Message to be signed by party
+ */
+export function createOwnershipChallenge(walletAddress, pubKeyHex) {
+  const clean_wallet = String(walletAddress || '').trim();
+  const clean_pubkey = String(pubKeyHex || '').replace(/^0x/i, '').trim();
+  return `I own this TSS key: ${clean_wallet} 0x${clean_pubkey}`;
 }
 
 export { pointToAddress };

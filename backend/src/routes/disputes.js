@@ -13,6 +13,8 @@ import {
   queueDisputeEvent
 } from '../lib/dispute-outbox.js';
 import { finalizeDisputeVotes } from '../services/dispute-finalize.js';
+import { getSession } from '../store/session.js';
+import { getActionSigners } from '../crypto/dkg.js';
 //import { executeDisputeOutcome } from '../services/dispute-contract-executor.js';
 
 const router = express.Router();
@@ -571,22 +573,34 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
     // Finalize and return current tally
     const finalizeResult = await finalizeDisputeVotes(req.params.id);
     
-    // Trigger execution asynchronously if dispute finalized
-    if (finalizeResult.finalized === true) {
-  // RETURN_TO_SELLER = seller thắng → release() trả tiền seller → signer set không cần buyer
-  // RELEASE_TO_BUYER = buyer thắng → refund() trả tiền buyer → signer set không cần seller
-  const tssAction = finalizeResult.outcome === 'RETURN_TO_SELLER' ? 'timeout' : 'refund';
+      // Trigger execution asynchronously if dispute finalized
+      if (finalizeResult.finalized === true) {
+        // RETURN_TO_SELLER = seller thắng → release() trả tiền seller → signer set không cần buyer
+        // RELEASE_TO_BUYER = buyer thắng → refund() trả tiền buyer → signer set không cần seller
+        const tssAction = finalizeResult.tssAction || (finalizeResult.outcome === 'RELEASE_TO_BUYER' ? 'release' : (finalizeResult.outcome === 'RETURN_TO_SELLER' ? 'refund' : 'timeout'));
 
-  emitToEscrow(finalizeResult.escrowId, 'dispute_tss_needed', {
-    escrowId:    finalizeResult.escrowId,
-    disputeId:   req.params.id,
-    outcome:     finalizeResult.outcome,
-    tssAction,
-    signerRoles: getActionSigners(tssAction)
-    // 'refund'  → ['buyer', 'mediator1', 'mediator2', 'mediator3', 'mediator4']
-    // 'timeout' → ['seller', 'mediator2', 'mediator3', 'mediator4', 'mediator5']
-  });
-}
+        // Try to get dynamic signerRoles from an active session (if available). This avoids hardcoded signer sets
+        // when a signing session has already been started and its `signingRoles` reflect the actual participants.
+        let signerRoles = null;
+        try {
+          const session = await getSession(finalizeResult.escrowId, { allowExpired: true });
+          if (session && Array.isArray(session.signingRoles) && session.signingRoles.length > 0) {
+            signerRoles = session.signingRoles;
+          }
+        } catch (e) {
+          // ignore and fallback to default mapping
+        }
+
+        if (!signerRoles) signerRoles = getActionSigners(tssAction);
+
+        emitToEscrow(finalizeResult.escrowId, 'dispute_tss_needed', {
+          escrowId:    finalizeResult.escrowId,
+          disputeId:   req.params.id,
+          outcome:     finalizeResult.outcome,
+          tssAction,
+          signerRoles
+        });
+      }
     
     res.status(201).json(buildVoteResponse(finalizeResult));
   } catch (error) {

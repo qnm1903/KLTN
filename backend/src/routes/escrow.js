@@ -7,11 +7,12 @@ import {
   getActionSigners,
   getPubKeyCollectionSummary,
   getPkAggForRoles,
+  ROLE_TO_ID,
   initDKG,
   initIncrementalDKG,
   SESSION_TTL_MS
 } from '../crypto/dkg.js';
-import { aggregateNonces, computeChallenge, aggregateZShares } from '../crypto/schnorr.js';
+import { aggregateNonces, computeChallenge, aggregateZShares, aggregateZSharesWithLagrange } from '../crypto/schnorr.js';
 import { ethers } from 'ethers';
 import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-limit.js';
 import { authMiddleware } from '../middleware/auth.js';
@@ -45,7 +46,10 @@ const MEDIATOR_COMMITTEE_SIZE = 5;
 
 let pubKeyPersistenceDisabled = false;
 
-function getActionSignerRoles(action) {
+function getActionSignerRoles(session, action) {
+  if (session?.signingAction === action && Array.isArray(session?.signingRoles) && session.signingRoles.length > 0) {
+    return [...new Set(session.signingRoles)];
+  }
   return getActionSigners(action);
 }
 
@@ -119,7 +123,7 @@ async function checkSession(escrowId, res) {
         console.log(`[TSS Recovery] Khôi phục thành công: action=${firstNonce.action}, roles=${roles.join(',')}, bitmap=${session.signingBitmap}`);
         
         // Auto-compute challenge if enough nonces restored (5+ for release/refund)
-        const actionRoles = getActionSignerRoles(firstNonce.action);
+        const actionRoles = getActionSignerRoles(session, firstNonce.action);
         if (roles.length >= actionRoles.length && rolesMatchAction(roles, firstNonce.action)) {
           try {
             const pkAgg = getPkAggForRoles(session, roles);
@@ -238,8 +242,8 @@ async function clearPubKeySubmissions(escrowId) {
   catch (error) { if (isMissingTableError(error)) pubKeyPersistenceDisabled = true; else throw error; }
 }
 
-function rolesMatchAction(roles, action) {
-  const expected = [...getActionSignerRoles(action)].sort().join('+');
+function rolesMatchAction(session, roles, action) {
+  const expected = [...getActionSignerRoles(session, action)].sort().join('+');
   const actual = [...new Set(roles)].sort().join('+');
   return expected === actual;
 }
@@ -426,7 +430,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     const collection = getPubKeyCollectionSummary(session);
     if (!collection.complete) return res.status(409).json({ error: 'Pubkey collection is incomplete.', collection: toCollectionPayload(collection) });
 
-    const actionRoles = getActionSignerRoles(action);
+    const actionRoles = getActionSignerRoles(session, action);
     if (!actionRoles.includes(role)) return res.status(403).json({ error: `Role '${role}' is not allowed for action '${action}'` });
 
     const bitmap = Number(signerBitmap);
@@ -481,7 +485,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
         // If enough nonces collected but round2Context missing, auto-compute challenge
         if (nonceCount >= actionRoles.length) {
           const roles = Object.keys(session.nonces);
-          if (rolesMatchAction(roles, action)) {
+          if (rolesMatchAction(session, roles, action)) {
             try {
               const pkAgg = getPkAggForRoles(session, roles);
               const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNonces(Object.values(session.nonces));
@@ -617,7 +621,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     }
 
     const roles = Object.keys(session.nonces);
-    if (!rolesMatchAction(roles, action)) return res.status(403).json({ error: 'Signer roles do not match' });
+    if (!rolesMatchAction(session, roles, action)) return res.status(403).json({ error: 'Signer roles do not match' });
     session.signingRoles = roles;
 
     const pkAgg = getPkAggForRoles(session, roles);
@@ -699,7 +703,11 @@ router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => 
       return res.status(400).json({ error: `Invalid signer bitmap: ${validation.error}` });
     }
     
-    const z_agg = aggregateZShares(Object.values(session.zShares));
+    // ─── Aggregation: Choose Additive or SSS ──────────────────────────────────── 
+    // Option 1: ADDITIVE (current) - z = z_1 + z_2 + ... (no Lagrange) 
+    // const z_agg = aggregateZShares(Object.values(session.zShares)); 
+    // Option 2: SSS (Shamir Secret Sharing) - z = (z_1*λ_1 + z_2*λ_2 + ... + z_n*λ_n) mod ORDER 
+    const z_agg = aggregateZSharesWithLagrange(session.zShares, ROLE_TO_ID);
 
     session.completedActions.push(session.signingAction);
     session.nonces = {};
@@ -739,9 +747,13 @@ router.get('/:id/aggregate-key', async (req, res) => {
   const session = await checkSession(req.params.id, res);
   if (!session) return;
 
-  const pkAggRelease = aggregatePubKeysForRoles(session.pubKeys, getActionSigners('release'));
-  const pkAggRefund  = aggregatePubKeysForRoles(session.pubKeys, getActionSigners('refund'));
-  const pkAggTimeout = aggregatePubKeysForRoles(session.pubKeys, getActionSigners('timeout'));
+  const releaseRoles = getActionSignerRoles(session, 'release');
+  const refundRoles = getActionSignerRoles(session, 'refund');
+  const timeoutRoles = getActionSignerRoles(session, 'timeout');
+
+  const pkAggRelease = aggregatePubKeysForRoles(session.pubKeys, releaseRoles);
+  const pkAggRefund  = aggregatePubKeysForRoles(session.pubKeys, refundRoles);
+  const pkAggTimeout = aggregatePubKeysForRoles(session.pubKeys, timeoutRoles);
 
   return res.json({
     ok: true,

@@ -855,6 +855,8 @@ router.post('/record-deploy', authMiddleware, async (req, res) => {
   try {
     const { escrowId, txHash } = req.body;
     if (!escrowId || !txHash) return res.status(400).json({ error: 'escrowId and txHash are required' });
+    const FACTORY_ADDRESS = process.env.FACTORY_ADDRESS;
+    const isSameAddress = (a, b) => a && b && a.toLowerCase() === b.toLowerCase();
     if (!FACTORY_ADDRESS) return res.status(500).json({ error: 'FACTORY_ADDRESS is not configured' });
 
     console.log(`[Record Deploy] Bắt đầu xác nhận giao dịch ${txHash} cho Escrow ${escrowId}`);

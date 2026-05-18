@@ -74,7 +74,7 @@ export const useContractCall = () => {
 
     addLog({ message: 'Requesting MetaMask to deploy new Vault Contract...', type: 'warning' });
 
-    await writeContractAsync({
+    return await writeContractAsync({
       address: factoryAddress,
       abi: factoryAbi,
       functionName: 'createEscrow',
@@ -183,7 +183,7 @@ export const useContractCall = () => {
 
     // addLog({ message: `Requesting MetaMask to lock ${amountEth} ETH on-chain...`, type: 'warning' });
 
-    await writeContractAsync({
+    return await writeContractAsync({
       address: vaultContractAddress,
       abi: vaultAbi,
       functionName: 'lockFunds',
@@ -220,7 +220,7 @@ export const useContractCall = () => {
         throw new Error(`Preflight failed: ${simulatedReason}`);
       }
 
-      await writeContractAsync({
+       return await writeContractAsync({
         address: targetAddress,
         abi: vaultAbi,
         functionName: actionType,

@@ -1074,7 +1074,7 @@ export default function EscrowDetail() {
         {/* KHỐI 4.8: CÁC NÚT HÀNH ĐỘNG HAPPY PATH & DISPUTE */}
         {(activeRole === 'buyer' || activeRole === 'seller') && (
           // Nút sẽ hiện ngay lập tức khi tiền đã được khóa an toàn
-          ['LOCKED', 'FUNDED'].includes(String(escrow?.status || '').toUpperCase()) && (
+          (['LOCKED', 'FUNDED'].includes(String(escrow?.status || '').toUpperCase()) || isVaultLockedOnChain) && (
             <section className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl mt-6 flex flex-col md:flex-row gap-4 justify-center items-center">
               <button
                 onClick={handleStartRelease}

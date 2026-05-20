@@ -862,12 +862,12 @@ router.post('/record-deploy', authMiddleware, async (req, res) => {
     console.log(`[Record Deploy] Bắt đầu xác nhận giao dịch ${txHash} cho Escrow ${escrowId}`);
     const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
 
-    // Chờ biên lai (receipt) từ mạng lưới (thử tối đa 8 lần)
+    // Chờ biên lai (receipt) từ mạng lưới (thử tối đa 30 lần)
     let receipt = await provider.getTransactionReceipt(txHash);
-    const maxAttempts = 8;
+    const maxAttempts = 30;
     let attempt = 0;
     while (!receipt && attempt < maxAttempts) {
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 2000));
       receipt = await provider.getTransactionReceipt(txHash);
       attempt += 1;
     }

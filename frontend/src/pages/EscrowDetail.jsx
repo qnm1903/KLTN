@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAtomValue, useSetAtom } from 'jotai';
 import { useConnection } from 'wagmi';
+import { ethers } from 'ethers';
 
 // --- IMPORT STATE & LOGIC HOOKS ---
 import {
@@ -75,6 +76,7 @@ function validateSignerBitmap(bitmap) {
 export default function EscrowDetail() {
   // 1. Lấy Context & Định danh
   const { id: escrowId } = useParams();
+  const navigate = useNavigate();
   const { address } = useConnection();
 
   const [escrow, setEscrow] = useState(null);
@@ -378,27 +380,40 @@ export default function EscrowDetail() {
       if (!txHash) {
         addLog({ message: 'Giao dịch đã gửi nhưng chưa lấy được hash. Vui lòng chờ Socket cập nhật.', type: 'warning' });
       } else {
-        addLog({ message: `Đã gửi TX: ${txHash}. Đang chờ Blockchain...`, type: 'warning' });
+        addLog({ message: `Đã gửi TX: ${txHash}. Đang chờ Blockchain xác nhận (15-30s)...`, type: 'info' });
         
-        await api.post('/escrow/record-deploy', { escrowId, txHash });
-        addLog({ message: 'Triển khai đã ghi nhận. Đang cập nhật UI...', type: 'success' });
-
-        // Ép Socket vào phòng ngay lập tức để không rớt thông báo
-        const token = getStoredAccessToken();
-        if (token) {
-          socket.emit('join_escrow', { escrowId, token }, (response) => {
-            if (response?.ok) {
-              addLog({ message: 'Socket room joined after deploy.', type: 'info' });
-            }
-          });
-        }
-
-        // Kéo dữ liệu tươi nhất từ backend để ép render nút Deposit
         try {
-          const { data: fresh } = await api.get(`/escrows/${escrowId}`);
-          setEscrow(fresh);
-        } catch (fetchErr) {
-          console.warn('Could not refresh escrow immediately after deploy:', fetchErr);
+          const provider = new ethers.BrowserProvider(window.ethereum);
+          const receipt = await provider.waitForTransaction(txHash);
+          
+          if (receipt && receipt.status === 0) {
+            throw new Error('Transaction reverted on the blockchain.');
+          }
+
+          addLog({ message: `✅ Block mined (Block #${receipt.blockNumber}). Syncing with database...`, type: 'success' });
+
+          await api.post('/escrow/record-deploy', { escrowId, txHash });
+          
+          addLog({ message: 'Deploy recorded successfully. Updating UI...', type: 'success' });
+
+          const token = getStoredAccessToken();
+          if (token) {
+            socket.emit('join_escrow', { escrowId, token }, (response) => {
+              if (response?.ok) {
+                addLog({ message: 'Socket room joined after deploy.', type: 'info' });
+              }
+            });
+          }
+
+          try {
+            const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+            setEscrow(fresh);
+          } catch (fetchErr) {
+            console.warn('Could not refresh escrow immediately after deploy:', fetchErr);
+          }
+
+        } catch (waitErr) {
+          throw waitErr;
         }
       }
     } catch (err) {
@@ -638,56 +653,42 @@ export default function EscrowDetail() {
     }
   };
 
-  const navigate = useNavigate();
-  const { id } = useParams();
-  // Hàm xử lý kích hoạt luồng Dispute
   const handleRaiseDispute = async () => {
     try {
-      const reasonInput = window.prompt("Vui lòng nhập lý do tạo tranh chấp:", "Sản phẩm không đúng như mô tả");
+      const reasonInput = window.prompt("Please enter the reason for the dispute:", "Product does not match description");
       if (reasonInput === null) return; 
-      const reason = reasonInput.trim() || "Không cung cấp lý do cụ thể";
+      const reason = reasonInput.trim() || "No specific reason provided";
+      const urlSegments = window.location.pathname.split('/');
+      const safeEscrowId = urlSegments[urlSegments.length - 1];
 
-      addLog({ message: 'Đang khởi tạo hồ sơ Dispute...', type: 'info' });
-
-      const response = await api.post('/disputes', { escrowId: id, reason: reason });
-      const disputeId = response.data?.id || response.data?.disputeId;
-
-      addLog({ message: 'Đang gửi yêu cầu chọn 5 Trọng tài lên Blockchain (VRF)...', type: 'info' });
-
-      // Gọi Backend gọi Chainlink
-      const reqRes = await api.post('/mediator/request-random', { 
-        escrowId: id,
-        buyerAddress: escrow.buyer.walletAddress,
-        sellerAddress: escrow.seller.walletAddress
-      });
-
-      const chainEscrowId = reqRes.data?.chainEscrowId || reqRes.data?.chainEscrowIdHex;
-      
-      // Chờ (Polling) Chainlink trả kết quả
-      if (chainEscrowId) {
-        addLog({ message: 'Đang chờ Chainlink bốc thăm ngẫu nhiên (1-2 blocks)...', type: 'warning' });
-        const maxPoll = 15;
-        for (let i = 0; i < maxPoll; i++) {
-          try {
-            const res = await api.get(`/mediator/random-result/${encodeURIComponent(chainEscrowId)}`);
-            if (res.data?.status === 'completed') {
-              addLog({ message: '✅ VRF đã phân công xong 5 Trọng tài! Đang cập nhật giao diện...', type: 'success' });
-              const { data: fresh } = await api.get(`/escrows/${escrowId}`);
-              setEscrow(fresh);
-              break;
-            }
-          } catch (e) { /* Bỏ qua lỗi 404 khi đang chờ */ }
-          await new Promise(r => setTimeout(r, 2000));
-        }
+      if (!safeEscrowId) {
+        addLog({ message: 'Lỗi hệ thống: Không thể xác định Escrow ID từ URL.', type: 'error' });
+        return;
       }
 
-      addLog({ message: 'Yêu cầu hoàn tất. Chuyển hướng sang trang Tranh chấp...', type: 'success' });
-      navigate(`/disputes/${disputeId || id}`);
+      const payload = { escrowId: safeEscrowId, reason: reason };
+      console.log('[handleRaiseDispute] Gửi payload an toàn:', JSON.stringify(payload));
+      addLog({ message: 'Initiating Dispute record in database...', type: 'info' });
+
+      const endpoint = `/disputes?escrowId=${safeEscrowId}&reason=${encodeURIComponent(reason)}`;
+      const response = await api.post(endpoint, payload, {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const disputeId = response.data?.id || response.data?.disputeId;
+
+      addLog({ message: '✅ Dispute raised successfully. Mediators are inherited.', type: 'success' });
+      
+      setTimeout(() => {
+        window.location.href = `/disputes/${disputeId || safeEscrowId}`;
+      }, 1500);
 
     } catch (error) {
-      console.error('[handleRaiseDispute] Lỗi:', error);
+      console.error('[handleRaiseDispute] Error:', error);
       const errorMsg = error.response?.data?.error || error.message;
-      addLog({ message: `Lỗi Dispute: ${errorMsg}`, type: 'error' });
+      addLog({ message: `Dispute Initialization Error: ${errorMsg}`, type: 'error' });
     }
   };
 

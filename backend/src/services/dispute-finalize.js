@@ -70,7 +70,7 @@ export async function finalizeDisputeVotes(disputeId, options = {}) {
     });
 
     if (!outcome || dispute.status === 'RESOLVED') {
-      return { finalized: false, disputeId: dispute.id, tally, threshold, outcome: dispute.outcome };
+      return { finalized: false, disputeId: dispute.id, escrowId: dispute.escrowId, tally, threshold, outcome: dispute.outcome };
     }
 
     const updatedDispute = await tx.dispute.update({
@@ -103,6 +103,6 @@ export async function finalizeDisputeVotes(disputeId, options = {}) {
       }
     });
 
-    return { finalized: true, disputeId: dispute.id, tally, threshold, outcome, tssAction };
+    return { finalized: true, disputeId: dispute.id, escrowId: dispute.escrowId, tally, threshold, outcome, tssAction };
   });
 }

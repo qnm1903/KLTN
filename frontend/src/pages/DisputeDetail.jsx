@@ -12,8 +12,8 @@ import { useParams } from 'react-router-dom';
 const DisputeDetail = () => {
   const { address } = useAccount();
   const { id } = useParams();
-  useDisputeWebSocket(id);
   const { currentDispute, status } = useDisputeDetail(id);
+  useDisputeWebSocket(id);
   const displayStatus = status ?? DISPUTE_STATUS.PENDING_VRF;
   const viewerRole = deriveViewerRole(currentDispute, address);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);

@@ -15,6 +15,7 @@ import {
 import { finalizeDisputeVotes } from '../services/dispute-finalize.js';
 import { getSession } from '../store/session.js';
 import { getActionSigners } from '../crypto/dkg.js';
+import { emitToEscrow } from '../lib/socket-emitter.js';
 //import { executeDisputeOutcome } from '../services/dispute-contract-executor.js';
 
 const router = express.Router();
@@ -236,10 +237,14 @@ function buildVoteResponse(finalizeResult) {
 
 router.post('/', authMiddleware, async (req, res) => {
   try {
-    const { escrowId, reason, description } = req.body;
-    if (!escrowId || !reason) {
-      return res.status(400).json({ error: 'escrowId and reason are required' });
-    }
+    const escrowId = req.body.escrowId || req.query.escrowId;
+    const reason = req.body.reason || req.query.reason || 'No reason specified';
+    const description = req.body.description || req.query.description || '';
+
+    console.log(`\n--- [DISPUTE API] BẮT ĐẦU TẠO TRANH CHẤP ---`);
+    console.log(`=> 1. Đang xử lý cho Escrow ID: ${escrowId}`);
+
+    if (!escrowId) return res.status(400).json({ error: 'escrowId is required' });
 
     const escrow = await prisma.escrow.findUnique({
       where: { id: escrowId },
@@ -247,24 +252,25 @@ router.post('/', authMiddleware, async (req, res) => {
     });
 
     if (!escrow) return res.status(404).json({ error: 'Escrow not found' });
-    if (!isEscrowParticipant(escrow, req.user.id)) {
-      return res.status(403).json({ error: 'Only escrow participants can create disputes' });
+    if (!isEscrowParticipant(escrow, req.user.id)) return res.status(403).json({ error: 'Only escrow participants can create disputes' });
+
+    const finalMediators = escrow.escrowMediators || [];
+    console.log(`=> 2. Số lượng Trọng tài hiện có trong DB: ${finalMediators.length}`);
+    
+    if (finalMediators.length !== 5) {
+      const errMsg = `Lỗi Dữ Liệu: Escrow này chỉ có ${finalMediators.length}/5 Trọng tài. Vui lòng TẠO ESCROW MỚI vì event VRF của Escrow cũ này đã bị mất trước đó.`;
+      console.log(`=> LỖI 500: ${errMsg}`);
+      return res.status(500).json({ error: errMsg });
     }
 
     const existingActiveDispute = await prisma.dispute.findFirst({
-      where: {
-        escrowId,
-        status: { not: 'RESOLVED' }
-      },
+      where: { escrowId, status: { not: 'RESOLVED' } },
       select: { id: true, status: true }
     });
-    if (existingActiveDispute) {
-      return res.status(409).json({
-        error: 'This escrow already has an active dispute',
-        disputeId: existingActiveDispute.id,
-        status: existingActiveDispute.status
-      });
-    }
+
+    if (existingActiveDispute) return res.status(409).json({ error: 'This escrow already has an active dispute' });
+
+    console.log(`=> 3. Bắt đầu Transaction ghi nhận Dispute xuống DB...`);
 
     const dispute = await prisma.$transaction(async (tx) => {
       const created = await tx.dispute.create({
@@ -272,20 +278,18 @@ router.post('/', authMiddleware, async (req, res) => {
           escrowId,
           initiatorAddress: normalizeAddress(req.user.walletAddress),
           reason,
-          description: description || '',
+          description,
           status: 'MEDIATORS_ASSIGNED',
           assignedAt: new Date(),
           mediators: {
-            create: escrow.escrowMediators.map((row) => ({
+            create: finalMediators.map((row) => ({
               mediatorId: row.mediatorId,
               slot: row.slot,
               status: 'assigned'
             }))
           }
         },
-        include: {
-          mediators: true
-        }
+        include: { mediators: true }
       });
 
       await queueDisputeEvent(tx, {
@@ -300,22 +304,18 @@ router.post('/', authMiddleware, async (req, res) => {
           disputeId: created.id,
           escrowId,
           type: DISPUTE_EVENT_TYPES.MEDIATOR_ASSIGNED,
-          payload: {
-            disputeId: created.id,
-            escrowId,
-            mediatorId: mediator.mediatorId,
-            slot: mediator.slot,
-            status: mediator.status
-          }
+          payload: { disputeId: created.id, escrowId, mediatorId: mediator.mediatorId, slot: mediator.slot, status: mediator.status }
         });
       }
 
       return created;
     });
 
+    console.log(`=> THÀNH CÔNG: Đã tạo Dispute ID: ${dispute.id}`);
     res.status(201).json(buildCreateDisputeResponse(dispute));
+
   } catch (error) {
-    console.error('Error in POST /disputes:', error.message);
+    console.error('=> LỖI HỆ THỐNG (500) TRONG POST /disputes:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

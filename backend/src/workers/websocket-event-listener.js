@@ -241,8 +241,12 @@ export function startWebSocketEventListener({ prisma, logger = console, config =
     const mediatorPoolContract = new ethers.Contract(mediatorPoolAddress, mediatorPoolAbi, provider);
 
     mediatorPoolContract.on('RandomMediatorSelected', async (escrowId, mediators, event) => {
-      if (event.logIndex < confirmations) return;
-      await handleRandomMediatorSelected(prisma, escrowId, mediators, logger);
+      try {
+        logger.info(`[websocket] Bắt được event RandomMediatorSelected cho Escrow: ${escrowId}`);
+        await handleRandomMediatorSelected(prisma, escrowId, mediators, logger);
+      } catch (err) {
+        logger.error('[websocket] RandomMediatorSelected handler error', err?.message ?? err);
+      }
     });
 
     logger?.info?.(`[websocket] Subscribed to MediatorPool: ${mediatorPoolAddress}`);
@@ -260,27 +264,39 @@ export function startWebSocketEventListener({ prisma, logger = console, config =
     knownVaults.set(vaultAddress, vaultContract);
 
     // Subscribe to vault events
-    vaultContract.on('EscrowCreated', (escrowId, buyer, seller, amount, event) => {
-      if (event.logIndex >= confirmations) {
-        handleVaultEvent(prisma, 'EscrowCreated', { escrowId }, vaultAddress, logger);
+    vaultContract.on('EscrowCreated', async (escrowId, buyer, seller, amount, event) => {
+      try {
+        logger?.info?.(`[websocket] Bắt được event Vault EscrowCreated: ${escrowId}`);
+        await handleVaultEvent(prisma, 'EscrowCreated', { escrowId }, vaultAddress, logger);
+      } catch (err) {
+        logger?.error?.('[websocket] Vault EscrowCreated handler error', err?.message ?? err);
       }
     });
 
-    vaultContract.on('FundsLocked', (escrowId, amount, event) => {
-      if (event.logIndex >= confirmations) {
-        handleVaultEvent(prisma, 'FundsLocked', { escrowId }, vaultAddress, logger);
+    vaultContract.on('FundsLocked', async (escrowId, amount, event) => {
+      try {
+        logger?.info?.(`[websocket] Bắt được event Vault FundsLocked: ${escrowId}`);
+        await handleVaultEvent(prisma, 'FundsLocked', { escrowId }, vaultAddress, logger);
+      } catch (err) {
+        logger?.error?.('[websocket] Vault FundsLocked handler error', err?.message ?? err);
       }
     });
 
-    vaultContract.on('DisputeOpened', (escrowId, event) => {
-      if (event.logIndex >= confirmations) {
-        handleVaultEvent(prisma, 'DisputeOpened', { escrowId }, vaultAddress, logger);
+    vaultContract.on('DisputeOpened', async (escrowId, event) => {
+      try {
+        logger?.info?.(`[websocket] Bắt được event Vault DisputeOpened: ${escrowId}`);
+        await handleVaultEvent(prisma, 'DisputeOpened', { escrowId }, vaultAddress, logger);
+      } catch (err) {
+        logger?.error?.('[websocket] Vault DisputeOpened handler error', err?.message ?? err);
       }
     });
 
-    vaultContract.on('FundsReleased', (escrowId, recipient, signerBitmap, action, event) => {
-      if (event.logIndex >= confirmations) {
-        handleVaultEvent(prisma, 'FundsReleased', { escrowId, recipient }, vaultAddress, logger);
+    vaultContract.on('FundsReleased', async (escrowId, recipient, signerBitmap, action, event) => {
+      try {
+        logger?.info?.(`[websocket] Bắt được event Vault FundsReleased: ${escrowId}`);
+        await handleVaultEvent(prisma, 'FundsReleased', { escrowId, recipient }, vaultAddress, logger);
+      } catch (err) {
+        logger?.error?.('[websocket] Vault FundsReleased handler error', err?.message ?? err);
       }
     });
 
@@ -289,19 +305,22 @@ export function startWebSocketEventListener({ prisma, logger = console, config =
 
   // Subscribe to Factory events
   factoryContract.on('EscrowCreatedEvent', async (escrowAddress, escrowId, buyer, seller, mediators, event) => {
-    if (event.logIndex < confirmations) return;
+      try {
+        logger.info(`[websocket] Bắt được event EscrowCreatedEvent cho Escrow: ${escrowId}`);
+        const result = await handleFactoryCreated(prisma, {
+          escrowAddress,
+          escrowId,
+          buyer,
+          seller
+        }, factoryAddress, logger);
 
-    const result = await handleFactoryCreated(prisma, {
-      escrowAddress,
-      escrowId,
-      buyer,
-      seller
-    }, factoryAddress, logger);
-
-    if (result?.vaultAddress) {
-      await subscribeToVault(result.vaultAddress);
-    }
-  });
+        if (result?.vaultAddress) {
+          await subscribeToVault(result.vaultAddress);
+        }
+      } catch (err) {
+        logger.error('[websocket] EscrowCreatedEvent handler error', err?.message ?? err);
+      }
+    });
 
   // Subscribe to existing vaults from database
   async function subscribeToExistingVaults() {

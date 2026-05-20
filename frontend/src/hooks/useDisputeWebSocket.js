@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useSetAtom } from 'jotai';
+import { useSetAtom, useAtomValue } from 'jotai';
 import { toast } from 'react-toastify';
 import {
   currentDisputeAtom,
@@ -27,10 +27,25 @@ import {
  * @param {string|null} disputeId - id của dispute đang quan tâm (nếu null thì không subscribe)
  */
 export function useDisputeWebSocket(disputeId) {
+  const currentDispute = useAtomValue(currentDisputeAtom);
   const setCurrentDispute = useSetAtom(currentDisputeAtom);
   const setEvidenceList = useSetAtom(evidenceListAtom);
   const setMediatorsList = useSetAtom(mediatorsListAtom);
   const setVoteTally = useSetAtom(voteTallyAtom);
+
+  useEffect(() => {
+    const actualEscrowId = currentDispute?.escrowId;
+    if (!actualEscrowId) return; 
+
+    const token = getStoredAccessToken();
+    socket.emit('join_escrow', { escrowId: actualEscrowId, token }, (response) => {
+      if (response?.error) {
+        console.error('[Socket] join_escrow failed:', response.error);
+      } else {
+        console.log(`[Socket] ✅ Đã join thành công room Escrow: ${actualEscrowId}`);
+      }
+    });
+  }, [currentDispute?.escrowId]);
 
   useEffect(() => {
     // Nếu không có socket hoặc disputeId, không đăng ký listeners
@@ -46,11 +61,11 @@ export function useDisputeWebSocket(disputeId) {
           socket.connect();
         }
 
-        socket.emit('join_escrow', { escrowId: disputeId, token }, (response) => {
-          if (!response?.ok) {
-            console.warn('join_escrow failed:', response?.error || 'unknown');
-          }
-        });
+        // socket.emit('join_escrow', { escrowId: disputeId, token }, (response) => {
+        //   if (!response?.ok) {
+        //     console.warn('join_escrow failed:', response?.error || 'unknown');
+        //   }
+        // });
       }
     } catch (err) {
       console.warn('useDisputeWebSocket: join_escrow error:', err);

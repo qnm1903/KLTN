@@ -189,10 +189,11 @@ async function handleFactoryCreated({ prisma, args, contractAddress, logger }) {
   if (!escrow) {
     escrow = await prisma.escrow.findFirst({
       where: {
-        chainEscrowId: null,
+        //chainEscrowId: null,
         contractAddress: null,
         buyer: { walletAddress: buyer },
-        seller: { walletAddress: seller }
+        seller: { walletAddress: seller },
+        status: { in: ['DRAFT', 'MEDIATORS_ASSIGNED'] }
       },
       include: {
         buyer: { select: { walletAddress: true } },

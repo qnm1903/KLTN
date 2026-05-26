@@ -1128,33 +1128,55 @@ export default function EscrowDetail() {
         )}
 
         {/* KHỐI 4.8: CÁC NÚT HÀNH ĐỘNG HAPPY PATH & DISPUTE */}
-        {(activeRole === 'buyer' || activeRole === 'seller') && (
-          // Nút sẽ hiện ngay lập tức khi tiền đã được khóa an toàn
-          (['LOCKED', 'FUNDED'].includes(String(escrow?.status || '').toUpperCase()) || isVaultLockedOnChain) && (
-            <section className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl mt-6 flex flex-col md:flex-row gap-4 justify-center items-center">
+        {(() => {
+          const normalizedStatus = String(escrow?.status || '').toUpperCase();
+          const isLocked = ['LOCKED', 'FUNDED'].includes(normalizedStatus) || isVaultLockedOnChain;
+          const isResolved = normalizedStatus === 'RESOLVED';
+          const isCoreRole = activeRole === 'buyer' || activeRole === 'seller';
+          const isMediator = activeRole?.startsWith('mediator');
+
+          // FIX: Core roles can act if LOCKED or RESOLVED. Mediators MUST be able to act if RESOLVED to form 5-of-7 TSS.
+          const canSeeActions = (isCoreRole && isLocked) || (isMediator && isResolved) || (isCoreRole && isResolved);
+
+          if (!canSeeActions) return null;
+
+          return (
+            <section className={`p-6 rounded-2xl border shadow-xl mt-6 flex flex-col md:flex-row gap-4 justify-center items-center transition-all ${isResolved ? 'bg-indigo-900/40 border-indigo-500/50' : 'bg-slate-800 border-slate-700'}`}>
+              
+              {/* Context Banner for Dispute Phase */}
+              {isResolved && (
+                <div className="w-full text-center md:w-auto md:mr-auto">
+                  <h3 className="text-indigo-400 font-bold text-lg mb-1">⚡ Dispute Finalized</h3>
+                  <p className="text-sm text-slate-300">Click the action matching the final outcome to begin TSS Signing.</p>
+                </div>
+              )}
+              
               <button
                 onClick={handleStartRelease}
                 className="w-full md:w-auto px-6 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-white font-bold shadow-lg shadow-emerald-500/20 transform transition hover:-translate-y-1"
               >
-                Start Release
+                Start Release (TSS)
               </button>
 
               <button
                 onClick={handleStartRefund}
                 className="w-full md:w-auto px-6 py-3 bg-amber-600 hover:bg-amber-500 rounded-xl text-white font-bold shadow-lg shadow-amber-500/20 transform transition hover:-translate-y-1"
               >
-                Start Refund
+                Start Refund (TSS)
               </button>
 
-              <button
-                onClick={handleRaiseDispute}
-                className="w-full md:w-auto px-6 py-3 bg-rose-600 hover:bg-rose-500 rounded-xl text-white font-bold shadow-lg shadow-rose-500/20 transform transition hover:-translate-y-1"
-              >
-                Raise Dispute
-              </button>
+              {/* Only Buyer and Seller can raise a dispute, not mediators */}
+              {!isResolved && isCoreRole && (
+                <button
+                  onClick={handleRaiseDispute}
+                  className="w-full md:w-auto px-6 py-3 bg-rose-600 hover:bg-rose-500 rounded-xl text-white font-bold shadow-lg shadow-rose-500/20 transform transition hover:-translate-y-1"
+                >
+                  Raise Dispute
+                </button>
+              )}
             </section>
-          )
-        )}
+          );
+        })()}
 
         {/* KHỐI 5: LUỒNG KÝ ĐA PHẦN (TSS SIGNING ORCHESTRATION) */}
         {/* Điều kiện: Đã có Vault và (Các Role khác sẽ thấy ngay. Riêng Buyer chỉ thấy khi isConfirmed = true HOẶC db đã báo LOCKED) */}

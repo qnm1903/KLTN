@@ -79,6 +79,18 @@ export default function ResolvedBanner({ dispute: propDispute = null }) {
           )}
         </div>
       </div>
+      {/* FIXED: Add CTA to redirect users back to the TSS Execution Workspace */}
+      <div className="mt-5 pt-4 border-t border-indigo-100/50 flex justify-end">
+        <button
+          onClick={() => window.location.href = `/escrows/${dispute.escrowId}`}
+          className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow-md transition-all flex items-center hover:scale-105"
+        >
+          Proceed to TSS Execution Workspace
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 ml-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
+          </svg>
+        </button>
+      </div>
     </div>
   );
 }

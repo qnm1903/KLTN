@@ -257,10 +257,10 @@ router.post('/', authMiddleware, async (req, res) => {
     const finalMediators = escrow.escrowMediators || [];
     console.log(`=> 2. Số lượng Trọng tài hiện có trong DB: ${finalMediators.length}`);
     
-    if (finalMediators.length !== 5) {
+   if (finalMediators.length !== 5) {
       const errMsg = `Lỗi Dữ Liệu: Escrow này chỉ có ${finalMediators.length}/5 Trọng tài. Vui lòng TẠO ESCROW MỚI vì event VRF của Escrow cũ này đã bị mất trước đó.`;
-      console.log(`=> LỖI 500: ${errMsg}`);
-      return res.status(500).json({ error: errMsg });
+      console.log(`=> LỖI 409 (Conflict): ${errMsg}`);
+      return res.status(409).json({ error: errMsg });
     }
 
     const existingActiveDispute = await prisma.dispute.findFirst({

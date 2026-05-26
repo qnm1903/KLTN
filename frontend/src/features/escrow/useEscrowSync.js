@@ -67,7 +67,7 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
 
     // Only initialize TSS/pubkey collection when mediators have been assigned (escrow disputed)
     const normalizedStatus = String(escrowStatus || '').toUpperCase();
-    const tssAllowed = normalizedStatus === 'DISPUTED' || normalizedStatus === 'VOTING';
+    const tssAllowed = ['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED'].includes(normalizedStatus);
     
     if (!tssAllowed) {
       addLog({ message: 'TSS sync disabled: escrow not disputed yet.', type: 'info' });
@@ -177,14 +177,14 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
 
     // Guard: only allow pubkey submission after escrow mediators are assigned
     const normalizedStatus = String(escrowStatus || '').toUpperCase();
-    if (normalizedStatus !== 'DISPUTED' && normalizedStatus !== 'VOTING') {
-      addLog({ message: 'Cannot submit pubkey: escrow not disputed / mediators not assigned.', type: 'warning' });
+    if (!['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED'].includes(normalizedStatus)) {
+      addLog({ message: 'Cannot submit pubkey: Escrow status is not ready for DKG.', type: 'warning' });
       throw new Error('Escrow not ready for pubkey submission');
     }
 
     addLog({ message: `Submitting pubkey for role ${role}...`, type: 'warning' });
 
-    const { data } = await api.post('/escrows/pubkey/submit', { escrowId, role, pubKey }); // Đã sửa /escrow/ thành /escrows/
+    const { data } = await api.post('/escrow/pubkey/submit', { escrowId, role, pubKey }); // Đã sửa /escrow/ thành /escrows/
     applyCollectionSnapshot(data?.collection);
 
     if (data?.isIdempotent) {

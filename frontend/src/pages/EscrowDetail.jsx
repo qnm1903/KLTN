@@ -247,25 +247,51 @@ export default function EscrowDetail() {
   // --- BẢN VÁ PHASE 1: LUỒNG AUTO-SUBMIT KEY ---
   useEffect(() => {
   // Chỉ cho phép DKG khi Escrow đã có Trọng tài
+  console.log("=> [BẪY DKG] ĐANG KIỂM TRA ĐIỀU KIỆN AUTO-SUBMIT...");
   const escrowStatus = String(escrow?.status || '').toUpperCase();
-  const dkgAllowed = escrowStatus === 'DISPUTED' || escrowStatus === 'VOTING';
-
-  if (
-    dkgAllowed &&
-    activeRole !== 'Unknown' &&
-    localPubKey &&
-    !hasSubmitted &&
-    !isSubmittingKey &&
-    progress < 7 &&
-    !autoSubmitAttempted.current
-  ) {
+  const hasFiveMediators = Array.isArray(escrow?.escrowMediators) && escrow.escrowMediators.length === 5;
+  const dkgAllowed = ['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED'].includes(escrowStatus) || hasFiveMediators;
+  
+  if (!dkgAllowed) {
+    console.warn("=> [BẪY DKG] BỊ CHẶN 1: dkgAllowed là false (Trạng thái Escrow chưa hợp lệ)");
+  } else if (activeRole === 'Unknown') {
+    console.warn("=> [BẪY DKG] BỊ CHẶN 2: activeRole là 'Unknown' (Chưa load được Role của bạn)");
+  } else if (!localPubKey) {
+    console.warn("=> [BẪY DKG] BỊ CHẶN 3: chưa có localPubKey (Chưa tạo/lấy được Key trong Storage)");
+  } else if (hasSubmitted) {
+    console.warn("=> [BẪY DKG] BỊ CHẶN 4: hasSubmitted = true (Đã nộp key thành công trước đó)");
+  } else if (isSubmittingKey) {
+    console.warn("=> [BẪY DKG] BỊ CHẶN 5: isSubmittingKey = true (Đang trong quá trình nộp, chờ API)");
+  } else if (progress >= 7) {
+    console.warn("=> [BẪY DKG] BỊ CHẶN 6: progress đã >= 7 (DKG đã hoàn tất)");
+  } else if (autoSubmitAttempted.current) {
+    console.warn("=> [BẪY DKG] BỊ CHẶN 7: autoSubmitAttempted.current = true (Đã thử gọi hàm nộp rồi)");
+  } else {
+    // Nếu vượt qua tất cả các bẫy trên, tiến hành nộp Key
+    console.log("=> [BẪY DKG] TẤT CẢ ĐIỀU KIỆN ĐẠT! TIẾN HÀNH AUTO-SUBMIT...");
     autoSubmitAttempted.current = true;
     addLog({ message: 'Auto-submitting local Public Key...', type: 'info' });
     handleSubmitMyPubKey();
   }
 }, [escrow?.status, activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey, addLog, handleSubmitMyPubKey]);
 
-  
+  useEffect(() => {
+    try {
+      const mediatorCount = escrow?.escrowMediators?.length || 0;
+      const table = [
+        { Biến: 'DKG Progress', Giá_trị: progress },
+        { Biến: 'Trạng thái Escrow', Giá_trị: escrow?.status ?? 'Chưa có' },
+        { Biến: 'Số lượng Trọng tài', Giá_trị: mediatorCount },
+        { Biến: 'Vai trò hiện tại (Role)', Giá_trị: activeRole },
+        { Biến: 'Đã có LocalPubKey?', Giá_trị: Boolean(localPubKey) },
+        { Biến: 'Đã Submit (hasSubmitted)?', Giá_trị: hasSubmitted },
+        { Biến: 'Đã chặn Auto-Submit (Attempted)?', Giá_trị: !!autoSubmitAttempted.current }
+      ];
+      console.group('🚀 [STATE MONITOR] THEO DÕI DEADLOCK');
+      console.table(table);
+      console.groupEnd();
+    } catch (err) {}
+  }, [progress, escrow?.status, escrow?.escrowMediators?.length, activeRole, localPubKey, hasSubmitted]);
 
   // Lắng nghe sự kiện vault_deployed từ WebSocket
   useEffect(() => {
@@ -300,9 +326,22 @@ export default function EscrowDetail() {
   };
 
   socket.on('vault_deployed', handleVaultDeployed);
+  const handleMediatorsSelected = async (data) => {
+    console.warn('*** BẪY LỖI: ĐÃ NHẬN SOCKET [mediators_selected] ***', data);
+    if (data?.escrowId !== escrowId) return;
+    addLog({ message: '✅ Chainlink VRF Hoàn tất: Đã chọn 5 Trọng tài! Đang cập nhật UI...', type: 'success' });
+    try {
+      const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+      setEscrow(fresh);
+    } catch (err) {
+      console.error('Lỗi khi fetch lại escrow sau VRF:', err);
+    }
+  };
+  socket.on('mediators_selected', handleMediatorsSelected);
 
   return () => {
     socket.off('vault_deployed', handleVaultDeployed);
+    socket.off('mediators_selected', handleMediatorsSelected);
   };
 }, [escrowId, addLog, getVaultStatus]);
 
@@ -339,22 +378,38 @@ export default function EscrowDetail() {
 
     setIsDeploying(true);
     try {
-      addLog({ message: 'Vui lòng xác nhận giao dịch Deploy trên MetaMask...', type: 'info' });
+      addLog({ message: 'Đang xác thực DKG và lấy dữ liệu Deploy...', type: 'info' });
 
-      const zeroAddr = '0x0000000000000000000000000000000000000000';
-      const zeroMediators = [zeroAddr, zeroAddr, zeroAddr, zeroAddr, zeroAddr];
-      const zeroPkAgg = [0n, 0n];
+      // 1) Đảm bảo đủ 5 Trọng tài đã được VRF chọn
+      const { data: escrowFresh } = await api.get(`/escrows/${escrowId}`);
+      const mediatorsRows = escrowFresh.escrowMediators || [];
+      if (!Array.isArray(mediatorsRows) || mediatorsRows.length !== 5) {
+        throw new Error('Cannot deploy: Mediator assignment incomplete. Wait for VRF.');
+      }
+      const mediatorAddrs = mediatorsRows.map((r) => normalizeAddress(r.mediator?.walletAddress || r.mediatorAddress));
+
+      // 2) Lấy khóa tổng hợp pkAgg đã được sinh ra từ bước DKG
+      const { data: agg } = await api.get(`/escrow/${escrowId}/aggregate-key`);
+      const coords = agg?.pkAggCoords || agg?.pkAggReleaseCoords; 
+      if (!coords || coords.length !== 2) {
+        throw new Error('Aggregated public key missing. DKG not completed.');
+      }
+      
+      const x = BigInt(coords[0]);
+      const y = BigInt(coords[1]);
+      if (x === 0n || y === 0n) throw new Error('Aggregated key invalid (zero).');
 
       const factoryAddress = import.meta.env.VITE_ESCROW_CONTRACT_ADDRESS;
+      addLog({ message: 'Vui lòng xác nhận giao dịch Deploy trên MetaMask...', type: 'info' });
 
       let deploymentResult;
       try {
         deploymentResult = await deployEscrowVault(
           factoryAddress,
-          normalizeAddress(escrow.seller?.walletAddress || escrow.sellerAddress),
-          zeroMediators,
-          zeroPkAgg,
-          escrow.amount
+          normalizeAddress(escrowFresh.seller?.walletAddress || escrowFresh.sellerAddress),
+          mediatorAddrs,
+          [x, y],
+          escrowFresh.amount
         );
       } catch (innerErr) {
         console.warn('deployEscrowVault ném lỗi nội bộ nhưng có thể giao dịch đã gửi:', innerErr);
@@ -1020,7 +1075,7 @@ export default function EscrowDetail() {
           </section>
         )}
         {/* KHỐI 4.1: DEPLOY VAULT (CHỈ HIỆN KHI CHƯA CÓ CONTRACT) */}
-        {!hasVaultAddress && (
+        {!hasVaultAddress && progress >= 7 && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-yellow-500/30 shadow-sm mt-6">
             {activeRole === 'buyer' ? (
               <div className="flex flex-col items-center text-center gap-4">

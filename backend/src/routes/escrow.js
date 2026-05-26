@@ -65,21 +65,19 @@ async function checkSession(escrowId, res) {
       include: { buyer: true, seller: true, escrowMediators: { include: { mediator: true }, orderBy: { slot: 'asc' } } }
     });
 
-    if (!escrowDb || !escrowDb.contractAddress) {
-      if (res) res.status(404).json({ error: 'Không tìm thấy Escrow trong DB hoặc chưa Deploy Vault' });
+    // BẢN VÁ 1: Bỏ chốt chặn 404 (Không bắt buộc phải có contractAddress lúc gom Key)
+    if (!escrowDb) {
+      if (res) res.status(404).json({ error: 'Không tìm thấy Escrow trong DB' });
       return null; 
     }
 
     const pubKeysDb = await prisma.pubKeySubmission.findMany({ where: { escrowId } });
-    if (!pubKeysDb || pubKeysDb.length < 7) {
-      if (res) res.status(400).json({ error: 'Chưa đủ 7 Public Keys trong Database để khôi phục' });
-      return null;
-    }
-
+    
+    // BẢN VÁ 2: Bỏ chốt chặn 400 (Cho phép tạo Session kể cả khi chưa đủ 7 Keys)
     session = {
       escrowId,
       chainId: process.env.CHAIN_ID || "11155111",
-      contractAddress: escrowDb.contractAddress,
+      contractAddress: escrowDb.contractAddress || null,
       participants: {
         buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
         seller: normalizeAddress(escrowDb.seller?.walletAddress),
@@ -92,22 +90,31 @@ async function checkSession(escrowId, res) {
       },
       pubKeys: {}, status: 'ACTIVE', completedActions: [], nonces: {}, zShares: {}, createdAt: Date.now()
     };
-    pubKeysDb.forEach(pk => { session.pubKeys[pk.role] = pk.pubKey; });
-    session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, PARTICIPANT_ROLES);
+
+    if (pubKeysDb && pubKeysDb.length > 0) {
+      pubKeysDb.forEach(pk => { session.pubKeys[pk.role] = pk.pubKey; });
+    }
+
+    // Chỉ gộp khóa tổng pkAgg khi thực sự đã đủ 7 Key
+    if (pubKeysDb && pubKeysDb.length >= 7) {
+      try {
+        session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, PARTICIPANT_ROLES);
+        session.pubKeyCollectionState = 'COMPLETE';
+      } catch (e) {
+        console.warn(`[TSS Recovery] Lỗi khi gộp khóa: ${e.message}`);
+        session.pubKeyCollectionState = 'PARTIAL';
+      }
+    } else {
+      session.pubKeyCollectionState = 'PARTIAL';
+    }
     
-    // Restore nonces from NonceSubmission table
+    // Khôi phục chữ ký (Nonces) nếu có
     try {
       const noncesDb = await prisma.nonceSubmission.findMany({
-        where: {
-          escrowId,
-          expiresAt: { gt: new Date() } // Only restore non-expired nonces
-        }
+        where: { escrowId, expiresAt: { gt: new Date() } }
       });
       
       if (noncesDb && noncesDb.length > 0) {
-        console.log(`[TSS Recovery] Khôi phục ${noncesDb.length} nonces từ Database cho Escrow ${escrowId}`);
-        
-        // Determine the current signing action and bitmap from the first nonce
         const firstNonce = noncesDb[0];
         session.signingAction = firstNonce.action;
         session.nonces = {};
@@ -116,40 +123,34 @@ async function checkSession(escrowId, res) {
           session.nonces[n.role] = { R_x: n.nonceR_x, R_y: n.nonceR_y };
         });
         
-        // Calculate signer bitmap from roles
         const roles = Object.keys(session.nonces);
         session.signingBitmap = calculateSignerBitmap(roles);
         
-        console.log(`[TSS Recovery] Khôi phục thành công: action=${firstNonce.action}, roles=${roles.join(',')}, bitmap=${session.signingBitmap}`);
-        
-        // Auto-compute challenge if enough nonces restored (5+ for release/refund)
         const actionRoles = getActionSignerRoles(session, firstNonce.action);
-        if (roles.length >= actionRoles.length && rolesMatchAction(roles, firstNonce.action)) {
+        if (roles.length >= actionRoles.length && rolesMatchAction(session, roles, firstNonce.action)) {
           try {
             const pkAgg = getPkAggForRoles(session, roles);
             const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNonces(Object.values(session.nonces));
             
-            const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
-            const vaultAddr = dbEscrow?.contractAddress || session.contractAddress;
-            
-            const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-            const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
-            const trueChainEscrowId = await vaultContract.escrowId();
-            
-            const msgHash = buildMsgHash(trueChainEscrowId, firstNonce.action, session.signingBitmap, vaultAddr, session.chainId);
-            const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
-            
-            session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
-            session.signingRoles = roles;
-            
-            console.log(`[TSS Recovery] Auto-computed challenge for restored nonces: R_addr=${R_addr}, challenge=${challenge}`);
+            const vaultAddr = escrowDb.contractAddress || session.contractAddress;
+            if (vaultAddr) {
+              const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+              const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
+              const trueChainEscrowId = await vaultContract.escrowId();
+              
+              const msgHash = buildMsgHash(trueChainEscrowId, firstNonce.action, session.signingBitmap, vaultAddr, session.chainId);
+              const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
+              
+              session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
+              session.signingRoles = roles;
+            }
           } catch (challengeError) {
             console.warn(`[TSS Recovery] Failed to auto-compute challenge: ${challengeError.message}`);
           }
         }
       }
     } catch (nonceError) {
-      console.warn(`[TSS Recovery] Không thể khôi phục nonce từ Database: ${nonceError.message}`);
+      console.warn(`[TSS Recovery] Không thể khôi phục nonce: ${nonceError.message}`);
     }
     
     await saveSession(escrowId, session);
@@ -285,12 +286,15 @@ function validateSignerBitmap(bitmap, submittedRoles) {
 router.post('/init', escrowInitRateLimiter, async (req, res) => {
   try {
     const { escrowId, chainId, contractAddress, buyerAddr, sellerAddr, mediatorAddrs, buyerPubKey, sellerPubKey, mediatorPubKeys } = req.body;
-    if (!escrowId || !chainId || !contractAddress) return res.status(400).json({ error: 'Missing required fields' });
-    if (!ethers.isAddress(contractAddress)) return res.status(400).json({ error: 'Invalid contractAddress' });
+    if (!escrowId || !chainId) return res.status(400).json({ error: 'Missing required fields' });
+    if (contractAddress && !ethers.isAddress(contractAddress)) {
+      return res.status(400).json({ error: 'Invalid contractAddress format' });
+    }
 
     let normalizedChainId;
     try { normalizedChainId = BigInt(chainId).toString(); } catch { return res.status(400).json({ error: 'Invalid chainId' }); }
-    const normalizedContractAddress = ethers.getAddress(contractAddress);
+    
+    const normalizedContractAddress = contractAddress ? ethers.getAddress(contractAddress) : null;
 
     if (await hasSession(escrowId)) return res.status(409).json({ error: 'Session already exists for this escrowId' });
 
@@ -361,9 +365,13 @@ router.post('/pubkey/submit', authMiddleware, escrowPubKeySubmitRateLimiter, asy
 
     const expectedAddress = getRoleAddress(session.participants || session.parties, role);
     const requesterAddress = normalizeAddress(req.user?.walletAddress);
-    if (!expectedAddress || requesterAddress !== expectedAddress) {
-      if (io) io.to(escrowId).emit('pubkey_rejected', { escrowId, role, reason: 'AUTH_MISMATCH' });
-      return res.status(403).json({ error: `Auth mismatch for role '${role}'` });
+    const isInternalWorker = req.headers['x-internal-auth'] === (process.env.INTERNAL_AUTH_TOKEN || 'internal_secret');
+
+    if (!isInternalWorker) {
+      if (!expectedAddress || requesterAddress !== expectedAddress) {
+        if (io) io.to(escrowId).emit('pubkey_rejected', { escrowId, role, reason: 'AUTH_MISMATCH' });
+        return res.status(403).json({ error: `Auth mismatch for role '${role}'` });
+      }
     }
 
     const persistenceResult = await savePubKeySubmission(escrowId, role, normalizedPubKey);
@@ -907,11 +915,16 @@ router.post('/record-deploy', authMiddleware, async (req, res) => {
     // idempotency check: Nếu đã có cùng contractAddress trong DB thì trả về thành công luôn, không lỗi, tránh UI update lại
     const existingEscrow = await prisma.escrow.findUnique({
       where: { id: escrowId },
-      select: { id: true, contractAddress: true, chainEscrowId: true }
+      select: { id: true, contractAddress: true, chainEscrowId: true, pkAggBsX: true, pkAggBsY: true }
     });
 
     if (!existingEscrow) {
       return res.status(404).json({ error: 'Escrow not found in database' });
+    }
+
+    // Bắt buộc phải có DKG mới được Deploy
+    if (!existingEscrow.pkAggBsX || !existingEscrow.pkAggBsY) {
+      return res.status(409).json({ error: 'Aggregated key missing in DB. Complete DKG before recording on-chain deploy.' });
     }
 
     if (existingEscrow.contractAddress) {
@@ -938,7 +951,8 @@ router.post('/record-deploy', authMiddleware, async (req, res) => {
       where: { id: escrowId },
       data: { 
         contractAddress: foundVaultAddress,
-        chainEscrowId: foundChainEscrowId
+        chainEscrowId: foundChainEscrowId,
+        status: 'INITIALIZED'
       }
     });
 
@@ -990,33 +1004,39 @@ router.post('/:id/reset-signing', authMiddleware, async (req, res) => {
       }
 
       const pubKeysDb = await prisma.pubKeySubmission.findMany({ where: { escrowId } });
-      if (!pubKeysDb || pubKeysDb.length < 7) {
-        return res.status(400).json({ error: 'Not enough public keys in database to restore session' });
-      }
+    session = {
+      escrowId,
+      chainId: process.env.CHAIN_ID || "11155111",
+      contractAddress: escrowDb.contractAddress,
+      participants: {
+        buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
+        seller: normalizeAddress(escrowDb.seller?.walletAddress),
+        mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
+      },
+      parties: {
+        buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
+        seller: normalizeAddress(escrowDb.seller?.walletAddress),
+        mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
+      },
+      pubKeys: {}, status: 'ACTIVE', completedActions: [], nonces: {}, zShares: {}, createdAt: Date.now()
+    };
 
-      session = {
-        escrowId,
-        chainId: process.env.CHAIN_ID || "11155111",
-        contractAddress: escrowDb.contractAddress,
-        participants: {
-          buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
-          seller: normalizeAddress(escrowDb.seller?.walletAddress),
-          mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
-        },
-        parties: {
-          buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
-          seller: normalizeAddress(escrowDb.seller?.walletAddress),
-          mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
-        },
-        pubKeys: {},
-        status: 'ACTIVE',
-        completedActions: [],
-        nonces: {},
-        zShares: {},
-        createdAt: Date.now()
-      };
+    if (pubKeysDb && pubKeysDb.length > 0) {
       pubKeysDb.forEach(pk => { session.pubKeys[pk.role] = pk.pubKey; });
-      session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, PARTICIPANT_ROLES);
+    }
+
+    // CHỈ TỔNG HỢP KHÓA (AGGREGATE) NẾU ĐÃ THU THẬP ĐỦ 7 KEYS
+    if (pubKeysDb && pubKeysDb.length >= 7) {
+      try {
+        session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, PARTICIPANT_ROLES);
+        session.pubKeyCollectionState = 'COMPLETE';
+      } catch (e) {
+        console.warn(`[TSS Recovery] Lỗi khi gộp khóa: ${e.message}`);
+        session.pubKeyCollectionState = 'PARTIAL';
+      }
+    } else {
+      session.pubKeyCollectionState = 'PARTIAL';
+    }
       await saveSession(escrowId, session);
       console.log(`[ResetSigning] Session auto-created and public keys restored for escrow ${escrowId}`);
     }

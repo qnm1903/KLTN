@@ -250,7 +250,7 @@ export default function EscrowDetail() {
   console.log("=> [BẪY DKG] ĐANG KIỂM TRA ĐIỀU KIỆN AUTO-SUBMIT...");
   const escrowStatus = String(escrow?.status || '').toUpperCase();
   const hasFiveMediators = Array.isArray(escrow?.escrowMediators) && escrow.escrowMediators.length === 5;
-  const dkgAllowed = ['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED'].includes(escrowStatus) || hasFiveMediators;
+  const dkgAllowed = ['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED'].includes(escrowStatus);
   
   if (!dkgAllowed) {
     console.warn("=> [BẪY DKG] BỊ CHẶN 1: dkgAllowed là false (Trạng thái Escrow chưa hợp lệ)");

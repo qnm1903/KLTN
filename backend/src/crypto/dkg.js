@@ -30,6 +30,7 @@ export const ROLE_TO_ID = {
 export const ACTION_SIGNER_SETS = {
   release: ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'],
   refund: ['buyer', 'mediator1', 'mediator2', 'mediator3', 'mediator4'],
+  split: ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'],
   timeout: ['seller', 'mediator2', 'mediator3', 'mediator4', 'mediator5']
 };
 

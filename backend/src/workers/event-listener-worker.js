@@ -9,6 +9,7 @@ const VAULT_ABI = [
   'event EscrowCreated(bytes32 indexed escrowId, address indexed buyer, address indexed seller, uint256 amount)',
   'event FundsLocked(bytes32 indexed escrowId, uint256 amount)',
   'event FundsReleased(bytes32 indexed escrowId, address indexed recipient, uint8 signerBitmap, string action)',
+  'event FundsSplit(bytes32 indexed escrowId, address indexed buyer, address indexed seller, uint256 buyerAmount, uint256 sellerAmount, uint8 signerBitmap)',
   'event DisputeOpened(bytes32 indexed escrowId)'
 ];
 
@@ -253,6 +254,11 @@ async function handleVaultEvent({ prisma, parsedLog, contractAddress }) {
     const isRefund = recipient === normalizeAddress(escrow.buyer.walletAddress);
     const nextStatus = isRefund ? 'REFUNDED' : 'RELEASED';
     await updateEscrowStatus(prisma, escrow, nextStatus);
+    return;
+  }
+
+  if (eventName === 'FundsSplit') {
+    await updateEscrowStatus(prisma, escrow, 'RELEASED');
   }
 }
 

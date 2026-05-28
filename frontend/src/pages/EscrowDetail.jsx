@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useAtomValue, useSetAtom } from 'jotai';
 import { useConnection } from 'wagmi';
 import { ethers } from 'ethers';
@@ -76,7 +76,6 @@ function validateSignerBitmap(bitmap) {
 export default function EscrowDetail() {
   // 1. Lấy Context & Định danh
   const { id: escrowId } = useParams();
-  const navigate = useNavigate();
   const { address } = useConnection();
 
   const [escrow, setEscrow] = useState(null);
@@ -437,38 +436,33 @@ export default function EscrowDetail() {
       } else {
         addLog({ message: `Đã gửi TX: ${txHash}. Đang chờ Blockchain xác nhận (15-30s)...`, type: 'info' });
         
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        const receipt = await provider.waitForTransaction(txHash);
+
+        if (receipt && receipt.status === 0) {
+          throw new Error('Transaction reverted on the blockchain.');
+        }
+
+        addLog({ message: `✅ Block mined (Block #${receipt.blockNumber}). Syncing with database...`, type: 'success' });
+
+        await api.post('/escrow/record-deploy', { escrowId, txHash });
+        
+        addLog({ message: 'Deploy recorded successfully. Updating UI...', type: 'success' });
+
+        const token = getStoredAccessToken();
+        if (token) {
+          socket.emit('join_escrow', { escrowId, token }, (response) => {
+            if (response?.ok) {
+              addLog({ message: 'Socket room joined after deploy.', type: 'info' });
+            }
+          });
+        }
+
         try {
-          const provider = new ethers.BrowserProvider(window.ethereum);
-          const receipt = await provider.waitForTransaction(txHash);
-          
-          if (receipt && receipt.status === 0) {
-            throw new Error('Transaction reverted on the blockchain.');
-          }
-
-          addLog({ message: `✅ Block mined (Block #${receipt.blockNumber}). Syncing with database...`, type: 'success' });
-
-          await api.post('/escrow/record-deploy', { escrowId, txHash });
-          
-          addLog({ message: 'Deploy recorded successfully. Updating UI...', type: 'success' });
-
-          const token = getStoredAccessToken();
-          if (token) {
-            socket.emit('join_escrow', { escrowId, token }, (response) => {
-              if (response?.ok) {
-                addLog({ message: 'Socket room joined after deploy.', type: 'info' });
-              }
-            });
-          }
-
-          try {
-            const { data: fresh } = await api.get(`/escrows/${escrowId}`);
-            setEscrow(fresh);
-          } catch (fetchErr) {
-            console.warn('Could not refresh escrow immediately after deploy:', fetchErr);
-          }
-
-        } catch (waitErr) {
-          throw waitErr;
+          const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+          setEscrow(fresh);
+        } catch {
+          console.warn('Could not refresh escrow immediately after deploy.');
         }
       }
     } catch (err) {
@@ -531,7 +525,7 @@ export default function EscrowDetail() {
           console.warn('Cannot read on-chain status after deposit:', inner);
         }
         addLog({ message: 'Nạp tiền ghi nhận & UI đã được làm mới!', type: 'success' });
-      } catch (fetchErr) {
+      } catch {
         addLog({ message: 'Nạp tiền thành công nhưng UI refresh lỗi. Vui lòng chờ Socket.', type: 'warning' });
       }
     } catch (error) {

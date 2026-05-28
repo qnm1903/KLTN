@@ -53,7 +53,34 @@ export async function finalizeDisputeVotes(disputeId, options = {}) {
     }
 
     const tally = buildTally(dispute.votes || []);
-    const outcome = resolveOutcome(tally, threshold);
+    // First try the normal threshold-based outcome
+    let outcome = resolveOutcome(tally, threshold);
+
+    // No outcome by threshold -> apply deadlock handling rules.
+    // 1) If all 5 mediators voted and counts are 3 and 2, treat as SPLIT.
+    // 2) If the dispute timed out (caller sets options.timedOut=true) and
+    //    the top two choices are tied (e.g., 2-2), treat as SPLIT as a fallback.
+    if (!outcome) {
+      const totalVotes = Object.values(tally).reduce((s, v) => s + Number(v || 0), 0);
+
+      // Get counts sorted descending: [[choice, count], ...]
+      const sorted = Object.entries(tally).sort((a, b) => b[1] - a[1]);
+      const topCount = Number(sorted[0]?.[1] || 0);
+      const secondCount = Number(sorted[1]?.[1] || 0);
+
+      // Case A: classic 3-2 (all 5 voted)
+      if (totalVotes === 5 && topCount === 3 && secondCount === 2) {
+        outcome = 'SPLIT';
+      }
+
+      // Case B: dispute expired (timed out) with a tie between top two choices
+      // e.g., 2-2 when only 4 votes were cast — treat tie as SPLIT fallback.
+      if (!outcome && options?.timedOut) {
+        if (topCount > 0 && topCount === secondCount) {
+          outcome = 'SPLIT';
+        }
+      }
+    }
 
     await queueDisputeEvent(tx, {
       disputeId: dispute.id,
@@ -86,6 +113,7 @@ export async function finalizeDisputeVotes(disputeId, options = {}) {
     let tssAction = 'timeout'; // Mặc định hoặc Split
     if (outcome === 'RELEASE_TO_BUYER') tssAction = 'release';
     if (outcome === 'RETURN_TO_SELLER') tssAction = 'refund';
+    if (outcome === 'SPLIT') tssAction = 'split';
 
     await queueDisputeEvent(tx, {
       disputeId: updatedDispute.id,

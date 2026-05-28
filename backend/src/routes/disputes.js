@@ -14,7 +14,6 @@ import {
 } from '../lib/dispute-outbox.js';
 import { finalizeDisputeVotes } from '../services/dispute-finalize.js';
 import { getSession } from '../store/session.js';
-import { getActionSigners } from '../crypto/dkg.js';
 import { emitToEscrow } from '../lib/socket-emitter.js';
 //import { executeDisputeOutcome } from '../services/dispute-contract-executor.js';
 
@@ -577,10 +576,9 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
       if (finalizeResult.finalized === true) {
         // RETURN_TO_SELLER = seller thắng → release() trả tiền seller → signer set không cần buyer
         // RELEASE_TO_BUYER = buyer thắng → refund() trả tiền buyer → signer set không cần seller
-        const tssAction = finalizeResult.tssAction || (finalizeResult.outcome === 'RELEASE_TO_BUYER' ? 'release' : (finalizeResult.outcome === 'RETURN_TO_SELLER' ? 'refund' : 'timeout'));
+        const tssAction = finalizeResult.tssAction || (finalizeResult.outcome === 'RELEASE_TO_BUYER' ? 'release' : (finalizeResult.outcome === 'RETURN_TO_SELLER' ? 'refund' : (finalizeResult.outcome === 'SPLIT' ? 'split' : 'timeout')));
 
-        // Try to get dynamic signerRoles from an active session (if available). This avoids hardcoded signer sets
-        // when a signing session has already been started and its `signingRoles` reflect the actual participants.
+        // Use signer roles from the active signing session as the single source of truth.
         let signerRoles = null;
         try {
           const session = await getSession(finalizeResult.escrowId, { allowExpired: true });
@@ -588,10 +586,8 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
             signerRoles = session.signingRoles;
           }
         } catch (e) {
-          // ignore and fallback to default mapping
+          // ignore and fail below with a clear error
         }
-
-        if (!signerRoles) signerRoles = getActionSigners(tssAction);
 
         emitToEscrow(finalizeResult.escrowId, 'dispute_tss_needed', {
           escrowId:    finalizeResult.escrowId,

@@ -192,7 +192,7 @@ export const useContractCall = () => {
   };
 
   const executeTssAction = async (actionType, signatureData, fallbackAddress) => {
-    if (!['release', 'refund'].includes(actionType)) {
+    if (!['release', 'refund', 'split'].includes(actionType)) {
       const invalidActionMessage = `Code error: invalid actionType ${actionType}`;
       addLog({ message: invalidActionMessage, type: 'error' });
       throw new Error(invalidActionMessage);

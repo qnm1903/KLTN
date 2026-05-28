@@ -31,8 +31,9 @@ contract MediatorPool is
     
     bool public isTestnet;
     
-    // Sybil detection events
+    // Risk detection events
     event SybilDetected(address indexed mediator, string reason);
+    event RiskDetected(address indexed mediator, string reason);
     event ReputationUpdated(address indexed mediator, uint256 oldScore, uint256 newScore);
 
     /* ========== CẤU HÌNH CHAINLINK VRF ========== */
@@ -228,7 +229,7 @@ contract MediatorPool is
             
             // Optional: Detect low reputation for monitoring
             if (mediators[selectedMediators[i]].reputationScore < 30) {
-                emit SybilDetected(selectedMediators[i], "Low reputation");
+                emit RiskDetected(selectedMediators[i], "Low reputation");
             }
         }
 

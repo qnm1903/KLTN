@@ -4,7 +4,6 @@ import {
   aggregateWhenReady,
   aggregatePubKeysForRoles,
   PARTICIPANT_ROLES,
-  getActionSigners,
   getPubKeyCollectionSummary,
   getPkAggForRoles,
   ROLE_TO_ID,
@@ -50,7 +49,7 @@ function getActionSignerRoles(session, action) {
   if (session?.signingAction === action && Array.isArray(session?.signingRoles) && session.signingRoles.length > 0) {
     return [...new Set(session.signingRoles)];
   }
-  return getActionSigners(action);
+  return [];
 }
 
 // ─── Helpers (ĐÃ TÍCH HỢP AUTO-RECOVERY CỦA TECH LEAD) ──────────────────────

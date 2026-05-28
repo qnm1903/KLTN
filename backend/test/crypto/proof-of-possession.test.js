@@ -5,16 +5,15 @@
  * Run with: npm test -- proof-of-possession.test.js
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
-import * as elliptic from 'elliptic';
+import EC_Module from 'elliptic';
 import { ethers } from 'ethers';
 import {
   createOwnershipChallenge,
   verifyOwnershipProof,
   aggregatePublicKeys
-} from '../backend/src/crypto/schnorr.js';
+} from '../../src/crypto/schnorr.js';
 
-const ec = new elliptic.ec('secp256k1');
+const ec = new EC_Module.ec('secp256k1');
 const ORDER = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
 
 describe('Proof of Possession', () => {

@@ -21,6 +21,7 @@ contract EscrowVault {
     error InvalidSignature();
     error InvalidSignerBitmap();
     error InvalidAggregateKey();
+    error InvalidSplitAmount();
     error NotTimedOut();
     error TransferFailed();
 
@@ -40,6 +41,7 @@ contract EscrowVault {
     event EscrowCreated(bytes32 escrowId, address buyer, address seller, uint256 amount);
     event FundsLocked(bytes32 escrowId, uint256 amount);
     event FundsReleased(bytes32 escrowId, address recipient, uint8 signerBitmap, string action);
+    event FundsSplit(bytes32 escrowId, address buyer, address seller, uint256 buyerAmount, uint256 sellerAmount, uint8 signerBitmap);
     event DisputeOpened(bytes32 escrowId);
 
     constructor(
@@ -89,7 +91,7 @@ contract EscrowVault {
         _verifyAction("release", rAddr, z, e, msgHash, signerBitmap);
 
         status = Status.RELEASED;
-        _payout(seller);
+        _payout(seller, amount);
 
         emit FundsReleased(escrowId, seller, signerBitmap, "release");
     }
@@ -100,9 +102,24 @@ contract EscrowVault {
         _verifyAction("refund", rAddr, z, e, msgHash, signerBitmap);
 
         status = Status.REFUNDED;
-        _payout(buyer);
+        _payout(buyer, amount);
 
         emit FundsReleased(escrowId, buyer, signerBitmap, "refund");
+    }
+
+    function split(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 signerBitmap) external {
+        if (status != Status.LOCKED && status != Status.DISPUTED) revert InvalidStatus();
+
+        _verifyAction("split", rAddr, z, e, msgHash, signerBitmap);
+
+        uint256 buyerAmount = amount / 2;
+        uint256 sellerAmount = amount - buyerAmount;
+
+        status = Status.RELEASED;
+        _payout(buyer, buyerAmount);
+        _payout(seller, sellerAmount);
+
+        emit FundsSplit(escrowId, buyer, seller, buyerAmount, sellerAmount, signerBitmap);
     }
 
     function dispute() external {
@@ -122,7 +139,7 @@ contract EscrowVault {
         _verifyAction("timeout", rAddr, z, e, msgHash, signerBitmap);
 
         status = Status.RELEASED;
-        _payout(seller);
+        _payout(seller, amount);
 
         emit FundsReleased(escrowId, seller, signerBitmap, "timeout");
     }
@@ -183,8 +200,8 @@ contract EscrowVault {
     if (lhs != rhs) revert InvalidAggregateKey();
 }
 
-    function _payout(address recipient) private {
-        (bool success, ) = payable(recipient).call{value: amount}("");
+    function _payout(address recipient, uint256 payoutAmount) private {
+        (bool success, ) = payable(recipient).call{value: payoutAmount}("");
         if (!success) revert TransferFailed();
     }
 
@@ -197,6 +214,11 @@ contract EscrowVault {
         uint8 signerBitmap
     ) private view {
         if (!validateSignerBitmap(signerBitmap)) revert InvalidSignerBitmap();
+
+        bytes32 expectedHash = keccak256(
+            abi.encodePacked(block.chainid, address(this), escrowId, action, signerBitmap)
+        );
+        if (msgHash != expectedHash) revert InvalidMsgHash();
         if (!_verifySchnorr(pkAggX, pkAggY, msgHash, rAddr, z, e)) revert InvalidSignature();
     }
 

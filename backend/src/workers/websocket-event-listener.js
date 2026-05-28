@@ -167,6 +167,14 @@ async function handleVaultEvent(prisma, eventName, args, contractAddress, logger
     if (updated) {
       logger?.info?.(`[websocket] Updated escrow ${escrowId} to ${nextStatus}`);
     }
+    return;
+  }
+
+  if (eventName === 'FundsSplit') {
+    const updated = await updateEscrowStatus(prisma, escrow, 'RELEASED');
+    if (updated) {
+      logger?.info?.(`[websocket] Updated escrow ${escrowId} to RELEASED via split payout`);
+    }
   }
 }
 
@@ -467,6 +475,15 @@ export function startWebSocketEventListener({ prisma, logger = console, config =
         await handleVaultEvent(prisma, 'FundsReleased', { escrowId, recipient }, vaultAddress, logger);
       } catch (err) {
         logger?.error?.('[websocket] Vault FundsReleased handler error', err?.message ?? err);
+      }
+    });
+
+    vaultContract.on('FundsSplit', async (escrowId, buyer, seller, buyerAmount, sellerAmount, signerBitmap, event) => {
+      try {
+        logger?.info?.(`[websocket] Bắt được event Vault FundsSplit: ${escrowId}`);
+        await handleVaultEvent(prisma, 'FundsSplit', { escrowId, buyer, seller, buyerAmount, sellerAmount }, vaultAddress, logger);
+      } catch (err) {
+        logger?.error?.('[websocket] Vault FundsSplit handler error', err?.message ?? err);
       }
     });
 

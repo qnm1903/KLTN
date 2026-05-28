@@ -45,14 +45,24 @@ const MEDIATOR_COMMITTEE_SIZE = 5;
 
 let pubKeyPersistenceDisabled = false;
 
-function getActionSignerRoles(session, action) {
-  if (session?.signingAction === action && Array.isArray(session?.signingRoles) && session.signingRoles.length > 0) {
-    return [...new Set(session.signingRoles)];
-  }
-  return [];
-}
-
 // ─── Helpers (ĐÃ TÍCH HỢP AUTO-RECOVERY CỦA TECH LEAD) ──────────────────────
+
+async function getAllowedSignerRoles(escrowId) {
+  let allowedRoles = [...VALID_ROLES]; 
+  const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
+  
+  if (dbEscrow?.status === 'RESOLVED') {
+    const dispute = await prisma.dispute.findFirst({ 
+      where: { escrowId, status: 'RESOLVED' },
+      orderBy: { createdAt: 'desc' }
+    });
+    if (dispute) {
+      if (dispute.outcome === 'RELEASE_TO_BUYER') allowedRoles = allowedRoles.filter(r => r !== 'seller');
+      if (dispute.outcome === 'RETURN_TO_SELLER') allowedRoles = allowedRoles.filter(r => r !== 'buyer');
+    }
+  }
+  return allowedRoles;
+}
 
 async function checkSession(escrowId, res) {
   let session = await getSession(escrowId, { allowExpired: true });
@@ -125,8 +135,9 @@ async function checkSession(escrowId, res) {
         const roles = Object.keys(session.nonces);
         session.signingBitmap = calculateSignerBitmap(roles);
         
-        const actionRoles = getActionSignerRoles(session, firstNonce.action);
-        if (roles.length >= actionRoles.length && rolesMatchAction(session, roles, firstNonce.action)) {
+        if (roles.length >= 5) {
+          const validation = validateSignerBitmap(session.signingBitmap, roles);
+          if (validation.valid) {
           try {
             const pkAgg = getPkAggForRoles(session, roles);
             const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNonces(Object.values(session.nonces));
@@ -148,6 +159,7 @@ async function checkSession(escrowId, res) {
           }
         }
       }
+    }
     } catch (nonceError) {
       console.warn(`[TSS Recovery] Không thể khôi phục nonce: ${nonceError.message}`);
     }
@@ -240,12 +252,6 @@ async function clearPubKeySubmissions(escrowId) {
   if (pubKeyPersistenceDisabled || !prisma?.pubKeySubmission?.deleteMany) return;
   try { await prisma.pubKeySubmission.deleteMany({ where: { escrowId } }); } 
   catch (error) { if (isMissingTableError(error)) pubKeyPersistenceDisabled = true; else throw error; }
-}
-
-function rolesMatchAction(session, roles, action) {
-  const expected = [...getActionSignerRoles(session, action)].sort().join('+');
-  const actual = [...new Set(roles)].sort().join('+');
-  return expected === actual;
 }
 
 // Helper: Calculate signerBitmap from roles list
@@ -437,8 +443,8 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     const collection = getPubKeyCollectionSummary(session);
     if (!collection.complete) return res.status(409).json({ error: 'Pubkey collection is incomplete.', collection: toCollectionPayload(collection) });
 
-    const actionRoles = getActionSignerRoles(session, action);
-    if (!actionRoles.includes(role)) return res.status(403).json({ error: `Role '${role}' is not allowed for action '${action}'` });
+    const allowedRoles = await getAllowedSignerRoles(escrowId);
+    if (!allowedRoles.includes(role)) return res.status(403).json({ error: `Role '${role}' is not allowed to sign according to the dispute outcome.` });
 
     const bitmap = Number(signerBitmap);
     if (!session.signingAction) {
@@ -490,9 +496,10 @@ router.post('/nonce', authMiddleware, async (req, res) => {
         }
         
         // If enough nonces collected but round2Context missing, auto-compute challenge
-        if (nonceCount >= actionRoles.length) {
+        if (nonceCount >= 5) {
           const roles = Object.keys(session.nonces);
-          if (rolesMatchAction(session, roles, action)) {
+          const validation = validateSignerBitmap(session.signingBitmap, roles);
+          if (validation.valid) {
             try {
               const pkAgg = getPkAggForRoles(session, roles);
               const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNonces(Object.values(session.nonces));
@@ -516,7 +523,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
               return res.json({ 
                 state: 'round2_ready',
                 received: nonceCount,
-                needed: actionRoles.length,
+                needed: 5,
                 isIdempotent: true,
                 round2Context: session.round2Context,
                 signerBitmap: session.signingBitmap,
@@ -530,7 +537,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
         
         return res.json({ 
           received: nonceCount, 
-          needed: actionRoles.length, 
+          needed: 5, 
           isIdempotent: true,
           signerBitmap: session.signingBitmap,
           message: 'Nonce already submitted with same values'
@@ -550,7 +557,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
         return res.json({ 
           state: 'round2_ready',
           received: nonceCount,
-          needed: actionRoles.length,
+          needed: 5,
           submittedRoles,
           round2Context: session.round2Context,
           existingNonce: existingNonceForRole ? { R_x: existingNonceForRole.R_x, R_y: existingNonceForRole.R_y } : null,
@@ -563,7 +570,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
       return res.json({ 
         state: 'round1_in_progress',
         received: nonceCount,
-        needed: actionRoles.length,
+        needed: 5,
         submittedRoles,
         existingNonce: existingNonceForRole ? { R_x: existingNonceForRole.R_x, R_y: existingNonceForRole.R_y } : null,
         signerBitmap: session.signingBitmap,
@@ -622,13 +629,14 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     const io = req.app.get('io');
     const nonceCount = Object.keys(session.nonces).length;
 
-    if (nonceCount < actionRoles.length) {
-      if (io) io.to(escrowId).emit('nonce_received', { escrowId, count: nonceCount, needed: actionRoles.length });
-      return res.json({ received: nonceCount, needed: actionRoles.length, signerBitmap: session.signingBitmap });
+    if (nonceCount < 5) {
+      if (io) io.to(escrowId).emit('nonce_received', { escrowId, count: nonceCount, needed: 5 });
+      return res.json({ received: nonceCount, needed: 5, signerBitmap: session.signingBitmap });
     }
 
     const roles = Object.keys(session.nonces);
-    if (!rolesMatchAction(session, roles, action)) return res.status(403).json({ error: 'Signer roles do not match' });
+    const validation = validateSignerBitmap(session.signingBitmap, roles);
+    if (!validation.valid) return res.status(403).json({ error: validation.error });
     session.signingRoles = roles;
 
     const pkAgg = getPkAggForRoles(session, roles);
@@ -754,22 +762,17 @@ router.get('/:id/aggregate-key', async (req, res) => {
   const session = await checkSession(req.params.id, res);
   if (!session) return;
 
-  const releaseRoles = getActionSignerRoles(session, 'release');
-  const refundRoles = getActionSignerRoles(session, 'refund');
-  const timeoutRoles = getActionSignerRoles(session, 'timeout');
-
-  const pkAggRelease = aggregatePubKeysForRoles(session.pubKeys, releaseRoles);
-  const pkAggRefund  = aggregatePubKeysForRoles(session.pubKeys, refundRoles);
-  const pkAggTimeout = aggregatePubKeysForRoles(session.pubKeys, timeoutRoles);
+  // Lấy khóa tổng quát của cả 7 người 
+  const allRoles = [...VALID_ROLES];
+  const pkAgg = aggregatePubKeysForRoles(session.pubKeys, allRoles);
 
   return res.json({
     ok: true,
-    pkAggRelease,  pkAggReleaseCoords:  [pkAggRelease.x,  pkAggRelease.y],
-    pkAggRefund,   pkAggRefundCoords:   [pkAggRefund.x,   pkAggRefund.y],
-    pkAggTimeout,  pkAggTimeoutCoords:  [pkAggTimeout.x,  pkAggTimeout.y],
-    // Backward compat
-    pkAgg: pkAggRelease,
-    pkAggCoords: [pkAggRelease.x, pkAggRelease.y]
+    pkAggRelease: pkAgg,  pkAggReleaseCoords:  [pkAgg.x, pkAgg.y],
+    pkAggRefund: pkAgg,   pkAggRefundCoords:   [pkAgg.x, pkAgg.y],
+    pkAggTimeout: pkAgg,  pkAggTimeoutCoords:  [pkAgg.x, pkAgg.y],
+    pkAgg: pkAgg,
+    pkAggCoords: [pkAgg.x, pkAgg.y]
   });
 });
 

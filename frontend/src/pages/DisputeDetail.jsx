@@ -8,6 +8,7 @@ import useDisputeDetail from '../hooks/useDisputeDetail.js';
 import { useDisputeWebSocket } from '../hooks/useDisputeWebSocket.js';
 import { DISPUTE_STATUS } from '../constants/dispute.constants.js';
 import { useParams } from 'react-router-dom';
+import ResolvedBanner from '../components/dispute/ResolvedBanner.jsx';
 
 const DisputeDetail = () => {
   const { address } = useAccount();
@@ -45,6 +46,8 @@ const DisputeDetail = () => {
         </section>
 
         <main>
+          {/* RESOLVED BANNER & NÚT ĐIỀU HƯỚNG */}
+          <ResolvedBanner />
           {displayStatus === DISPUTE_STATUS.PENDING_VRF ? (
             <div className="mb-6">
               <div className="p-6 rounded-lg bg-white/3 border border-white/5 backdrop-blur-md">

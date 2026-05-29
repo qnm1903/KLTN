@@ -51,16 +51,16 @@ async function getAllowedSignerRoles(escrowId) {
   let allowedRoles = [...VALID_ROLES]; 
   const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
   
-  if (dbEscrow?.status === 'RESOLVED') {
-    const dispute = await prisma.dispute.findFirst({ 
+ 
+  const dispute = await prisma.dispute.findFirst({ 
       where: { escrowId, status: 'RESOLVED' },
       orderBy: { createdAt: 'desc' }
-    });
-    if (dispute) {
+  });
+  if (dispute) {
       if (dispute.outcome === 'RELEASE_TO_BUYER') allowedRoles = allowedRoles.filter(r => r !== 'seller');
       if (dispute.outcome === 'RETURN_TO_SELLER') allowedRoles = allowedRoles.filter(r => r !== 'buyer');
-    }
   }
+  
   return allowedRoles;
 }
 
@@ -82,17 +82,19 @@ async function checkSession(escrowId, res) {
 
     const pubKeysDb = await prisma.pubKeySubmission.findMany({ where: { escrowId } });
     
+    const participantsSnapshot = buildParticipantsSnapshot(escrowDb);
+
     // BẢN VÁ 2: Bỏ chốt chặn 400 (Cho phép tạo Session kể cả khi chưa đủ 7 Keys)
     session = {
       escrowId,
       chainId: process.env.CHAIN_ID || "11155111",
       contractAddress: escrowDb.contractAddress || null,
-      participants: {
+      participants: participantsSnapshot || {
         buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
         seller: normalizeAddress(escrowDb.seller?.walletAddress),
         mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
       },
-      parties: {
+      parties: participantsSnapshot || {
         buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
         seller: normalizeAddress(escrowDb.seller?.walletAddress),
         mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))

@@ -82,7 +82,7 @@ export default function ResolvedBanner({ dispute: propDispute = null }) {
       {/* FIXED: Add CTA to redirect users back to the TSS Execution Workspace */}
       <div className="mt-5 pt-4 border-t border-indigo-100/50 flex justify-end">
         <button
-          onClick={() => window.location.href = `/escrows/${dispute.escrowId}`}
+          onClick={() => window.location.href = `/escrow/${dispute.escrowId}`}
           className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow-md transition-all flex items-center hover:scale-105"
         >
           Proceed to TSS Execution Workspace

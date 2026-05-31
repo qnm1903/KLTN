@@ -38,12 +38,13 @@ function resolveRoleFromEscrow(escrow, walletAddress) {
   const normalizedWalletAddress = normalizeAddress(walletAddress);
   if (!normalizedWalletAddress || !escrow) return 'Unknown';
 
-  if (normalizeAddress(escrow?.buyer?.walletAddress) === normalizedWalletAddress) return 'buyer';
-  if (normalizeAddress(escrow?.seller?.walletAddress) === normalizedWalletAddress) return 'seller';
+  if (normalizeAddress(escrow?.buyer?.walletAddress || escrow?.buyerAddress) === normalizedWalletAddress) return 'buyer';
+  if (normalizeAddress(escrow?.seller?.walletAddress || escrow?.sellerAddress) === normalizedWalletAddress) return 'seller';
 
-  const mediatorRow = (escrow?.escrowMediators || []).find(
-    (row) => normalizeAddress(row?.mediator?.walletAddress) === normalizedWalletAddress
-  );
+  const mediatorRow = (escrow?.escrowMediators || []).find((row) => {
+    const mAddr = normalizeAddress(row?.mediator?.walletAddress || row?.mediatorAddress);
+    return mAddr === normalizedWalletAddress;
+  });
 
   if (mediatorRow?.slot) return `mediator${mediatorRow.slot}`;
 
@@ -124,7 +125,7 @@ export default function EscrowDetail() {
       }
     };
     checkNonceState();
-  }, [escrowId, selectedAction, activeRole, hasNonce]);
+  }, [escrowId, selectedAction, activeRole]);
 
   const hasSubmitted = activeRole !== 'Unknown' && signedNodes.includes(activeRole);
   const localPubKey = getPubKey(address);
@@ -190,8 +191,6 @@ export default function EscrowDetail() {
         if (!active) return;
         setEscrow(data);
       } catch (error) {
-        if (!active) return;
-        addLog({ message: `Cannot load escrow detail: ${error.message}`, type: 'error' });
       } finally {
         if (active) setIsEscrowLoading(false);
       }
@@ -199,7 +198,7 @@ export default function EscrowDetail() {
 
     fetchEscrowDetail();
     return () => { active = false; };
-  }, [escrowId, addLog]);
+  }, [escrowId]);
 
   useEffect(() => {
     let active = true;
@@ -217,8 +216,6 @@ export default function EscrowDetail() {
         setOnChainVaultStatus(Number(statusValue));
       } catch (error) {
         if (!active) return;
-        const errorMessage = error?.shortMessage || error?.message || 'Unknown error';
-        addLog({ message: `Cannot read on-chain vault status: ${errorMessage}`, type: 'warning' });
       }
     };
 
@@ -226,10 +223,10 @@ export default function EscrowDetail() {
     return () => {
       active = false;
     };
-  }, [escrow?.contractAddress, escrow?.vaultAddress, getVaultStatus, addLog]);
+  }, [escrow?.contractAddress, escrow?.vaultAddress]);
 
   // --- CÁC HÀM XỬ LÝ HÀNH ĐỘNG ---
-  const handleSubmitMyPubKey = useCallback(async () => {
+const handleSubmitMyPubKey = useCallback(async () => {
     if (activeRole === 'Unknown') return alert('Cannot resolve your escrow role.');
     if (!localPubKey) return alert('Public key not found. Please generate your key first.');
 
@@ -237,42 +234,35 @@ export default function EscrowDetail() {
     try {
       await submitPubKey({ role: activeRole, pubKey: localPubKey });
     } catch (error) {
-      alert(error.response ? `Backend Error: ${JSON.stringify(error.response.data)}` : `Error: ${error.message}`);
+      const status = error.response?.status;
+      if (status === 409) {
+        console.warn(`[DKG] Pubkey conflict ignored for ${activeRole}. It was likely submitted previously.`);
+      } else {
+        alert(error.response ? `Backend Error: ${JSON.stringify(error.response.data)}` : `Error: ${error.message}`);
+      }
     } finally {
       setIsSubmittingKey(false);
     }
-  }, [activeRole, localPubKey, submitPubKey]);
+  }, [activeRole, localPubKey, submitPubKey, addLog]);
 
   // --- BẢN VÁ PHASE 1: LUỒNG AUTO-SUBMIT KEY ---
   useEffect(() => {
-  // Chỉ cho phép DKG khi Escrow đã có Trọng tài
-  console.log("=> [BẪY DKG] ĐANG KIỂM TRA ĐIỀU KIỆN AUTO-SUBMIT...");
-  const escrowStatus = String(escrow?.status || '').toUpperCase();
-  const hasFiveMediators = Array.isArray(escrow?.escrowMediators) && escrow.escrowMediators.length === 5;
-  const dkgAllowed = ['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED'].includes(escrowStatus);
-  
-  if (!dkgAllowed) {
-    console.warn("=> [BẪY DKG] BỊ CHẶN 1: dkgAllowed là false (Trạng thái Escrow chưa hợp lệ)");
-  } else if (activeRole === 'Unknown') {
-    console.warn("=> [BẪY DKG] BỊ CHẶN 2: activeRole là 'Unknown' (Chưa load được Role của bạn)");
-  } else if (!localPubKey) {
-    console.warn("=> [BẪY DKG] BỊ CHẶN 3: chưa có localPubKey (Chưa tạo/lấy được Key trong Storage)");
-  } else if (hasSubmitted) {
-    console.warn("=> [BẪY DKG] BỊ CHẶN 4: hasSubmitted = true (Đã nộp key thành công trước đó)");
-  } else if (isSubmittingKey) {
-    console.warn("=> [BẪY DKG] BỊ CHẶN 5: isSubmittingKey = true (Đang trong quá trình nộp, chờ API)");
-  } else if (progress >= 7) {
-    console.warn("=> [BẪY DKG] BỊ CHẶN 6: progress đã >= 7 (DKG đã hoàn tất)");
-  } else if (autoSubmitAttempted.current) {
-    console.warn("=> [BẪY DKG] BỊ CHẶN 7: autoSubmitAttempted.current = true (Đã thử gọi hàm nộp rồi)");
-  } else {
-    // Nếu vượt qua tất cả các bẫy trên, tiến hành nộp Key
-    console.log("=> [BẪY DKG] TẤT CẢ ĐIỀU KIỆN ĐẠT! TIẾN HÀNH AUTO-SUBMIT...");
+    if (isEscrowLoading || isRecovering) return;
+
+    if (hasVaultAddress) {
+      return; 
+    }
+
+    const escrowStatus = String(escrow?.status || '').toUpperCase();
+    const dkgAllowed = ['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED'].includes(escrowStatus);
+    
+    if (!dkgAllowed) return;
+    if (activeRole === 'Unknown' || !localPubKey || hasSubmitted || isSubmittingKey || progress >= 7 || autoSubmitAttempted.current) return;
+    
     autoSubmitAttempted.current = true;
-    addLog({ message: 'Auto-submitting local Public Key...', type: 'info' });
     handleSubmitMyPubKey();
-  }
-}, [escrow?.status, activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey, addLog, handleSubmitMyPubKey]);
+     
+  }, [isEscrowLoading, isRecovering, escrow?.status, activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey]);
 
   useEffect(() => {
     try {
@@ -294,55 +284,32 @@ export default function EscrowDetail() {
 
   // Lắng nghe sự kiện vault_deployed từ WebSocket
   useEffect(() => {
-  if (!escrowId) return;
+    if (!escrowId) return;
 
-  const handleVaultDeployed = async (data) => {
-    try {
+    const handleVaultDeployed = async (data) => {
       if (data?.escrowId !== escrowId) return;
-
-      addLog({
-        message: `Vault đã được Deploy! Địa chỉ: ${data.contractAddress}. Block: ${data.blockNumber}`,
-        type: 'success'
-      });
-
-      // Tải lại dữ liệu Escrow từ Backend để tự động hiện nút Deposit
-      const { data: fresh } = await api.get(`/escrows/${escrowId}`);
-      setEscrow(fresh);
-
-      // Cập nhật thêm trạng thái On-chain (nếu có)
       try {
-        const vaultAddr = fresh.contractAddress || fresh.vaultAddress;
-        if (vaultAddr) {
-          const onChain = await getVaultStatus(vaultAddr);
-          setOnChainVaultStatus(Number(onChain));
-        }
-      } catch (innerErr) {
-        console.warn('Chưa đọc được trạng thái on-chain sau deploy:', innerErr);
-      }
-    } catch (err) {
-      console.error('Lỗi khi bắt sự kiện vault_deployed:', err);
-    }
-  };
+        const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+        setEscrow(fresh);
+      } catch (err) {}
+    };
 
-  socket.on('vault_deployed', handleVaultDeployed);
-  const handleMediatorsSelected = async (data) => {
-    console.warn('*** BẪY LỖI: ĐÃ NHẬN SOCKET [mediators_selected] ***', data);
-    if (data?.escrowId !== escrowId) return;
-    addLog({ message: '✅ Chainlink VRF Hoàn tất: Đã chọn 5 Trọng tài! Đang cập nhật UI...', type: 'success' });
-    try {
-      const { data: fresh } = await api.get(`/escrows/${escrowId}`);
-      setEscrow(fresh);
-    } catch (err) {
-      console.error('Lỗi khi fetch lại escrow sau VRF:', err);
-    }
-  };
-  socket.on('mediators_selected', handleMediatorsSelected);
+    const handleMediatorsSelected = async (data) => {
+      if (data?.escrowId !== escrowId) return;
+      try {
+        const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+        setEscrow(fresh);
+      } catch (err) {}
+    };
 
-  return () => {
-    socket.off('vault_deployed', handleVaultDeployed);
-    socket.off('mediators_selected', handleMediatorsSelected);
-  };
-}, [escrowId, addLog, getVaultStatus]);
+    socket.on('vault_deployed', handleVaultDeployed);
+    socket.on('mediators_selected', handleMediatorsSelected);
+
+    return () => {
+      socket.off('vault_deployed', handleVaultDeployed);
+      socket.off('mediators_selected', handleMediatorsSelected);
+    };
+  }, [escrowId]); 
 
 // Ép buộc kết nối phòng Socket để nhận tín hiệu realtime
   useEffect(() => {
@@ -363,7 +330,7 @@ export default function EscrowDetail() {
     return () => {
       socket.emit('leave_escrow', escrowId);
     };
-  }, [escrowId, addLog]);
+  }, [escrowId]);
 
 // --- KHỐI XỬ LÝ DEPLOY TỪ VÍ BUYER ---
   const [isDeploying, setIsDeploying] = useState(false);
@@ -585,7 +552,7 @@ export default function EscrowDetail() {
     } finally {
       setIsLoadingApprovals(false);
     }
-  }, [escrowId, addLog]);
+  }, [escrowId]);
 
   // Fetch approval status when selected action changes
   useEffect(() => {
@@ -1129,8 +1096,8 @@ export default function EscrowDetail() {
           const isCoreRole = activeRole === 'buyer' || activeRole === 'seller';
           const isMediator = activeRole?.startsWith('mediator');
 
-          // FIX: Core roles can act if LOCKED or RESOLVED. Mediators MUST be able to act if RESOLVED to form 5-of-7 TSS.
-          const canSeeActions = (isCoreRole && isLocked) || (isMediator && isResolved) || (isCoreRole && isResolved);
+          const isDisputePhase = ['DISPUTED', 'RESOLVED'].includes(normalizedStatus);
+          const canSeeActions = (isCoreRole && isLocked) || (isMediator && isDisputePhase) || (isCoreRole && isDisputePhase);
 
           if (!canSeeActions) return null;
 

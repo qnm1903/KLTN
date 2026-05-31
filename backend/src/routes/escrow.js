@@ -51,14 +51,19 @@ async function getAllowedSignerRoles(escrowId) {
   let allowedRoles = [...VALID_ROLES]; 
   const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
   
- 
   const dispute = await prisma.dispute.findFirst({ 
       where: { escrowId, status: 'RESOLVED' },
       orderBy: { createdAt: 'desc' }
   });
+  
   if (dispute) {
-      if (dispute.outcome === 'RELEASE_TO_BUYER') allowedRoles = allowedRoles.filter(r => r !== 'seller');
-      if (dispute.outcome === 'RETURN_TO_SELLER') allowedRoles = allowedRoles.filter(r => r !== 'buyer');
+      const outcome = String(dispute.outcome || '').toUpperCase();
+      if (outcome.includes('RELEASE') || outcome.includes('BUYER')) {
+          allowedRoles = allowedRoles.filter(r => r !== 'seller');
+      }
+      else if (outcome.includes('RETURN') || outcome.includes('REFUND') || outcome.includes('SELLER')) {
+          allowedRoles = allowedRoles.filter(r => r !== 'buyer');
+      }
   }
   
   return allowedRoles;
@@ -366,6 +371,12 @@ router.post('/pubkey/submit', authMiddleware, escrowPubKeySubmitRateLimiter, asy
         const collection = getPubKeyCollectionSummary(session);
         return res.json({ ok: true, state: collection.state, received: collection.received, required: collection.required, isIdempotent: true, collection: toCollectionPayload(collection) });
       }
+
+      const summaryCheck = getPubKeyCollectionSummary(session);
+      if (summaryCheck.complete || session.contractAddress) {
+        return res.json({ ok: true, isIdempotent: true, message: 'DKG already complete. Ignored conflicting key.' });
+      }
+
       if (io) io.to(escrowId).emit('pubkey_rejected', { escrowId, role, reason: 'CONFLICT' });
       return res.status(409).json({ error: `Role '${role}' already submitted a different pubKey` });
     }

@@ -251,11 +251,31 @@ export const useContractCall = () => {
     }
   };
 
+  // ==========================================
+  // BẮT ĐẦU THÊM MỚI: TX WAITER ĐỂ FIX MEMORY LEAK
+  // ==========================================
+  const waitForTx = useCallback(async (txHash, timeoutMs = 120000, pollInterval = 2000) => {
+    if (!publicClient) throw new Error('publicClient is required to wait for tx');
+    
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+        if (receipt) return receipt;
+      } catch (e) {
+        // Ignore transient RPC read errors and keep polling
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    }
+    throw new Error('Timeout waiting for transaction confirmation');
+  }, [publicClient]);
+
   return {
     deployEscrowVault,
     fundEscrow,
     getVaultStatus,
     executeTssAction,
+    waitForTx,
     isPending,
     isConfirming,
     isConfirmed,

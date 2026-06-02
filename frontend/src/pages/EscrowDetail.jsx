@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAtomValue, useSetAtom } from 'jotai';
-import { useConnection } from 'wagmi';
+import { useAccount } from 'wagmi';
 import { ethers } from 'ethers';
 
 // --- IMPORT STATE & LOGIC HOOKS ---
@@ -25,7 +25,7 @@ import { useTssWorker } from '../features/escrow/useTssWorker'; // Tích hợp P
 // --- IMPORT API & STORAGE ---
 import api from '../lib/api';
 import { clearPrivKey, getPubKey, getPrivKey, unlockEncryptedPrivKey } from '../lib/storage';
-import { socket } from '../lib/socket';
+import { socket, joinEscrowRoom, leaveEscrowRoom } from '../lib/socket';
 
 import { getStoredAccessToken } from '../store/authStore';
 import { useSIWE } from '../hooks/useSIWE';
@@ -77,7 +77,7 @@ function validateSignerBitmap(bitmap) {
 export default function EscrowDetail() {
   // 1. Lấy Context & Định danh
   const { id: escrowId } = useParams();
-  const { address } = useConnection();
+  const { address } = useAccount();
 
   const [escrow, setEscrow] = useState(null);
   const [isEscrowLoading, setIsEscrowLoading] = useState(true);
@@ -92,14 +92,16 @@ export default function EscrowDetail() {
   // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm deployEscrowVault)
   const { isRecovering } = useSessionRecovery(escrowId, address);
   const { submitPubKey, submitNonce, submitZShare, resetSigning } = useEscrowSync(escrowId, escrow?.status);
-  const { executeTssAction, fundEscrow, getVaultStatus, isPending, isConfirming, isConfirmed, deployEscrowVault, hash: hookTxHash } = useContractCall();
+  const { executeTssAction, fundEscrow, getVaultStatus, isPending, isConfirming, isConfirmed, deployEscrowVault, waitForTx, hash: hookTxHash } = useContractCall();
   const { computeNonce, computeZShare, hasNonce, clearNonce } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
   const status = useAtomValue(escrowStatusAtom);
   const progress = useAtomValue(signatureProgressAtom);
+  const setProgress = useSetAtom(signatureProgressAtom);
   const logs = useAtomValue(systemLogsAtom);
   const signedNodes = useAtomValue(signedNodesAtom);
+  const setSignedNodes = useSetAtom(signedNodesAtom);
   const signingPhase = useAtomValue(signingPhaseAtom);
   const signingProgress = useAtomValue(signingProgressAtom);
   const aggregatedSignature = useAtomValue(aggregatedSignatureAtom);
@@ -190,6 +192,10 @@ export default function EscrowDetail() {
         const { data } = await api.get(`/escrows/${escrowId}`);
         if (!active) return;
         setEscrow(data);
+        if (data?.pkAggBsX && data?.pkAggBsY) {
+          setProgress(7);
+          setSignedNodes(['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5']);
+        }
       } catch (error) {
       } finally {
         if (active) setIsEscrowLoading(false);
@@ -198,7 +204,7 @@ export default function EscrowDetail() {
 
     fetchEscrowDetail();
     return () => { active = false; };
-  }, [escrowId]);
+  }, [escrowId, setProgress, setSignedNodes]);
 
   useEffect(() => {
     let active = true;
@@ -264,8 +270,16 @@ const handleSubmitMyPubKey = useCallback(async () => {
      
   }, [isEscrowLoading, isRecovering, escrow?.status, activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey]);
 
+  
+  const lastLogRef = useRef(0);
+
   useEffect(() => {
     try {
+      const now = Date.now();
+      // Chỉ log tối đa 1 lần mỗi 1000ms (1 giây)
+      if (now - lastLogRef.current < 1000) return;
+      lastLogRef.current = now;
+
       const mediatorCount = escrow?.escrowMediators?.length || 0;
       const table = [
         { Biến: 'DKG Progress', Giá_trị: progress },
@@ -282,24 +296,35 @@ const handleSubmitMyPubKey = useCallback(async () => {
     } catch (err) {}
   }, [progress, escrow?.status, escrow?.escrowMediators?.length, activeRole, localPubKey, hasSubmitted]);
 
-  // Lắng nghe sự kiện vault_deployed từ WebSocket
+  // --- DEBOUNCE REFRESH: Gom nhóm các API request bị spam ---
+  const refreshTimeoutRef = useRef(null);
+  const scheduleEscrowRefresh = useCallback(() => {
+    if (!escrowId) return;
+    if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
+    refreshTimeoutRef.current = setTimeout(async () => {
+      try {
+        const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+        setEscrow(fresh);
+      } catch (err) {
+        console.warn('[EscrowDetail] Delayed refresh failed', err?.message || err);
+      } finally {
+        refreshTimeoutRef.current = null;
+      }
+    }, 600);
+  }, [escrowId]);
+
+  // Lắng nghe sự kiện WebSocket (sử dụng debounce refresh)
   useEffect(() => {
     if (!escrowId) return;
 
-    const handleVaultDeployed = async (data) => {
+    const handleVaultDeployed = (data) => {
       if (data?.escrowId !== escrowId) return;
-      try {
-        const { data: fresh } = await api.get(`/escrows/${escrowId}`);
-        setEscrow(fresh);
-      } catch (err) {}
+      scheduleEscrowRefresh();
     };
 
-    const handleMediatorsSelected = async (data) => {
+    const handleMediatorsSelected = (data) => {
       if (data?.escrowId !== escrowId) return;
-      try {
-        const { data: fresh } = await api.get(`/escrows/${escrowId}`);
-        setEscrow(fresh);
-      } catch (err) {}
+      scheduleEscrowRefresh();
     };
 
     socket.on('vault_deployed', handleVaultDeployed);
@@ -308,29 +333,28 @@ const handleSubmitMyPubKey = useCallback(async () => {
     return () => {
       socket.off('vault_deployed', handleVaultDeployed);
       socket.off('mediators_selected', handleMediatorsSelected);
+      if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
     };
-  }, [escrowId]); 
+  }, [escrowId, scheduleEscrowRefresh]); 
 
-// Ép buộc kết nối phòng Socket để nhận tín hiệu realtime
+  // Ép buộc kết nối phòng Socket thông qua Guard mới (Tránh duplicate stream)
   useEffect(() => {
     if (!escrowId) return;
     const token = getStoredAccessToken();
     if (!token) return;
 
-    if (!socket.connected) socket.connect();
-
-    socket.emit('join_escrow', { escrowId, token }, (response) => {
+    joinEscrowRoom(escrowId, token).then((response) => {
       if (response?.ok) {
         addLog({ message: `Joined secure room for Escrow #${escrowId} (explicit join)`, type: 'success' });
-        return;
+      } else {
+        addLog({ message: `Explicit join room failed: ${response?.error || 'unknown error'}`, type: 'warning' });
       }
-      addLog({ message: `Explicit join room failed: ${response?.error || 'unknown error'}`, type: 'warning' });
     });
 
     return () => {
-      socket.emit('leave_escrow', escrowId);
+      leaveEscrowRoom(escrowId);
     };
-  }, [escrowId]);
+  }, [escrowId, addLog]);
 
 // --- KHỐI XỬ LÝ DEPLOY TỪ VÍ BUYER ---
   const [isDeploying, setIsDeploying] = useState(false);
@@ -403,8 +427,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
       } else {
         addLog({ message: `Đã gửi TX: ${txHash}. Đang chờ Blockchain xác nhận (15-30s)...`, type: 'info' });
         
-        const provider = new ethers.BrowserProvider(window.ethereum);
-        const receipt = await provider.waitForTransaction(txHash);
+        const receipt = await waitForTx(txHash);
 
         if (receipt && receipt.status === 0) {
           throw new Error('Transaction reverted on the blockchain.');
@@ -418,10 +441,8 @@ const handleSubmitMyPubKey = useCallback(async () => {
 
         const token = getStoredAccessToken();
         if (token) {
-          socket.emit('join_escrow', { escrowId, token }, (response) => {
-            if (response?.ok) {
-              addLog({ message: 'Socket room joined after deploy.', type: 'info' });
-            }
+          joinEscrowRoom(escrowId, token).then((response) => {
+            if (response?.ok) addLog({ message: 'Socket room joined after deploy.', type: 'info' });
           });
         }
 
@@ -806,7 +827,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
     );
   }
 
-  const mediationAssigned = ['DISPUTED', 'VOTING', 'RESOLVED'].includes(
+  const mediationAssigned = ['LOCKED', 'FUNDED', 'DISPUTED', 'VOTING', 'RESOLVED'].includes(
   String(escrow?.status || '').toUpperCase()
   );
 
@@ -1096,8 +1117,9 @@ const handleSubmitMyPubKey = useCallback(async () => {
           const isCoreRole = activeRole === 'buyer' || activeRole === 'seller';
           const isMediator = activeRole?.startsWith('mediator');
 
+          const mediatorCanStartTss = isMediator && mediationAssigned && progress >= 5 && hasVaultAddress && !isSigningFlowClosed;
           const isDisputePhase = ['DISPUTED', 'RESOLVED'].includes(normalizedStatus);
-          const canSeeActions = (isCoreRole && isLocked) || (isMediator && isDisputePhase) || (isCoreRole && isDisputePhase);
+          const canSeeActions = (isCoreRole && isLocked) || (isCoreRole && isDisputePhase) || mediatorCanStartTss || (isMediator && isDisputePhase);
 
           if (!canSeeActions) return null;
 

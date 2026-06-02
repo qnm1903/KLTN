@@ -75,11 +75,24 @@ export const useTssWorker = () => {
       }
     };
 
-    // Dọn dẹp Worker khi component unmount
+    // Dọn dẹp Worker và giải phóng các Promise đang kẹt khi component unmount
     return () => {
-      workerRef.current?.terminate();
+      try {
+        // Reject toàn bộ task đang chờ để tránh memory leak
+        Object.values(taskResolvers.current).forEach(({ reject }) => {
+          try { 
+            reject(new Error('TSS worker terminated forcefully on unmount')); 
+          } catch (e) {}
+        });
+        taskResolvers.current = {};
+        
+        workerRef.current?.terminate();
+        workerRef.current = null;
+      } catch (e) {
+        console.warn('[TSS Worker] Cleanup warning:', e);
+      }
     };
-  }, [addLog]); // Thêm addLog vào dependency array
+  }, [addLog]); 
 
   // Hàm gọi Worker dưới dạng Promise để dùng dễ dàng với async/await trong React
   const executeWorkerTask = useCallback((action, payload) => {

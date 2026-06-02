@@ -12,7 +12,7 @@ import {
 } from './escrowStore';
 import api from '../../lib/api';
 import { getStoredAccessToken } from '../../store/authStore';
-import { socket } from '../../lib/socket';
+import { socket, joinEscrowRoom, leaveEscrowRoom } from '../../lib/socket';
 import { clearNonceRecord } from '../../lib/storage';
 
 const PARTICIPANT_ROLES = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
@@ -42,54 +42,49 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
 
   const applyCollectionSnapshot = useCallback((collection) => {
     if (!collection) return;
-    setProgress(Number(collection.received || 0));
-    setSignedNodes(submittedRolesFromCollection(collection));
+    // Đảm bảo progress không bao giờ bị đè lùi về 0
+    setProgress((prev) => Math.max(prev, Number(collection.received || 0)));
+    setSignedNodes((prev) => {
+      const newNodes = submittedRolesFromCollection(collection);
+      return newNodes.length > prev.length ? newNodes : prev;
+    });
     setStatus(toStatusState(collection.state));
   }, [setProgress, setSignedNodes, setStatus]);
 
+  // LUỒNG 1: Lấy Status API độc lập (Tránh reload socket)
   useEffect(() => {
     if (!escrowId) return;
-
     let isMounted = true;
     
-    // FIX CORE: Lấy token trực tiếp bên trong Effect để đảm bảo tính Freshness sau khi SIWE
-    const currentToken = getStoredAccessToken();
-
-    const bootstrapCollection = async () => {
-      try {
-        const { data } = await api.get(`/escrow/${escrowId}/status`);
-        if (!isMounted) return;
-        applyCollectionSnapshot(data?.pubkeyCollection);
-      } catch (error) {
-        addLog({ message: `Cannot load collection snapshot: ${error.message}`, type: 'warning' });
-      }
-    };
-
-    // Only initialize TSS/pubkey collection when mediators have been assigned (escrow disputed)
     const normalizedStatus = String(escrowStatus || '').toUpperCase();
-    const tssAllowed = ['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED'].includes(normalizedStatus);
+    const tssAllowed = ['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED', 'RESOLVED'].includes(normalizedStatus);
     
-    if (!tssAllowed) {
-      addLog({ message: 'TSS sync disabled: escrow not disputed yet.', type: 'info' });
-    } else {
-      bootstrapCollection();
+    if (tssAllowed) {
+      api.get(`/escrow/${escrowId}/status`).then(({ data }) => {
+        if (isMounted) applyCollectionSnapshot(data?.pubkeyCollection);
+      }).catch(() => {
+         // Silently ignore sync errors
+      });
     }
 
-    if (!currentToken) {
-      addLog({ message: 'Waiting for SIWE authentication to join Socket Room...', type: 'warning' });
-      return () => { isMounted = false; };
-    }
+    return () => { isMounted = false; };
+  }, [escrowId, escrowStatus, applyCollectionSnapshot]);
+
+  // LUỒNG 2: Xử lý Socket.io (Chỉ phụ thuộc EscrowId)
+  useEffect(() => {
+    if (!escrowId) return;
+    
+    const currentToken = getStoredAccessToken();
+    if (!currentToken) return;
 
     if (!socket.connected) {
       socket.connect();
     }
 
-    socket.emit('join_escrow', { escrowId, token: currentToken }, (response) => {
+    joinEscrowRoom(escrowId, currentToken).then((response) => {
       if (response?.ok) {
         addLog({ message: `Joined secure room for Escrow #${escrowId}`, type: 'success' });
-        return;
       }
-      addLog({ message: `Join room failed: ${response?.error || 'unknown error'}`, type: 'error' });
     });
 
     const handlePubKeyReceived = (data) => {
@@ -99,7 +94,7 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
         return [...prev, data.role];
       });
       if (Number.isFinite(data?.received)) {
-        setProgress(data.received);
+        setProgress((prev) => Math.max(prev, data.received));
       }
       addLog({ message: `Received pubkey from ${data.role}. (${data.received || 0}/7)`, type: 'info' });
     };
@@ -111,7 +106,7 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
 
     const handleCollectionComplete = (data) => {
       if (data?.escrowId !== escrowId) return;
-      setProgress(Number(data.received || 7));
+      setProgress(7);
       setSignedNodes(PARTICIPANT_ROLES);
       setStatus('completed');
       addLog({ message: `All pubkeys collected (${data.received || 7}/7). DKG Complete!`, type: 'success' });
@@ -149,6 +144,14 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
       addLog({ message: 'Signature aggregated! Ready for contract call.', type: 'success' });
     };
 
+    const handleSigningReset = (data) => {
+      if (data?.escrowId !== escrowId) return;
+      setSigningPhase('dkg_ready');
+      setNonceRound1(null);
+      setAggregatedSignature(null);
+      addLog({ message: `⚠️ ${data.message || 'Signing session reset by another participant.'}`, type: 'error' });
+    };
+
     socket.on('pubkey_received', handlePubKeyReceived);
     socket.on('pubkey_rejected', handlePubKeyRejected);
     socket.on('pubkey_collection_complete', handleCollectionComplete);
@@ -157,9 +160,9 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
     socket.on('nonce_collected', handleNonceCollected);
     socket.on('z_received', handleZReceived);
     socket.on('schnorr_complete', handleSchnorrComplete);
+    socket.on('signing_reset', handleSigningReset);
 
     return () => {
-      isMounted = false;
       socket.off('pubkey_received', handlePubKeyReceived);
       socket.off('pubkey_rejected', handlePubKeyRejected);
       socket.off('pubkey_collection_complete', handleCollectionComplete);
@@ -168,14 +171,15 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
       socket.off('nonce_collected', handleNonceCollected);
       socket.off('z_received', handleZReceived);
       socket.off('schnorr_complete', handleSchnorrComplete);
-      socket.emit('leave_escrow', escrowId);
+      socket.off('signing_reset', handleSigningReset);
+      leaveEscrowRoom(escrowId);
     };
-  }, [escrowId, escrowStatus, setProgress, setSignedNodes, setStatus, addLog, applyCollectionSnapshot, setSigningPhase, setNonceRound1, setSigningProgress, setAggregatedSignature]);
+  }, [escrowId, setProgress, setSignedNodes, setStatus, addLog, setSigningPhase, setNonceRound1, setSigningProgress, setAggregatedSignature]);
+
   const submitPubKey = useCallback(async ({ role, pubKey }) => {
     if (!escrowId) throw new Error('Escrow id is required');
     if (!role || !pubKey) throw new Error('role and pubKey are required');
 
-    // Guard: only allow pubkey submission after escrow mediators are assigned
     const normalizedStatus = String(escrowStatus || '').toUpperCase();
     if (!['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED'].includes(normalizedStatus)) {
       addLog({ message: 'Cannot submit pubkey: Escrow status is not ready for DKG.', type: 'warning' });
@@ -184,7 +188,7 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
 
     addLog({ message: `Submitting pubkey for role ${role}...`, type: 'warning' });
 
-    const { data } = await api.post('/escrow/pubkey/submit', { escrowId, role, pubKey }); // Đã sửa /escrow/ thành /escrows/
+    const { data } = await api.post('/escrow/pubkey/submit', { escrowId, role, pubKey });
     applyCollectionSnapshot(data?.collection);
 
     if (data?.isIdempotent) {
@@ -200,20 +204,16 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
     try {
       const { data } = await api.post(`/escrow/nonce`, { escrowId, role, action, signerBitmap, R_x, R_y });
       
-      // Handle idempotent submission (nonce already exists with same values)
       if (data.isIdempotent) {
         addLog({ message: `Nonce already submitted (idempotent), skipping...`, type: 'info' });
       }
       
-      // Handle state responses when nonce differs
       if (data.state === 'round2_ready') {
         addLog({ message: `Round 1 already complete. Skipping to Round 2.`, type: 'success' });
       } else if (data.state === 'round1_in_progress') {
         addLog({ message: `Round 1 in progress: ${data.received}/${data.needed} submitted. Your nonce differs from submitted value.`, type: 'warning' });
-        // Backend returned existing nonce - clear local nonce to prevent future mismatches
         if (data.existingNonce) {
           addLog({ message: `Clearing local nonce and requiring restart...`, type: 'error' });
-          // Build nonceKey from escrowId, action, role
           const nonceKey = `${escrowId}:${action}:${data.role || role}`;
           await clearNonceRecord(nonceKey);
           throw new Error(`Nonce mismatch: Your local nonce differs from backend. Please restart signing with a fresh nonce.`);
@@ -222,14 +222,11 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
       
       return data;
     } catch (error) {
-      // Handle 409 conflict - different action or bitmap in progress
       if (error.response?.status === 409) {
         const errorMsg = error.response?.data?.error || 'Nonce conflict';
         addLog({ message: `⚠️ ${errorMsg}`, type: 'warning' });
-        // Re-throw to let caller handle
         throw error;
       }
-      // Re-throw other errors
       throw error;
     }
   }, [addLog]);
@@ -261,21 +258,6 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
       throw error;
     }
   }, [escrowId, addLog, setSigningPhase, setNonceRound1, setAggregatedSignature]);
-
-  useEffect(() => {
-    if (!escrowId) return;
-
-    const handleSigningReset = (data) => {
-      if (data?.escrowId !== escrowId) return;
-      setSigningPhase('dkg_ready');
-      setNonceRound1(null);
-      setAggregatedSignature(null);
-      addLog({ message: `⚠️ ${data.message || 'Signing session reset by another participant.'}`, type: 'error' });
-    };
-
-    socket.on('signing_reset', handleSigningReset);
-    return () => socket.off('signing_reset', handleSigningReset);
-  }, [escrowId, setSigningPhase, setNonceRound1, setAggregatedSignature, addLog]);
 
   return { submitPubKey, submitNonce, submitZShare, resetSigning };
 };

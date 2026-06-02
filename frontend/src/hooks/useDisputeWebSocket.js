@@ -16,16 +16,6 @@ import {
   DISPUTE_STATUS
 } from '../constants/dispute.constants.js';
 
-/**
- * useDisputeWebSocket
- *
- * - Kết nối tới WebSocket (socket instance import sẵn).
- * - Đăng ký listeners cho các events:
- *   'dispute:created', 'mediators:assigned', 'evidence:added', 'vote:submitted', 'vote:progress', 'dispute:resolved'
- * - Khi nhận payload, cập nhật Jotai atoms tương ứng.
- *
- * @param {string|null} disputeId - id của dispute đang quan tâm (nếu null thì không subscribe)
- */
 export function useDisputeWebSocket(disputeId) {
   const currentDispute = useAtomValue(currentDisputeAtom);
   const setCurrentDispute = useSetAtom(currentDisputeAtom);
@@ -48,42 +38,25 @@ export function useDisputeWebSocket(disputeId) {
   }, [currentDispute?.escrowId]);
 
   useEffect(() => {
-    // Nếu không có socket hoặc disputeId, không đăng ký listeners
-    if (!socket || !disputeId) {
-      return undefined;
-    }
+    if (!socket || !disputeId) return undefined;
 
-    // Helper: subscribe to dispute channel if backend supports it
     try {
       const token = getStoredAccessToken();
       if (token && typeof socket.emit === 'function') {
         if (!socket.connected) {
           socket.connect();
         }
-
-        // socket.emit('join_escrow', { escrowId: disputeId, token }, (response) => {
-        //   if (!response?.ok) {
-        //     console.warn('join_escrow failed:', response?.error || 'unknown');
-        //   }
-        // });
       }
     } catch (err) {
       console.warn('useDisputeWebSocket: join_escrow error:', err);
     }
 
-    // ---- Event handlers ----
-
-    const handleDisputeCreated = (payload) => {
-      // payload expected: { disputeId, escrowId, initiator, status, createdAt, ... }
-      setCurrentDispute(payload);
-    };
+    const handleDisputeCreated = (payload) => setCurrentDispute(payload);
 
     const handleMediatorsAssigned = (payload) => {
-      // payload expected: { disputeId, mediators: [addr...], assignedAt, requestId }
       const incoming = payload || {};
       const addrs = Array.isArray(incoming.mediators) ? incoming.mediators : [];
 
-      // Map addresses -> Mediator objects (minimal)
       const mediators = addrs.map((addr) => ({
         address: addr,
         status: MEDIATOR_STATUS.ASSIGNED,
@@ -96,11 +69,8 @@ export function useDisputeWebSocket(disputeId) {
       }));
 
       setMediatorsList(mediators);
-
-      // Update currentDispute status/assignedAt/requestId when possible
       setCurrentDispute((prev) => {
         if (!prev) {
-          // tạo skeleton nếu chưa có
           return {
             disputeId,
             escrowId: '',
@@ -130,32 +100,25 @@ export function useDisputeWebSocket(disputeId) {
     };
 
     const handleEvidenceAdded = (payload) => {
-      // payload expected: { disputeId, evidence } hoặc evidence object trực tiếp
       const evidence = payload && payload.evidence ? payload.evidence : payload;
       if (!evidence) return;
 
-      // Append to evidenceListAtom (avoid duplicates)
       setEvidenceList((prev) => {
         const exists = prev.find((e) => e.id === evidence.id);
         if (exists) return prev;
         return [...prev, evidence];
       });
 
-      // Also update currentDispute.evidence if exists
       setCurrentDispute((prev) => {
         if (!prev) return prev;
         const exists = prev.evidence.find((e) => e.id === evidence.id);
         if (exists) return prev;
-        return {
-          ...prev,
-          evidence: [...prev.evidence, evidence]
-        };
+        return { ...prev, evidence: [...prev.evidence, evidence] };
       });
       toast.success('New evidence uploaded!');
     };
 
     const handleVoteSubmitted = (payload) => {
-      // payload expected: { disputeId, mediator, vote, justification, timestamp, signature }
       const p = payload || {};
       const mediatorAddr = p.mediator;
       const voteChoice = p.vote;
@@ -163,21 +126,14 @@ export function useDisputeWebSocket(disputeId) {
 
       if (!mediatorAddr) return;
 
-      // Update mediatorsListAtom: mark mediator as voted and store voteChoice/votedAt
       setMediatorsList((prev) => {
         return prev.map((m) =>
           m.address === mediatorAddr
-            ? {
-                ...m,
-                status: MEDIATOR_STATUS.VOTED,
-                votedAt,
-                voteChoice: voteChoice || m.voteChoice
-              }
+            ? { ...m, status: MEDIATOR_STATUS.VOTED, votedAt, voteChoice: voteChoice || m.voteChoice }
             : m
         );
       });
 
-      // Optionally update currentDispute if present
       setCurrentDispute((prev) => {
         if (!prev) return prev;
         const updatedMediators = prev.mediators.map((m) =>
@@ -185,15 +141,11 @@ export function useDisputeWebSocket(disputeId) {
             ? { ...m, status: MEDIATOR_STATUS.VOTED, votedAt, voteChoice: voteChoice || m.voteChoice }
             : m
         );
-        return {
-          ...prev,
-          mediators: updatedMediators
-        };
+        return { ...prev, mediators: updatedMediators };
       });
     };
 
     const handleVoteProgress = (payload) => {
-      // payload expected: { disputeId, tally: VoteTally, totalVotes, threshold }
       const incoming = payload || {};
       const base = incoming.tally || {};
 
@@ -206,23 +158,18 @@ export function useDisputeWebSocket(disputeId) {
         threshold: Number(incoming.threshold ?? 5)
       });
 
-      // Ensure dispute status set to VOTING
       setCurrentDispute((prev) => {
         if (!prev) return prev;
-        if (prev.status !== DISPUTE_STATUS.VOTING) {
-          return { ...prev, status: DISPUTE_STATUS.VOTING };
-        }
+        if (prev.status !== DISPUTE_STATUS.VOTING) return { ...prev, status: DISPUTE_STATUS.VOTING };
         return prev;
       });
       toast.info('A mediator has cast their vote.');
     };
 
     const handleDisputeResolved = (payload) => {
-      // payload expected: { disputeId, outcome, finalizedAt, onChainTxHash, resolvingMediators }
       const p = payload || {};
       setCurrentDispute((prev) => {
         if (!prev) {
-          // create minimal resolved object
           return {
             disputeId,
             escrowId: '',
@@ -268,7 +215,6 @@ export function useDisputeWebSocket(disputeId) {
         };
       });
 
-      // Update mediators list: mark resolvingMediators as VOTED
       if (Array.isArray(p.resolvingMediators) && p.resolvingMediators.length > 0) {
         setMediatorsList((prev) =>
           prev.map((m) =>
@@ -337,7 +283,44 @@ export function useDisputeWebSocket(disputeId) {
       toast.error(`Execution failed: ${p.error || 'unknown error'}`);
     };
 
-    // ---- Register listeners (socket.io style) ----
+    const handleTssNeeded = (payload) => {
+      console.log('📡 [SOCKET] Yêu cầu ký TSS Thực thi On-chain:', payload);
+      toast.info('Tranh chấp đã có kết quả! Vui lòng thực hiện ký TSS để giải ngân.');
+      setCurrentDispute(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          status: 'RESOLVED',
+          tssNeeded: true,
+          tssAction: payload.tssAction,
+          escrowIdForTss: payload.escrowId
+        };
+      });
+    };
+
+    // BẢN VÁ: Hàm gom sự kiện ẩn danh thành hàm định danh để Cleanup có thể gỡ bỏ
+    const handleSocketMessage = (ev) => {
+      try {
+        const msg = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
+        const evt = msg.event;
+        const payload = msg.payload;
+        switch (evt) {
+          case 'dispute-created': return handleDisputeCreated(payload);
+          case 'mediator-assigned': return handleMediatorsAssigned(payload);
+          case 'dispute-evidence-added': return handleEvidenceAdded(payload);
+          case 'vote-submitted': return handleVoteSubmitted(payload);
+          case 'vote-tally-updated': return handleVoteProgress(payload);
+          case 'dispute-finalized': return handleDisputeResolved(payload);
+          case 'execution-triggered': return handleExecutionTriggered(payload);
+          case 'execution-completed': return handleExecutionCompleted(payload);
+          case 'execution-failed': return handleExecutionFailed(payload);
+          default: break;
+        }
+      } catch (err) {
+        console.warn('useDisputeWebSocket: message parse error:', err);
+      }
+    };
+
     try {
       if (typeof socket.on === 'function') {
         socket.on('dispute-created', handleDisputeCreated);
@@ -349,80 +332,15 @@ export function useDisputeWebSocket(disputeId) {
         socket.on('execution-triggered', handleExecutionTriggered);
         socket.on('execution-completed', handleExecutionCompleted);
         socket.on('execution-failed', handleExecutionFailed);
+        socket.on('dispute_tss_needed', handleTssNeeded);
       } else if (typeof socket.addEventListener === 'function') {
-        // fallback: if socket is native WebSocket and server sends stringified messages,
-        // we listen to 'message' and route based on event field in payload.
-        socket.addEventListener('message', (ev) => {
-          try {
-            const msg = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
-            const evt = msg.event;
-            const payload = msg.payload;
-            switch (evt) {
-              case 'dispute-created':
-                handleDisputeCreated(payload);
-                break;
-              case 'mediator-assigned':
-                handleMediatorsAssigned(payload);
-                break;
-              case 'dispute-evidence-added':
-                handleEvidenceAdded(payload);
-                break;
-              case 'vote-submitted':
-                handleVoteSubmitted(payload);
-                break;
-              case 'vote-tally-updated':
-                handleVoteProgress(payload);
-                break;
-              case 'dispute-finalized':
-                handleDisputeResolved(payload);
-                break;
-              case 'execution-triggered':
-                handleExecutionTriggered(payload);
-                break;
-              case 'execution-completed':
-                handleExecutionCompleted(payload);
-                break;
-              case 'execution-failed':
-                handleExecutionFailed(payload);
-                break;
-              default:
-                break;
-            }
-          } catch (err) {
-            console.warn('useDisputeWebSocket: message parse error:', err);
-          }
-        });
-      } else {
-        // socket has no known API
-        console.warn('Socket instance does not support .on or .addEventListener');
+        socket.addEventListener('message', handleSocketMessage);
       }
     } catch (err) {
       console.warn('useDisputeWebSocket: listener registration error:', err);
     }
 
-    const handleTssNeeded = (payload) => {
-      console.log('📡 [SOCKET] Yêu cầu ký TSS Thực thi On-chain:', payload);
-      
-      // Hiển thị thông báo cho người dùng biết cần phải thao tác
-      toast.info('Tranh chấp đã có kết quả! Vui lòng thực hiện ký TSS để giải ngân.');
-
-      // Cập nhật State để UI (DisputeDetail/ResolvedBanner) render Form Ký TSS
-      setCurrentDispute(prev => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          status: 'RESOLVED',
-          tssNeeded: true,
-          tssAction: payload.tssAction, // 'release', 'refund' hoặc 'timeout'
-          escrowIdForTss: payload.escrowId
-        };
-      });
-    };
-
-    // Đăng ký lắng nghe sự kiện
-    socket.on('dispute_tss_needed', handleTssNeeded);
-
-    // Cleanup: remove listeners and unsubscribe from channel
+    // CLEANUP TRỌN VẸN
     return () => {
       try {
         if (typeof socket.off === 'function') {
@@ -437,11 +355,9 @@ export function useDisputeWebSocket(disputeId) {
           socket.off('execution-failed', handleExecutionFailed);
           socket.off('dispute_tss_needed', handleTssNeeded);
         } else if (typeof socket.removeEventListener === 'function') {
-          // cannot remove message-specific listener easily if anonymous; in production keep named reference
-          socket.removeEventListener('message', () => {});
+          socket.removeEventListener('message', handleSocketMessage);
         }
 
-        // Unsubscribe channel if supported
         if (typeof socket.emit === 'function') {
           socket.emit('unsubscribe', { channel: `dispute:${disputeId}` });
         }
@@ -449,7 +365,6 @@ export function useDisputeWebSocket(disputeId) {
         console.warn('useDisputeWebSocket: cleanup error:', err);
       }
     };
-
 
   }, [disputeId, setCurrentDispute, setEvidenceList, setMediatorsList, setVoteTally]);
 }

@@ -45,8 +45,12 @@ export const useContractCall = () => {
 
   const { writeContractAsync, data: hash, isPending, error: writeError } = useWriteContract();
 
+  // Giảm tần suất tự động quét block của Wagmi xuống 5s (tránh Rate Limit và rác stream)
   const { isLoading: isConfirming, isSuccess: isConfirmed, error: receiptError } = useWaitForTransactionReceipt({
-    hash
+    hash,
+    query: {
+      refetchInterval: 5000, 
+    }
   });
 
   useEffect(() => {
@@ -254,7 +258,8 @@ export const useContractCall = () => {
   // ==========================================
   // BẮT ĐẦU THÊM MỚI: TX WAITER ĐỂ FIX MEMORY LEAK
   // ==========================================
-  const waitForTx = useCallback(async (txHash, timeoutMs = 120000, pollInterval = 2000) => {
+  // Chỉnh thời gian nới lỏng vòng lặp thành 5 giây để đồng bộ với block time thực tế
+  const waitForTx = useCallback(async (txHash, timeoutMs = 180000, pollInterval = 5000) => {
     if (!publicClient) throw new Error('publicClient is required to wait for tx');
     
     const start = Date.now();
@@ -267,7 +272,7 @@ export const useContractCall = () => {
       }
       await new Promise((resolve) => setTimeout(resolve, pollInterval));
     }
-    throw new Error('Timeout waiting for transaction confirmation');
+    throw new Error('Timeout waiting for transaction confirmation (180s exceeded)');
   }, [publicClient]);
 
   return {

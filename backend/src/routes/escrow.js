@@ -71,6 +71,50 @@ async function getAllowedSignerRoles(escrowId) {
 
 async function checkSession(escrowId, res) {
   let session = await getSession(escrowId, { allowExpired: true });
+
+  // TỰ ĐỘNG LÀM MỚI SESSION NẾU THIẾU/LỆCH MEDIATOR
+  if (session) {
+    const existingMediators = Array.isArray(session.participants?.mediators)
+      ? session.participants.mediators
+      : Array.isArray(session.parties?.mediators)
+      ? session.parties.mediators
+      : [];
+
+    const missingOrShort = existingMediators.length !== MEDIATOR_COMMITTEE_SIZE || existingMediators.some((m) => !m);
+    if (missingOrShort) {
+      try {
+        const escrowDb = await prisma.escrow.findUnique({
+          where: { id: escrowId },
+          include: { buyer: true, seller: true, escrowMediators: { include: { mediator: true }, orderBy: { slot: 'asc' } } }
+        });
+        const participantsSnapshot = escrowDb ? buildParticipantsSnapshot(escrowDb) : null;
+        if (participantsSnapshot) {
+          session.participants = participantsSnapshot;
+          session.parties = participantsSnapshot;
+        } else if (escrowDb) {
+          // Fallback giữ nguyên đúng vị trí slot (không dùng map nén mảng)
+          const fallbackMediators = new Array(MEDIATOR_COMMITTEE_SIZE).fill(null);
+          for (const row of escrowDb.escrowMediators || []) {
+            if (row?.slot && row.slot >= 1 && row.slot <= MEDIATOR_COMMITTEE_SIZE) {
+              fallbackMediators[row.slot - 1] = normalizeAddress(row?.mediator?.walletAddress);
+            }
+          }
+          session.participants = session.participants || {};
+          session.parties = session.parties || {};
+          session.participants.mediators = fallbackMediators;
+          session.parties.mediators = fallbackMediators;
+          session.participants.buyer = session.participants.buyer || normalizeAddress(escrowDb?.buyer?.walletAddress);
+          session.participants.seller = session.participants.seller || normalizeAddress(escrowDb?.seller?.walletAddress);
+          session.parties.buyer = session.parties.buyer || normalizeAddress(escrowDb?.buyer?.walletAddress);
+          session.parties.seller = session.parties.seller || normalizeAddress(escrowDb?.seller?.walletAddress);
+        }
+        await saveSession(escrowId, session);
+        console.log(`[TSS Recovery] Đã tự động làm mới cấu trúc Slot Mediator cho Session ${escrowId}`);
+      } catch (err) {
+        console.warn('[TSS Recovery] Could not refresh session participants from DB:', err?.message || err);
+      }
+    }
+  }
   
   if (!session) {
     console.log(`[TSS Recovery] RAM trống. Đang tự động khôi phục Session cho Escrow ${escrowId}...`);
@@ -89,6 +133,14 @@ async function checkSession(escrowId, res) {
     
     const participantsSnapshot = buildParticipantsSnapshot(escrowDb);
 
+    // TẠO MẢNG DỰ PHÒNG GIỮ NGUYÊN INDEX SLOT
+    const fallbackMediators = new Array(MEDIATOR_COMMITTEE_SIZE).fill(null);
+    for (const row of escrowDb.escrowMediators || []) {
+      if (row?.slot && row.slot >= 1 && row.slot <= MEDIATOR_COMMITTEE_SIZE) {
+        fallbackMediators[row.slot - 1] = normalizeAddress(row?.mediator?.walletAddress);
+      }
+    }
+
     // BẢN VÁ 2: Bỏ chốt chặn 400 (Cho phép tạo Session kể cả khi chưa đủ 7 Keys)
     session = {
       escrowId,
@@ -97,12 +149,12 @@ async function checkSession(escrowId, res) {
       participants: participantsSnapshot || {
         buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
         seller: normalizeAddress(escrowDb.seller?.walletAddress),
-        mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
+        mediators: fallbackMediators // Đã thay thế hàm .map() gây lỗi
       },
       parties: participantsSnapshot || {
         buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
         seller: normalizeAddress(escrowDb.seller?.walletAddress),
-        mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
+        mediators: fallbackMediators // Đã thay thế hàm .map() gây lỗi
       },
       pubKeys: {}, status: 'ACTIVE', completedActions: [], nonces: {}, zShares: {}, createdAt: Date.now()
     };
@@ -154,6 +206,9 @@ async function checkSession(escrowId, res) {
               const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
               const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
               const trueChainEscrowId = await vaultContract.escrowId();
+
+              const network = await provider.getNetwork();
+              const actualChainId = network.chainId;
               
               const msgHash = buildMsgHash(trueChainEscrowId, firstNonce.action, session.signingBitmap, vaultAddr, session.chainId);
               const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
@@ -278,17 +333,23 @@ function calculateSignerBitmap(roles) {
 
 // Helper: Validate signerBitmap - buyer OR seller must be included
 function validateSignerBitmap(bitmap, submittedRoles) {
-  let count = 0;
-  let temp = bitmap;
-  while (temp) { count += temp & 1; temp >>= 1; }
-  if (count < 5) return { valid: false, error: `Need at least 5 signers, got ${count}` };
+  const ALLOWED_BITS_MASK = 0x7f; // bits 0..6 only
+  const CORE_ROLE_MASK = 0x03; // buyer (bit0) or seller (bit1)
+  const MIN_SIGNERS = 5;
 
-  // Check core role (buyer or seller must be present)
-  const hasBuyer = (bitmap & 1) !== 0;
-  const hasSeller = (bitmap & 2) !== 0;
-  if (!hasBuyer && !hasSeller) {
-    return { valid: false, error: 'At least one core role (buyer or seller) must approve' };
-  }
+  const b = Number(bitmap);
+  if (!Number.isFinite(b)) return { valid: false, error: 'Invalid bitmap' };
+  if ((b & ~ALLOWED_BITS_MASK) !== 0) return { valid: false, error: 'Bitmap contains invalid bits' };
+
+  // Count set bits using Kernighan's method (same idea as Solidity)
+  let temp = b;
+  let count = 0;
+  while (temp) { temp &= temp - 1; count++; }
+
+  if (count < MIN_SIGNERS) return { valid: false, error: `Need at least ${MIN_SIGNERS} signers, got ${count}` };
+
+  // Ensure at least one core role (buyer or seller) is present
+  if ((b & CORE_ROLE_MASK) === 0) return { valid: false, error: 'At least one core role (buyer or seller) must approve' };
 
   return { valid: true };
 }
@@ -500,7 +561,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
           return res.json({
             state: 'round2_ready',
             received: nonceCount,
-            needed: actionRoles.length,
+            needed: 5,
             isIdempotent: true,
             round2Context: session.round2Context,
             signerBitmap: session.signingBitmap,
@@ -523,6 +584,9 @@ router.post('/nonce', authMiddleware, async (req, res) => {
               const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
               const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
               const trueChainEscrowId = await vaultContract.escrowId();
+
+              const network = await provider.getNetwork();
+              const actualChainId = network.chainId;
               
               const msgHash = buildMsgHash(trueChainEscrowId, action, session.signingBitmap, vaultAddr, session.chainId);
               const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
@@ -598,18 +662,32 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     session.signingBitmap = calculateSignerBitmap(submittedRoles);
 
     // AUTO-APPROVE: When user submits nonce, they are implicitly approving the action
-    // Create approval record in database (if not exists)
     try {
-      const user = await prisma.user.findUnique({ where: { walletAddress: normalizeAddress(req.user.walletAddress) } });
+      let user = null;
+
+      // 1) Primary: lookup by checksummed address (Ethers standard)
+      try {
+        const checksummed = ethers.getAddress(String(req.user?.walletAddress || '').trim());
+        user = await prisma.user.findUnique({ where: { walletAddress: checksummed } });
+      } catch (e) {
+        // ignore and fallback
+      }
+
+      // 2) Fallback: findFirst using lowercased stored value
+      if (!user) {
+        user = await prisma.user.findFirst({
+          where: { walletAddress: String(req.user?.walletAddress || '').trim().toLowerCase() }
+        });
+      }
+
       if (user) {
         await prisma.approval.upsert({
           where: { escrowId_action_userId: { escrowId, action, userId: user.id } },
-          update: {}, // No update needed, just ensure it exists
+          update: {},
           create: { escrowId, action, userId: user.id }
         });
       }
     } catch (approvalError) {
-      // Log but don't fail - this is a best-effort operation
       console.warn(`[Nonce] Failed to create approval record: ${approvalError.message}`);
     }
 
@@ -663,6 +741,9 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
     const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
     const trueChainEscrowId = await vaultContract.escrowId();
+
+    const network = await provider.getNetwork();
+    const actualChainId = network.chainId;
 
     const msgHash = buildMsgHash(trueChainEscrowId, action, session.signingBitmap, vaultAddr, session.chainId);
     const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
@@ -733,9 +814,9 @@ router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => 
     
     // ─── Aggregation: Choose Additive or SSS ──────────────────────────────────── 
     // Option 1: ADDITIVE (current) - z = z_1 + z_2 + ... (no Lagrange) 
-    // const z_agg = aggregateZShares(Object.values(session.zShares)); 
+    const z_agg = aggregateZShares(Object.values(session.zShares)); 
     // Option 2: SSS (Shamir Secret Sharing) - z = (z_1*λ_1 + z_2*λ_2 + ... + z_n*λ_n) mod ORDER 
-    const z_agg = aggregateZSharesWithLagrange(session.zShares, ROLE_TO_ID);
+    //const z_agg = aggregateZSharesWithLagrange(session.zShares, ROLE_TO_ID);
 
     session.completedActions.push(session.signingAction);
     session.nonces = {};
@@ -776,8 +857,8 @@ router.get('/:id/aggregate-key', async (req, res) => {
   if (!session) return;
 
   // Lấy khóa tổng quát của cả 7 người 
-  const allRoles = [...VALID_ROLES];
-  const pkAgg = aggregatePubKeysForRoles(session.pubKeys, allRoles);
+  const happyPathRoles = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'];
+  const pkAgg = getPkAggForRoles(session, happyPathRoles);
 
   return res.json({
     ok: true,

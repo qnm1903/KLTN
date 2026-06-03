@@ -58,19 +58,18 @@ function normalizeDisplayAmount(amount) {
 
 // Helper: Validate signerBitmap - buyer OR seller must be included
 function validateSignerBitmap(bitmap) {
-  // Check minimum signers (5)
+  const ALLOWED_BITS_MASK = 0x7f;
+  const CORE_ROLE_MASK = 0x03;
+  const MIN_SIGNERS = 5;
+  const b = Number(bitmap);
+  if (!Number.isFinite(b)) return { valid: false, error: 'Invalid bitmap' };
+  if ((b & ~ALLOWED_BITS_MASK) !== 0) return { valid: false, error: 'Bitmap contains invalid bits' };
+
+  let temp = b;
   let count = 0;
-  let temp = bitmap;
-  while (temp) { count += temp & 1; temp >>= 1; }
-  if (count < 5) return { valid: false, error: `Need at least 5 signers, got ${count}` };
-
-  // Check core role (buyer or seller must be present)
-  const hasBuyer = (bitmap & 1) !== 0;
-  const hasSeller = (bitmap & 2) !== 0;
-  if (!hasBuyer && !hasSeller) {
-    return { valid: false, error: 'At least one core role (buyer or seller) must approve' };
-  }
-
+  while (temp) { temp &= temp - 1; count++; }
+  if (count < MIN_SIGNERS) return { valid: false, error: `Need at least ${MIN_SIGNERS} signers, got ${count}` };
+  if ((b & CORE_ROLE_MASK) === 0) return { valid: false, error: 'At least one core role (buyer or seller) must approve' };
   return { valid: true };
 }
 
@@ -118,16 +117,19 @@ export default function EscrowDetail() {
 
   // Check nonce state on mount to update UI
   useEffect(() => {
+    let isMounted = true;
     const checkNonceState = async () => {
       if (escrowId && selectedAction && activeRole && activeRole !== 'Unknown') {
         const nonceKey = `${escrowId}:${selectedAction}:${activeRole}`;
         const exists = await hasNonce(nonceKey);
-        console.log(`[EscrowDetail] Nonce state check: ${nonceKey} - ${exists ? 'EXISTS' : 'NOT EXISTS'}`);
-        // You can set a local state here to disable/enable buttons based on nonce existence
+        if (isMounted) {
+          console.log(`[EscrowDetail] Nonce state check: ${nonceKey} - ${exists ? 'EXISTS' : 'NOT EXISTS'}`);
+        }
       }
     };
     checkNonceState();
-  }, [escrowId, selectedAction, activeRole]);
+    return () => { isMounted = false; };
+  }, [escrowId, selectedAction, activeRole, hasNonce]);
 
   const hasSubmitted = activeRole !== 'Unknown' && signedNodes.includes(activeRole);
   const localPubKey = getPubKey(address);
@@ -1163,7 +1165,10 @@ const handleSubmitMyPubKey = useCallback(async () => {
 
         {/* KHỐI 5: LUỒNG KÝ ĐA PHẦN (TSS SIGNING ORCHESTRATION) */}
         {/* Điều kiện: Đã có Vault và (Các Role khác sẽ thấy ngay. Riêng Buyer chỉ thấy khi isConfirmed = true HOẶC db đã báo LOCKED) */}
-        {mediationAssigned && progress >= 7 && hasVaultAddress && !isSigningFlowClosed && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'LOCKED' || isVaultLockedOnChain) && (
+        {hasVaultAddress && !isSigningFlowClosed && (
+          ['nonce', 'z-share', 'ready'].includes(signingPhase) || 
+          (mediationAssigned && progress >= 7 && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'LOCKED' || isVaultLockedOnChain))
+        ) && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-blue-500/30 shadow-[0_0_30px_rgba(59,130,246,0.1)] mt-8">
             <h3 className="text-xl font-bold mb-6 text-blue-400 border-b border-slate-700 pb-4">TSS Signing Orchestration</h3>
         

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useMemo } from 'react';
 import { useSetAtom } from 'jotai';
 import { addSystemLogAtom } from './escrowStore';
 import { saveNonceRecord, getNonceRecord, clearNonceRecord } from '../../lib/storage';
@@ -75,7 +75,7 @@ export const useTssWorker = () => {
       }
     };
 
-    // Dọn dẹp Worker và giải phóng các Promise đang kẹt khi component unmount
+// Dọn dẹp Worker và giải phóng các Promise đang kẹt khi component unmount
     return () => {
       try {
         // Reject toàn bộ task đang chờ để tránh memory leak
@@ -86,13 +86,19 @@ export const useTssWorker = () => {
         });
         taskResolvers.current = {};
         
-        workerRef.current?.terminate();
+        // Ngắt liên kết nhận tin nhắn trước khi hủy luồng để tránh orphaned callbacks
+        if (workerRef.current) {
+          workerRef.current.onmessage = null;
+          workerRef.current.terminate();
+        }
         workerRef.current = null;
       } catch (e) {
         console.warn('[TSS Worker] Cleanup warning:', e);
       }
     };
   }, [addLog]); 
+
+  // Hàm gọi Worker dưới dạng Promise để dùng dễ dàng với async/await trong React
 
   // Hàm gọi Worker dưới dạng Promise để dùng dễ dàng với async/await trong React
   const executeWorkerTask = useCallback((action, payload) => {
@@ -111,19 +117,14 @@ export const useTssWorker = () => {
     });
   }, []);
 
-  return {
-    // Chuẩn hóa hàm export đúng Signing Happy Path 
+  return useMemo(() => ({
     computeNonce: async (nonceKey) => {
-      // Check if nonce already exists in IndexedDB - reuse it instead of generating new
       const existingNonceHex = await loadNonce(nonceKey);
       if (existingNonceHex) {
         console.log(`[TSS Worker Main] Reusing existing nonce from IndexedDB: ${nonceKey}`);
-        // Calculate R_x, R_y from existing nonce
-        const result = await executeWorkerTask('COMPUTE_NONCE_FROM_EXISTING', { nonceKey, nonceHex: existingNonceHex });
-        return result;
+        return await executeWorkerTask('COMPUTE_NONCE_FROM_EXISTING', { nonceKey, nonceHex: existingNonceHex });
       }
       
-      // No existing nonce - generate new one
       const result = await executeWorkerTask('COMPUTE_NONCE', { nonceKey });
       await persistNonce(nonceKey, result?.nonceHex);
       return result;
@@ -137,5 +138,5 @@ export const useTssWorker = () => {
       return result;
     },
     hasNonce
-  };
+  }), [loadNonce, executeWorkerTask, persistNonce, clearNonce, hasNonce]);
 };

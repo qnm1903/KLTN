@@ -2,6 +2,7 @@ import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { ethers } from 'ethers';
 import prisma from '../lib/prisma.js';
+import { deleteSession } from '../store/session.js';
 
 function parseToken(rawToken) {
   if (!rawToken || typeof rawToken !== 'string') return null;
@@ -83,12 +84,20 @@ export function setupSockets(server) {
     console.log('Client connected:', socket.id);
 
     // Cầu nối Worker -> Server -> Trình duyệt
-    socket.on('worker:mediators_selected', (payload) => {
+    socket.on('worker:mediators_selected', async (payload) => {
       try {
         const { escrowId, chainEscrowId, mediators } = payload || {};
         if (!escrowId || !mediators) return;
         console.log(`[socket] Nhận được mediators_selected từ Worker cho Escrow ${escrowId}`);
         io.to(escrowId).emit('mediators_selected', { escrowId, chainEscrowId, mediators });
+
+        // Xóa bỏ Session cũ trong RAM.
+        try { 
+          await deleteSession(escrowId); 
+          console.log(`[socket] Đã dọn dẹp Session Cache thành công cho Escrow ${escrowId}`); 
+        } catch (e) { 
+          console.warn(`[socket] Cảnh báo: Không thể xóa Session Cache: ${e?.message || e}`); 
+        }
       } catch (err) {
         console.error('[socket] Lỗi khi re-broadcasting:', err);
       }

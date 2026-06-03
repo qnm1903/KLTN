@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from 'react';
 import { useAtom, useSetAtom } from 'jotai';
+import { useAccount } from 'wagmi';
 import {
   signatureProgressAtom,
   signedNodesAtom,
@@ -31,6 +32,7 @@ function submittedRolesFromCollection(collection) {
 }
 
 export const useEscrowSync = (escrowId, escrowStatus) => {
+  const { address } = useAccount();
   const [, setProgress] = useAtom(signatureProgressAtom);
   const [, setSignedNodes] = useAtom(signedNodesAtom);
   const setStatus = useSetAtom(escrowStatusAtom);
@@ -200,6 +202,27 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
   }, [escrowId, escrowStatus, addLog, applyCollectionSnapshot]);
 
   const submitNonce = useCallback(async (escrowId, role, action, signerBitmap, R_x, R_y) => {
+    // Đảm bảo Session JWT khớp với Ví MetaMask hiện tại
+    const token = getStoredAccessToken();
+    if (!token) throw new Error('Yêu cầu xác thực: Vui lòng đăng nhập (SIWE) trước khi thực hiện.');
+
+    try {
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+        const tokenWallet = String(payload?.walletAddress || payload?.address || '').toLowerCase();
+        const connectedWallet = String(address || '').toLowerCase();
+        
+        if (tokenWallet && connectedWallet && tokenWallet !== connectedWallet) {
+          addLog({ message: `Auth mismatch: Phiên đăng nhập thuộc về ví ${tokenWallet.substring(0,6)}... Hãy đăng nhập lại!`, type: 'error' });
+          throw new Error('Lỗi đồng bộ Ví: Phiên SIWE không khớp với ví MetaMask hiện tại. Vui lòng F5 và đăng nhập lại.');
+        }
+      }
+    } catch (e) {
+      if (e.message.includes('Lỗi đồng bộ Ví')) throw e;
+      console.warn('[JWT Decode Warning]:', e);
+    }
+
     addLog({ message: `Submitting Nonce for action: ${action}...`, type: 'warning' });
     try {
       const { data } = await api.post(`/escrow/nonce`, { escrowId, role, action, signerBitmap, R_x, R_y });
@@ -229,7 +252,7 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
       }
       throw error;
     }
-  }, [addLog]);
+  }, [addLog, address]); 
 
   const submitZShare = useCallback(async (escrowId, role, signerBitmap, z) => {
     addLog({ message: `Submitting Z-Share...`, type: 'warning' });

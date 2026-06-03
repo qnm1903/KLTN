@@ -11,7 +11,7 @@ import {
   initIncrementalDKG,
   SESSION_TTL_MS
 } from '../crypto/dkg.js';
-import { aggregateNonces, computeChallenge, aggregateZShares, aggregateZSharesWithLagrange } from '../crypto/schnorr.js';
+import { aggregateNoncesWithLagrange, computeChallenge, aggregateZSharesWithLagrange } from '../crypto/schnorr.js';
 import { ethers } from 'ethers';
 import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-limit.js';
 import { authMiddleware } from '../middleware/auth.js';
@@ -199,18 +199,14 @@ async function checkSession(escrowId, res) {
           if (validation.valid) {
           try {
             const pkAgg = getPkAggForRoles(session, roles);
-            const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNonces(Object.values(session.nonces));
+            const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNoncesWithLagrange(session.nonces, ROLE_TO_ID);
             
             const vaultAddr = escrowDb.contractAddress || session.contractAddress;
             if (vaultAddr) {
-              const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-              const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
-              const trueChainEscrowId = await vaultContract.escrowId();
-
-              const network = await provider.getNetwork();
-              const actualChainId = network.chainId;
+              const vaultKey = await getVaultAggregateKey(vaultAddr);
+              assertSignerSetMatchesVault(pkAgg, vaultKey.pkAgg, roles);
               
-              const msgHash = buildMsgHash(trueChainEscrowId, firstNonce.action, session.signingBitmap, vaultAddr, session.chainId);
+              const msgHash = buildMsgHash(vaultKey.trueChainEscrowId, firstNonce.action, session.signingBitmap, vaultAddr, vaultKey.chainId);
               const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
               
               session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
@@ -234,6 +230,54 @@ async function checkSession(escrowId, res) {
 function buildMsgHash(escrowId, action, signerBitmap, contractAddress, chainId) {
   const id = escrowId.startsWith('0x') ? escrowId : ethers.id(escrowId);
   return ethers.solidityPackedKeccak256(['uint256', 'address', 'bytes32', 'string', 'uint8'], [BigInt(chainId).toString(), contractAddress, id, action, signerBitmap]);
+}
+
+function normalizeUint256Hex(value) {
+  return '0x' + BigInt(value).toString(16).padStart(64, '0').toLowerCase();
+}
+
+function samePkAgg(left, right) {
+  return normalizeUint256Hex(left.x) === normalizeUint256Hex(right.x) &&
+    normalizeUint256Hex(left.y) === normalizeUint256Hex(right.y);
+}
+
+async function getVaultAggregateKey(vaultAddr) {
+  if (!vaultAddr) {
+    const error = new Error('Vault contract address not found.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+  const vaultContract = new ethers.Contract(vaultAddr, [
+    'function escrowId() view returns (bytes32)',
+    'function pkAggX() view returns (uint256)',
+    'function pkAggY() view returns (uint256)'
+  ], provider);
+  const [trueChainEscrowId, pkAggX, pkAggY, network] = await Promise.all([
+    vaultContract.escrowId(),
+    vaultContract.pkAggX(),
+    vaultContract.pkAggY(),
+    provider.getNetwork()
+  ]);
+
+  return {
+    trueChainEscrowId,
+    chainId: network.chainId.toString(),
+    pkAgg: {
+      x: normalizeUint256Hex(pkAggX),
+      y: normalizeUint256Hex(pkAggY)
+    }
+  };
+}
+
+function assertSignerSetMatchesVault(pkAgg, deployedPkAgg, roles) {
+  const deployedKeyIsUnset = BigInt(deployedPkAgg.x) === 0n && BigInt(deployedPkAgg.y) === 0n;
+  if (deployedKeyIsUnset || samePkAgg(pkAgg, deployedPkAgg)) return;
+
+  const error = new Error(`Signer set [${roles.join(', ')}] does not match the aggregate key deployed in the vault. Restart Round 1 with the roles used for vault deployment.`);
+  error.statusCode = 409;
+  throw error;
 }
 
 function normalizePubKey(pubKeyHex) {
@@ -575,20 +619,14 @@ router.post('/nonce', authMiddleware, async (req, res) => {
           const validation = validateSignerBitmap(session.signingBitmap, roles);
           if (validation.valid) {
             try {
-              const pkAgg = getPkAggForRoles(session, roles);
-              const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNonces(Object.values(session.nonces));
-              
               const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
               const vaultAddr = dbEscrow?.contractAddress || session.contractAddress;
+              const pkAgg = getPkAggForRoles(session, roles);
+              const vaultKey = await getVaultAggregateKey(vaultAddr);
+              assertSignerSetMatchesVault(pkAgg, vaultKey.pkAgg, roles);
+              const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNoncesWithLagrange(session.nonces, ROLE_TO_ID);
               
-              const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-              const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
-              const trueChainEscrowId = await vaultContract.escrowId();
-
-              const network = await provider.getNetwork();
-              const actualChainId = network.chainId;
-              
-              const msgHash = buildMsgHash(trueChainEscrowId, action, session.signingBitmap, vaultAddr, session.chainId);
+              const msgHash = buildMsgHash(vaultKey.trueChainEscrowId, action, session.signingBitmap, vaultAddr, vaultKey.chainId);
               const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
               
               session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
@@ -607,6 +645,9 @@ router.post('/nonce', authMiddleware, async (req, res) => {
                 message: 'Nonce already submitted with same values. Round 1 now complete.'
               });
             } catch (challengeError) {
+              if (challengeError.statusCode) {
+                return res.status(challengeError.statusCode).json({ error: challengeError.message });
+              }
               console.warn(`[Nonce] Failed to auto-compute challenge: ${challengeError.message}`);
             }
           }
@@ -731,27 +772,22 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     session.signingRoles = roles;
 
     const pkAgg = getPkAggForRoles(session, roles);
-    const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNonces(Object.values(session.nonces));
 
     // VÁ LỖI: Lấy Vault thật chuẩn xác để băm chữ ký
     const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
     const vaultAddr = dbEscrow?.contractAddress || session.contractAddress;
+    const vaultKey = await getVaultAggregateKey(vaultAddr);
+    assertSignerSetMatchesVault(pkAgg, vaultKey.pkAgg, roles);
+    const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNoncesWithLagrange(session.nonces, ROLE_TO_ID);
 
     // Đọc trực tiếp ID thực sự của Két sắt từ Blockchain để băm chữ ký
-    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-    const vaultContract = new ethers.Contract(vaultAddr, ['function escrowId() view returns (bytes32)'], provider);
-    const trueChainEscrowId = await vaultContract.escrowId();
-
-    const network = await provider.getNetwork();
-    const actualChainId = network.chainId;
-
-    const msgHash = buildMsgHash(trueChainEscrowId, action, session.signingBitmap, vaultAddr, session.chainId);
+    const msgHash = buildMsgHash(vaultKey.trueChainEscrowId, action, session.signingBitmap, vaultAddr, vaultKey.chainId);
     const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
 
     console.log(`[TSS Round 2] Escrow: ${escrowId}`);
     console.log(`[TSS Round 2] Action: ${action}, Bitmap: ${session.signingBitmap}`);
-    console.log(`[TSS Round 2] Vault: ${vaultAddr}, ChainId: ${session.chainId}`);
-    console.log(`[TSS Round 2] escrowId (raw): ${trueChainEscrowId}`);
+    console.log(`[TSS Round 2] Vault: ${vaultAddr}, ChainId: ${vaultKey.chainId}`);
+    console.log(`[TSS Round 2] escrowId (raw): ${vaultKey.trueChainEscrowId}`);
     console.log(`[TSS Round 2] msgHash: ${msgHash}`);
     console.log(`[TSS Round 2] pkAgg: x=${pkAgg.x}, y=${pkAgg.y}`);
     console.log(`[TSS Round 2] R_addr: ${R_addr}, challenge (e): ${challenge}`);
@@ -765,6 +801,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
 
     return res.json({ ok: true, R_addr, challenge, msgHash, pkAgg, signerBitmap: session.signingBitmap });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
     if (error.message.includes('bad point')) return res.status(400).json({ error: 'Invalid point coordinates' });
     res.status(500).json({ error: error.message });
   }
@@ -778,6 +815,7 @@ router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => 
 
     const session = await checkSession(escrowId, res);
     if (!session || !session.round2Context) return res.status(400).json({ error: 'Round 1 not completed' });
+    if (!session.signingRoles?.includes(role)) return res.status(403).json({ error: `Role '${role}' did not participate in Round 1` });
 
     // Check signing timeout (6 hours)
     if (isSigningExpired(session)) {
@@ -812,11 +850,8 @@ router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => 
       return res.status(400).json({ error: `Invalid signer bitmap: ${validation.error}` });
     }
     
-    // ─── Aggregation: Choose Additive or SSS ──────────────────────────────────── 
-    // Option 1: ADDITIVE (current) - z = z_1 + z_2 + ... (no Lagrange) 
-    const z_agg = aggregateZShares(Object.values(session.zShares)); 
-    // Option 2: SSS (Shamir Secret Sharing) - z = (z_1*λ_1 + z_2*λ_2 + ... + z_n*λ_n) mod ORDER 
-    //const z_agg = aggregateZSharesWithLagrange(session.zShares, ROLE_TO_ID);
+    // SSS aggregation: z = (z_1*λ_1 + z_2*λ_2 + ... + z_n*λ_n) mod ORDER.
+    const z_agg = aggregateZSharesWithLagrange(session.zShares, ROLE_TO_ID);
 
     session.completedActions.push(session.signingAction);
     session.nonces = {};

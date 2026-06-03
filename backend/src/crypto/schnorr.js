@@ -49,6 +49,10 @@ function pointToAddress(xHex, yHex) {
   return ethers.computeAddress('0x04' + x + y);
 }
 
+function scalarForPointMul(value) {
+  return ((BigInt(value) % ORDER + ORDER) % ORDER).toString(16);
+}
+
 // ─── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -131,6 +135,43 @@ export function aggregateNonces(nonces) {
   }
 }
 
+export function aggregateNoncesWithLagrange(noncesByRole, roleToId) {
+  if (!noncesByRole || typeof noncesByRole !== 'object') {
+    throw new Error('noncesByRole is required');
+  }
+  if (!roleToId || typeof roleToId !== 'object') {
+    throw new Error('roleToId mapping is required');
+  }
+
+  const roles = Object.keys(noncesByRole);
+  if (roles.length === 0) throw new Error('aggregateNoncesWithLagrange: no nonces provided');
+
+  const participantIds = roles.map(role => {
+    const id = roleToId[role];
+    if (id === undefined) throw new Error(`Missing roleToId for role ${role}`);
+    return id;
+  });
+  const lagrangeCoeffs = computeLagrangeCoefficients(participantIds);
+
+  let aggregatePoint = null;
+  for (const role of roles) {
+    const nonce = noncesByRole[role];
+    const x = normalize64(nonce.R_x);
+    const y = normalize64(nonce.R_y);
+    if (!/^[0-9a-f]{64}$/i.test(x) || !/^[0-9a-f]{64}$/i.test(y)) {
+      throw new Error(`Invalid nonce point for role ${role}`);
+    }
+
+    const point = ec.keyFromPublic({ x, y }, 'hex').getPublic();
+    const weightedPoint = point.mul(scalarForPointMul(lagrangeCoeffs[roleToId[role]]));
+    aggregatePoint = aggregatePoint ? aggregatePoint.add(weightedPoint) : weightedPoint;
+  }
+
+  const R_x = '0x' + aggregatePoint.getX().toString(16).padStart(64, '0');
+  const R_y = '0x' + aggregatePoint.getY().toString(16).padStart(64, '0');
+  const R_addr = pointToAddress(R_x, R_y);
+  return { R_x, R_y, R_addr };
+}
 /**
  * Tính Schnorr challenge.
  * e = keccak256(R_addr || pkX || pkY || msgHash)
@@ -211,7 +252,7 @@ export function computeLagrangeCoefficients(participantIds) {
     }
 
     // λ_i = numerator / denominator mod ORDER
-    const lambda = (numerator * modInverse(denominator, ORDER)) % ORDER;
+    const lambda = ((numerator * modInverse(denominator, ORDER)) % ORDER + ORDER) % ORDER;
     coefficients[xi] = lambda;
   }
 
@@ -226,9 +267,10 @@ export function computeLagrangeCoefficients(participantIds) {
  * @returns {string} z (bytes32 hex)
  */
 export function aggregateZShares(zShares) {
-  const z_total = zShares
+  let z_total = zShares
     .map(z => BigInt(z.startsWith('0x') ? z : '0x' + z))
     .reduce((a, b) => (a + b) % ORDER, 0n);
+  z_total = (z_total + ORDER) % ORDER;
   return '0x' + z_total.toString(16).padStart(64, '0');
 }
 
@@ -302,7 +344,7 @@ export function aggregatePubKeysWithLagrange(pubKeysByRole, roles, roleToId) {
     const lambda = lagrangeCoeffs[id];
 
     // Multiply point by scalar lambda
-    const scaled = pt.mul(lambda);
+    const scaled = pt.mul(scalarForPointMul(lambda));
 
     if (aggPoint === null) aggPoint = scaled;
     else aggPoint = aggPoint.add(scaled);

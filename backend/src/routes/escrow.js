@@ -11,7 +11,7 @@ import {
   initIncrementalDKG,
   SESSION_TTL_MS
 } from '../crypto/dkg.js';
-import { aggregateNoncesWithLagrange, computeChallenge, aggregateZSharesWithLagrange } from '../crypto/schnorr.js';
+import { aggregateNoncesWithLagrange, computeChallenge, aggregateZSharesWithLagrange, aggregatePubKeysWithLagrange } from '../crypto/schnorr.js';
 import { ethers } from 'ethers';
 import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-limit.js';
 import { authMiddleware } from '../middleware/auth.js';
@@ -198,7 +198,7 @@ async function checkSession(escrowId, res) {
           const validation = validateSignerBitmap(session.signingBitmap, roles);
           if (validation.valid) {
           try {
-            const pkAgg = getPkAggForRoles(session, roles);
+            const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, roles, ROLE_TO_ID);
             const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNoncesWithLagrange(session.nonces, ROLE_TO_ID);
             
             const vaultAddr = escrowDb.contractAddress || session.contractAddress;
@@ -621,7 +621,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
             try {
               const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
               const vaultAddr = dbEscrow?.contractAddress || session.contractAddress;
-              const pkAgg = getPkAggForRoles(session, roles);
+              const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, roles, ROLE_TO_ID);
               const vaultKey = await getVaultAggregateKey(vaultAddr);
               assertSignerSetMatchesVault(pkAgg, vaultKey.pkAgg, roles);
               const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNoncesWithLagrange(session.nonces, ROLE_TO_ID);
@@ -771,7 +771,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     if (!validation.valid) return res.status(403).json({ error: validation.error });
     session.signingRoles = roles;
 
-    const pkAgg = getPkAggForRoles(session, roles);
+    const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, roles, ROLE_TO_ID);
 
     // VÁ LỖI: Lấy Vault thật chuẩn xác để băm chữ ký
     const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
@@ -891,10 +891,15 @@ router.get('/:id/aggregate-key', async (req, res) => {
   const session = await checkSession(req.params.id, res);
   if (!session) return;
 
-  // Lấy khóa tổng quát của cả 7 người 
-  const happyPathRoles = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'];
-  const pkAgg = getPkAggForRoles(session, happyPathRoles);
-
+  let targetRoles = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'];
+  
+  // Nếu có query truyền lên từ Frontend (dùng cho luồng Dispute) thì lấy theo query
+  if (req.query.roles) {
+    const parsed = req.query.roles.split(',').map(r => r.trim());
+    if (parsed.length === 5) targetRoles = parsed;
+  }
+  
+  const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, targetRoles, ROLE_TO_ID);
   return res.json({
     ok: true,
     pkAggRelease: pkAgg,  pkAggReleaseCoords:  [pkAgg.x, pkAgg.y],

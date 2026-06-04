@@ -115,6 +115,10 @@ export default function EscrowDetail() {
     return resolveRoleFromEscrow(escrow, address);
   }, [escrow, address]);
 
+  // Khóa cứng tập hợp người ký hợp lệ để tránh lỗi Lagrange Mismatch
+  const ALLOWED_SIGNERS = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'];
+  const isAllowedSigner = ALLOWED_SIGNERS.includes(activeRole);
+
   // Check nonce state on mount to update UI
   useEffect(() => {
     let isMounted = true;
@@ -1128,6 +1132,15 @@ const handleSubmitMyPubKey = useCallback(async () => {
           return (
             <section className={`p-6 rounded-2xl border shadow-xl mt-6 flex flex-col md:flex-row gap-4 justify-center items-center transition-all ${isResolved ? 'bg-indigo-900/40 border-indigo-500/50' : 'bg-slate-800 border-slate-700'}`}>
               
+              {/* UI Blocker cho Mediator 4 và 5 */}
+              {isMediator && !isAllowedSigner && (
+                <div className="w-full md:w-auto md:mr-auto bg-yellow-900/30 border border-yellow-600 p-3 rounded mb-2">
+                  <p className="text-yellow-300 text-sm">
+                    ⚠️ Not required for Happy Path — only Mediator 1, 2, 3 can sign.
+                  </p>
+                </div>
+              )}
+              
               {/* Context Banner for Dispute Phase */}
               {isResolved && (
                 <div className="w-full text-center md:w-auto md:mr-auto">
@@ -1198,8 +1211,15 @@ const handleSubmitMyPubKey = useCallback(async () => {
                 <div className="w-full bg-slate-900 rounded-full h-2">
                   <div className="bg-emerald-500 h-2 rounded-full transition-all duration-500" style={{ width: `${signingProgress.percentage || 0}%` }}></div>
                 </div>
-                <button onClick={handleSubmitZShare} className="w-full bg-emerald-600 hover:bg-emerald-500 py-3 rounded-lg font-bold text-white shadow-lg">
-                  Compute & Submit Z-Share
+                <button 
+                  onClick={handleSubmitZShare} 
+                  disabled={!isAllowedSigner}
+                  className={`w-full py-3 rounded-lg font-bold text-white shadow-lg transition-colors
+                    ${!isAllowedSigner 
+                      ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed' 
+                      : 'bg-emerald-600 hover:bg-emerald-500'}`}
+                >
+                  { !isAllowedSigner ? 'Not authorized to sign (Mediator 4/5)' : 'Compute & Submit Z-Share' }
                 </button>
               </div>
             )}

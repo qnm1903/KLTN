@@ -53,8 +53,10 @@ self.onmessage = async (event) => {
         nonceByKey.set(payload.nonceKey, existing_k);
 
         // Calculate R = k * G from existing nonce
-        const keyPair = ec.keyFromPrivate(existing_k.toString(16), 'hex');
+        const existing_k_hex = existing_k.toString(16).padStart(64, '0');
+        const keyPair = ec.keyFromPrivate(existing_k_hex, 'hex');
         const pubPoint = keyPair.getPublic();
+
         const R_x = '0x' + pubPoint.getX().toString(16).padStart(64, '0');
         const R_y = '0x' + pubPoint.getY().toString(16).padStart(64, '0');
 
@@ -100,9 +102,39 @@ self.onmessage = async (event) => {
         }
 
         // 3. Tính z_i = (k_i + e * x_i) mod ORDER
-        const z = (k_i + (e * x_i)) % ORDER;
+        const e_mod = e % ORDER;
+        const x_mod = x_i % ORDER;
+        const z = (k_i + ((e_mod * x_mod) % ORDER)) % ORDER;
+        
         const zHex = '0x' + z.toString(16).padStart(64, '0');
 
+        // ------------------ LOCAL MATH CHECK ------------------
+        // Kiểm toán ngay tại trình duyệt xem z_i vừa sinh ra có khớp với R_i và PK_i không
+        try {
+          const G = ec.g;
+          const pkPoint = ec.keyFromPrivate(x_i.toString(16).padStart(64, '0'), 'hex').getPublic();
+          const RPoint = ec.keyFromPrivate(k_i.toString(16).padStart(64, '0'), 'hex').getPublic();
+          
+          const zG = G.mul(z.toString(16));
+          const ePK = pkPoint.mul(e_mod.toString(16));
+          const R_plus_ePK = RPoint.add(ePK);
+
+          const zGx = zG.getX().toString(16);
+          const zGy = zG.getY().toString(16);
+          const Rx_plus_ePKx = R_plus_ePK.getX().toString(16);
+          const Ry_plus_ePKy = R_plus_ePK.getY().toString(16);
+
+          if (zGx === Rx_plus_ePKx && zGy === Ry_plus_ePKy) {
+            console.log(`✅ [LOCAL MATH CHECK] Hoàn hảo! Trình duyệt này tính đúng: z_i*G == R_i + e*PK_i`);
+          } else {
+            console.error(`❌ [LOCAL MATH CHECK] LỖI NGHIÊM TRỌNG TẠI PROFILE NÀY!`);
+            console.error(`Phương trình toán học bị phá vỡ. Private Key hoặc Nonce đang dùng không khớp với Public Key đã nộp!`);
+          }
+        } catch (mathErr) {
+          console.error(`❌ [LOCAL MATH CHECK] Lỗi tính toán xác minh:`, mathErr);
+        }
+        // ------------------------------------------------------
+        
         // Xóa nonce ngay sau khi dùng để tránh reuse nonce giữa các phiên ký
         nonceByKey.delete(nonceKey);
 

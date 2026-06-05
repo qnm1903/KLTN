@@ -19,7 +19,7 @@ import {
 } from '../features/escrow/escrowStore';
 import { useEscrowSync } from '../features/escrow/useEscrowSync';
 import { useSessionRecovery } from '../features/escrow/useSessionRecovery';
-import { useContractCall } from '../features/escrow/useContractCall'; 
+import { useContractCall } from '../features/escrow/useContractCall';
 import { useTssWorker } from '../features/escrow/useTssWorker'; // Tích hợp Phase 5: Web Worker
 
 // --- IMPORT API & STORAGE ---
@@ -56,8 +56,8 @@ function normalizeDisplayAmount(amount) {
   return String(amount);
 }
 
-// Helper: Validate signerBitmap - buyer OR seller must be included
-function validateSignerBitmap(bitmap) {
+// Helper: Validate signerBitmap
+function validateSignerBitmap(bitmap, action) {
   const ALLOWED_BITS_MASK = 0x7f;
   const CORE_ROLE_MASK = 0x03;
   const MIN_SIGNERS = 5;
@@ -69,7 +69,13 @@ function validateSignerBitmap(bitmap) {
   let count = 0;
   while (temp) { temp &= temp - 1; count++; }
   if (count < MIN_SIGNERS) return { valid: false, error: `Need at least ${MIN_SIGNERS} signers, got ${count}` };
-  if ((b & CORE_ROLE_MASK) === 0) return { valid: false, error: 'At least one core role (buyer or seller) must approve' };
+  
+  if (action === 'release' || action === 'split') {
+    if ((b & CORE_ROLE_MASK) !== CORE_ROLE_MASK) {
+      return { valid: false, error: `Action '${action}' requires both buyer and seller to approve` };
+    }
+  }
+
   return { valid: true };
 }
 
@@ -115,8 +121,7 @@ export default function EscrowDetail() {
     return resolveRoleFromEscrow(escrow, address);
   }, [escrow, address]);
 
-  // Khóa cứng tập hợp người ký hợp lệ để tránh lỗi Lagrange Mismatch
-  const ALLOWED_SIGNERS = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'];
+  const ALLOWED_SIGNERS = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
   const isAllowedSigner = ALLOWED_SIGNERS.includes(activeRole);
 
   // Check nonce state on mount to update UI
@@ -141,7 +146,7 @@ export default function EscrowDetail() {
   const isVaultTerminalOnChain = onChainVaultStatus !== null && [2, 3].includes(Number(onChainVaultStatus));
   const isEscrowTerminal = ['RELEASED', 'REFUNDED'].includes(String(escrow?.status || '').toUpperCase());
   const isSigningFlowClosed = isVaultTerminalOnChain || isEscrowTerminal;
-  
+
   // Cờ kiểm tra tính độc quyền UI (Mutually Exclusive)
   const hasVaultAddress = Boolean(escrow?.contractAddress || escrow?.vaultAddress);
 
@@ -238,7 +243,7 @@ export default function EscrowDetail() {
   }, [escrow?.contractAddress, escrow?.vaultAddress]);
 
   // --- CÁC HÀM XỬ LÝ HÀNH ĐỘNG ---
-const handleSubmitMyPubKey = useCallback(async () => {
+  const handleSubmitMyPubKey = useCallback(async () => {
     if (activeRole === 'Unknown') return alert('Cannot resolve your escrow role.');
     if (!localPubKey) return alert('Public key not found. Please generate your key first.');
 
@@ -262,21 +267,21 @@ const handleSubmitMyPubKey = useCallback(async () => {
     if (isEscrowLoading || isRecovering) return;
 
     if (hasVaultAddress) {
-      return; 
+      return;
     }
 
     const escrowStatus = String(escrow?.status || '').toUpperCase();
     const dkgAllowed = ['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED'].includes(escrowStatus);
-    
+
     if (!dkgAllowed) return;
     if (activeRole === 'Unknown' || !localPubKey || hasSubmitted || isSubmittingKey || progress >= 7 || autoSubmitAttempted.current) return;
-    
+
     autoSubmitAttempted.current = true;
     handleSubmitMyPubKey();
-     
+
   }, [isEscrowLoading, isRecovering, escrow?.status, activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey]);
 
-  
+
   const lastLogRef = useRef(0);
 
   useEffect(() => {
@@ -299,7 +304,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
       console.group('🚀 [STATE MONITOR] THEO DÕI DEADLOCK');
       console.table(table);
       console.groupEnd();
-    } catch (err) {}
+    } catch (err) { }
   }, [progress, escrow?.status, escrow?.escrowMediators?.length, activeRole, localPubKey, hasSubmitted]);
 
   // --- DEBOUNCE REFRESH: Gom nhóm các API request bị spam ---
@@ -341,7 +346,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
       socket.off('mediators_selected', handleMediatorsSelected);
       if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
     };
-  }, [escrowId, scheduleEscrowRefresh]); 
+  }, [escrowId, scheduleEscrowRefresh]);
 
   // Ép buộc kết nối phòng Socket thông qua Guard mới (Tránh duplicate stream)
   useEffect(() => {
@@ -362,7 +367,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
     };
   }, [escrowId, addLog]);
 
-// --- KHỐI XỬ LÝ DEPLOY TỪ VÍ BUYER ---
+  // --- KHỐI XỬ LÝ DEPLOY TỪ VÍ BUYER ---
   const [isDeploying, setIsDeploying] = useState(false);
 
   const handleDeploy = useCallback(async () => {
@@ -385,12 +390,12 @@ const handleSubmitMyPubKey = useCallback(async () => {
       const mediatorAddrs = mediatorsRows.map((r) => normalizeAddress(r.mediator?.walletAddress || r.mediatorAddress));
 
       // 2) Lấy khóa tổng hợp pkAgg đã được sinh ra từ bước DKG
-      const { data: agg } = await api.get(`/escrow/${escrowId}/aggregate-key`);
-      const coords = agg?.pkAggCoords || agg?.pkAggReleaseCoords; 
+      const { data: agg } = await api.get(`/escrow/${escrowId}/aggregate-key?roles=buyer,seller,mediator1,mediator2,mediator3,mediator4,mediator5`);
+      const coords = agg?.pkAggCoords || agg?.pkAggReleaseCoords;
       if (!coords || coords.length !== 2) {
         throw new Error('Aggregated public key missing. DKG not completed.');
       }
-      
+
       const x = BigInt(coords[0]);
       const y = BigInt(coords[1]);
       if (x === 0n || y === 0n) throw new Error('Aggregated key invalid (zero).');
@@ -432,7 +437,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
         addLog({ message: 'Giao dịch đã gửi nhưng chưa lấy được hash. Vui lòng chờ Socket cập nhật.', type: 'warning' });
       } else {
         addLog({ message: `Đã gửi TX: ${txHash}. Đang chờ Blockchain xác nhận (15-30s)...`, type: 'info' });
-        
+
         const receipt = await waitForTx(txHash);
 
         if (receipt && receipt.status === 0) {
@@ -442,7 +447,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
         addLog({ message: `✅ Block mined (Block #${receipt.blockNumber}). Syncing with database...`, type: 'success' });
 
         await api.post('/escrow/record-deploy', { escrowId, txHash });
-        
+
         addLog({ message: 'Deploy recorded successfully. Updating UI...', type: 'success' });
 
         const token = getStoredAccessToken();
@@ -460,10 +465,21 @@ const handleSubmitMyPubKey = useCallback(async () => {
         }
       }
     } catch (err) {
-      // Xóa bỏ đoạn Fallback reload ở đây, chỉ in log lỗi
       console.error('[handleDeploy] Lỗi tàn khốc:', err);
       const msg = err?.response?.data?.error || err?.message || String(err);
-      addLog({ message: `Lỗi Deploy: ${msg}`, type: 'error' });
+      // Nếu DB đã có contractAddress (deploy trước đó thành công nhưng UI chưa refresh),
+      // tự động refresh state để UI hiển thị đúng thay vì kẹt ở Bước 1
+      if (err?.response?.status === 409) {
+        addLog({ message: 'Hợp đồng đã được deploy trước đó. Đang cập nhật UI...', type: 'warning' });
+        try {
+          const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+          setEscrow(fresh);
+        } catch {
+          addLog({ message: `Lỗi Deploy: ${msg}`, type: 'error' });
+        }
+      } else {
+        addLog({ message: `Lỗi Deploy: ${msg}`, type: 'error' });
+      }
     } finally {
       setIsDeploying(false);
     }
@@ -511,7 +527,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
       try {
         const { data: fresh } = await api.get(`/escrows/${escrowId}`);
         setEscrow(fresh);
-        
+
         try {
           const onChain = await getVaultStatus(fresh.contractAddress || fresh.vaultAddress);
           setOnChainVaultStatus(Number(onChain));
@@ -540,11 +556,11 @@ const handleSubmitMyPubKey = useCallback(async () => {
       } else if (typeof val.toString === 'function') {
         hex = val.toString(16);  // BN.js: BẮT BUỘC TRUYỀN SỐ 16 ĐỂ LẤY HEX
       }
-    } 
+    }
     // Nếu nó là BigInt của JS
     else if (typeof val === 'bigint' || typeof val === 'number') {
       hex = val.toString(16);
-    } 
+    }
     // Nếu nó đã là chuỗi
     else if (typeof val === 'string') {
       hex = val;
@@ -567,7 +583,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
     try {
       const { data } = await api.get(`/escrow/${escrowId}/approvals?action=${action}`);
       setApprovalStatus(data);
-      
+
       if (!data.isValid) {
         addLog({ message: `⚠️ Approval validation: ${data.validationError}`, type: 'warning' });
       } else {
@@ -614,24 +630,48 @@ const handleSubmitMyPubKey = useCallback(async () => {
       addLog({ message: `Backend confirmed signerBitmap: ${actualSignerBitmap}`, type: 'info' });
 
       // If Round 1 is already complete, set nonceRound1 atom and transition to Round 2
+      // ── NONCE MISMATCH GUARD ─────────────────────────────────────────────────────
+      // `existingNonce` is returned whenever the backend already stored a DIFFERENT
+      // nonce for our role. This happens when IndexedDB was cleared between Round 1
+      // and Round 2 (e.g. page refresh, browser storage clear).
+      //
+      // The private scalar k_i is NEVER sent to the backend and is unrecoverable once
+      // IndexedDB is wiped. If we proceed, z_i = k_new + e * x_i will be computed
+      // with a k that does NOT match the R already baked into the challenge 'e'.
+      // The on-chain Schnorr check will always fail with InvalidSignature.
+      //
+      // Correct recovery: clear the wrong k_new from IndexedDB, reset the backend
+      // signing session, and ask all participants to restart Round 1.
+      if (nonceResponse.existingNonce) {
+        addLog({
+          message:
+            '⚠️ NONCE MISMATCH DETECTED: Your signing nonce (k_i) was lost from local storage. ' +
+            'A new nonce was generated but it conflicts with the one already registered in the session. ' +
+            'The signing session must be reset — all participants will need to restart Round 1.',
+          type: 'error'
+        });
+        // Remove the wrong nonce we just saved so it cannot be accidentally reused.
+        if (clearNonce) await clearNonce(nonceKey);
+        // Reset the backend session so other participants can restart cleanly too.
+        try {
+          await resetSigning(action, 'Nonce lost from IndexedDB — nonce mismatch with backend session');
+          addLog({ message: 'Signing session has been reset. Please coordinate with all participants to restart Round 1.', type: 'warning' });
+        } catch (resetErr) {
+          addLog({ message: `⚠️ Auto-reset failed (${resetErr.message}). Please reset manually via the admin panel.`, type: 'warning' });
+        }
+        return; // Do NOT fall through to Round 2 with an invalid nonce
+      }
+      // ─────────────────────────────────────────────────────────────────────────────
+
       if (nonceResponse.state === 'round2_ready' && nonceResponse.round2Context) {
         setNonceRound1(nonceResponse.round2Context);
         setSigningPhase('z-share');
         addLog({ message: `Round 1 already complete. You can proceed to Round 2.`, type: 'success' });
       }
-      
-      // If backend reports nonce mismatch, clear local nonce and warn user
-      if (nonceResponse.state === 'round1_in_progress' && nonceResponse.existingNonce) {
-        const nonceKey = buildNonceKey(action);
-        if (nonceKey) {
-          await clearNonce(nonceKey);
-          addLog({ message: `⚠️ Local nonce cleared. All participants must restart signing with fresh nonces.`, type: 'error' });
-        }
-      }
     } catch (error) {
       const status = error.response?.status;
       const exactError = error.response?.data?.error || error.message;
-      
+
       // Handle 409 conflict - different action or bitmap in progress
       if (status === 409) {
         addLog({ message: `⚠️ ${exactError}`, type: 'warning' });
@@ -667,25 +707,37 @@ const handleSubmitMyPubKey = useCallback(async () => {
       const actualSignerBitmap = nonceResponse.signerBitmap;
       addLog({ message: `Backend confirmed signerBitmap: ${actualSignerBitmap}`, type: 'info' });
 
+      // ── NONCE MISMATCH GUARD ────────────────────────────────────────────────
+      // Same guard as handleStartRelease — see inline comment there for full explanation.
+      if (nonceResponse.existingNonce) {
+        addLog({
+          message:
+            '⚠️ NONCE MISMATCH DETECTED: Your signing nonce (k_i) was lost from local storage. ' +
+            'A new nonce was generated but it conflicts with the one already registered in the session. ' +
+            'The signing session must be reset — all participants will need to restart Round 1.',
+          type: 'error'
+        });
+        if (clearNonce) await clearNonce(nonceKey);
+        try {
+          await resetSigning(action, 'Nonce lost from IndexedDB — nonce mismatch with backend session');
+          addLog({ message: 'Signing session has been reset. Please coordinate with all participants to restart Round 1.', type: 'warning' });
+        } catch (resetErr) {
+          addLog({ message: `⚠️ Auto-reset failed (${resetErr.message}). Please reset manually via the admin panel.`, type: 'warning' });
+        }
+        return;
+      }
+      // ────────────────────────────────────────────────────────────────────────
+
       // If Round 1 is already complete, set nonceRound1 atom and transition to Round 2
       if (nonceResponse.state === 'round2_ready' && nonceResponse.round2Context) {
         setNonceRound1(nonceResponse.round2Context);
         setSigningPhase('z-share');
         addLog({ message: `Round 1 already complete. You can proceed to Round 2.`, type: 'success' });
       }
-      
-      // If backend reports nonce mismatch, clear local nonce and warn user
-      if (nonceResponse.state === 'round1_in_progress' && nonceResponse.existingNonce) {
-        const nonceKey = buildNonceKey(action);
-        if (nonceKey) {
-          await clearNonce(nonceKey);
-          addLog({ message: `⚠️ Local nonce cleared. All participants must restart signing with fresh nonces.`, type: 'error' });
-        }
-      }
     } catch (error) {
       const status = error.response?.status;
       const exactError = error.response?.data?.error || error.message;
-      
+
       // Handle 409 conflict - different action or bitmap in progress
       if (status === 409) {
         addLog({ message: `⚠️ ${exactError}`, type: 'warning' });
@@ -699,7 +751,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
   const handleRaiseDispute = async () => {
     try {
       const reasonInput = window.prompt("Please enter the reason for the dispute:", "Product does not match description");
-      if (reasonInput === null) return; 
+      if (reasonInput === null) return;
       const reason = reasonInput.trim() || "No specific reason provided";
       const urlSegments = window.location.pathname.split('/');
       const safeEscrowId = urlSegments[urlSegments.length - 1];
@@ -723,7 +775,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
       const disputeId = response.data?.id || response.data?.disputeId;
 
       addLog({ message: '✅ Dispute raised successfully. Mediators are inherited.', type: 'success' });
-      
+
       setTimeout(() => {
         window.location.href = `/disputes/${disputeId || safeEscrowId}`;
       }, 1500);
@@ -744,19 +796,19 @@ const handleSubmitMyPubKey = useCallback(async () => {
       if (!nonceRound1?.challenge) {
         throw new Error('❌ Missing Round 1 challenge from backend - please run Round 1 first');
       }
-      
+
       // Get signerBitmap from Round 1 response (from backend)
       const signerBitmap = nonceRound1.signerBitmap;
       if (signerBitmap === undefined) {
         throw new Error('❌ Missing signerBitmap from Round 1 response');
       }
-      
+
       // Validate signerBitmap before submitting
-      const validation = validateSignerBitmap(signerBitmap, []);
+      const validation = validateSignerBitmap(signerBitmap, selectedAction);
       if (!validation.valid) {
         throw new Error(`❌ Invalid signerBitmap: ${validation.error}`);
       }
-      
+
       // Step 2: Lấy private share từ session storage hoặc unlock từ bản mã hóa
       let privateKeyHex = getPrivKey(address);
       if (!privateKeyHex) {
@@ -769,7 +821,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
       if (!privateKeyHex) {
         throw new Error('❌ Missing private share in this browser session - import and unlock it first');
       }
-      
+
       // Step 3: Truyền REAL crypto data vào Worker (không còn fallback values)
       const challengeHex = nonceRound1.challenge;
       const nonceKey = buildNonceKey(selectedAction);
@@ -778,10 +830,10 @@ const handleSubmitMyPubKey = useCallback(async () => {
       const { z } = await computeZShare(privateKeyHex, challengeHex, nonceKey);
 
       clearPrivKey(address);
-      
+
       addLog({ message: `✅ Round 2 Z-Share computed successfully with real challenge: ${challengeHex}`, type: 'info' });
       addLog({ message: `📝 Submitting Z-Share with signerBitmap: ${signerBitmap}`, type: 'info' });
-      
+
       await submitZShare(escrowId, activeRole, signerBitmap, z);
     } catch (error) {
       const errorMessage = String(error?.message || 'Unknown error');
@@ -794,32 +846,32 @@ const handleSubmitMyPubKey = useCallback(async () => {
 
   // Hàm gọi Smart Contract sau khi có bộ chữ ký tổng hợp
   const handleExecuteOnChain = async () => {
-  try {
-    if (isSigningFlowClosed) {
-      throw new Error('Execution is blocked because this vault is already finalized');
-    }
-    if (!aggregatedSignature) throw new Error("Missing aggregated signature");
+    try {
+      if (isSigningFlowClosed) {
+        throw new Error('Execution is blocked because this vault is already finalized');
+      }
+      if (!aggregatedSignature) throw new Error("Missing aggregated signature");
 
-    // Lấy địa chỉ từ state escrow của trang web làm phương án dự phòng
-    const backupAddress = escrow?.contractAddress || escrow?.vaultAddress;
+      // Lấy địa chỉ từ state escrow của trang web làm phương án dự phòng
+      const backupAddress = escrow?.contractAddress || escrow?.vaultAddress;
 
-    // Truyền thêm backupAddress vào hàm gọi
-    await executeTssAction(selectedAction, aggregatedSignature, backupAddress);
+      // Truyền thêm backupAddress vào hàm gọi
+      await executeTssAction(selectedAction, aggregatedSignature, backupAddress);
 
-  } catch (error) {
-    addLog({ message: `On-chain execution failed: ${error.message}`, type: 'error' });
+    } catch (error) {
+      addLog({ message: `On-chain execution failed: ${error.message}`, type: 'error' });
 
-    // If signature verification failed, reset signing session
-    if (error.message?.includes('InvalidSignature') || error.message?.includes('signature')) {
-      addLog({ message: `⚠️ InvalidSignature detected. Resetting signing session...`, type: 'error' });
-      try {
-        await resetSigning(selectedAction, 'InvalidSignature on-chain');
-      } catch (resetError) {
-        addLog({ message: `Failed to reset signing: ${resetError.message}`, type: 'error' });
+      // If signature verification failed, reset signing session
+      if (error.message?.includes('InvalidSignature') || error.message?.includes('signature')) {
+        addLog({ message: `⚠️ InvalidSignature detected. Resetting signing session...`, type: 'error' });
+        try {
+          await resetSigning(selectedAction, 'InvalidSignature on-chain');
+        } catch (resetError) {
+          addLog({ message: `Failed to reset signing: ${resetError.message}`, type: 'error' });
+        }
       }
     }
-  }
-};
+  };
 
   // --- RENDER LUỒNG RECOVERY ---
   if (isRecovering || isEscrowLoading) {
@@ -834,13 +886,13 @@ const handleSubmitMyPubKey = useCallback(async () => {
   }
 
   const mediationAssigned = ['LOCKED', 'FUNDED', 'DISPUTED', 'VOTING', 'RESOLVED'].includes(
-  String(escrow?.status || '').toUpperCase()
+    String(escrow?.status || '').toUpperCase()
   );
 
   // --- RENDER GIAO DIỆN CHÍNH ---
   return (
     <div className="min-h-screen bg-slate-900 text-slate-50 font-sans pb-20">
-      
+
       {/* NAVBAR */}
       <nav className="h-20 bg-slate-800 flex items-center justify-between px-8 shadow-md border-b border-slate-700">
         <h1 className="text-2xl font-bold bg-linear-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
@@ -865,7 +917,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
             </button>
           </div>
         )}
-        
+
         {!localPubKey && address && (
           <div className="bg-red-900/50 border-2 border-red-500 p-6 rounded-xl shadow-[0_0_20px_rgba(239,68,68,0.3)] flex flex-col items-center gap-3">
             <h3 className="text-red-400 font-bold text-xl uppercase tracking-widest">⚠️ Missing Local Keypair</h3>
@@ -889,7 +941,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
                 <span className="text-sm text-slate-400">Loading...</span>
               )}
             </div>
-            
+
             {approvalStatus ? (
               <div className="space-y-3">
                 {/* Validation Status */}
@@ -899,21 +951,21 @@ const handleSubmitMyPubKey = useCallback(async () => {
                       {approvalStatus.isValid ? '✅' : '❌'}
                     </span>
                     <span className={approvalStatus.isValid ? 'text-green-300' : 'text-red-300'}>
-                      {approvalStatus.isValid 
-                        ? 'Valid: Ready to execute' 
+                      {approvalStatus.isValid
+                        ? 'Valid: Ready to execute'
                         : `Invalid: ${approvalStatus.validationError || 'Unknown error'}`}
                     </span>
                   </div>
                 </div>
-                
+
                 {/* Signer Bitmap Info */}
                 <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
                   <p className="text-slate-400 text-sm">Signer Bitmap</p>
-                  <p className="text-white font-mono text-lg">{approvalStatus.expectedSignerBitmap} 
+                  <p className="text-white font-mono text-lg">{approvalStatus.expectedSignerBitmap}
                     <span className="text-slate-500 text-sm ml-2">(Binary: {approvalStatus.expectedSignerBitmap.toString(2).padStart(7, '0')})</span>
                   </p>
                 </div>
-                
+
                 {/* Approved Roles */}
                 <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
                   <p className="text-slate-400 text-sm mb-2">Approved Signers ({approvalStatus.approvedRoles.length}/7)</p>
@@ -922,15 +974,14 @@ const handleSubmitMyPubKey = useCallback(async () => {
                       const isApproved = approvalStatus.approvedRoles.includes(role);
                       const isCore = role === 'buyer' || role === 'seller';
                       return (
-                        <span 
+                        <span
                           key={role}
-                          className={`px-3 py-1 rounded-full text-sm font-medium border ${
-                            isApproved 
-                              ? isCore 
-                                ? 'bg-purple-600/30 border-purple-500 text-purple-300' 
+                          className={`px-3 py-1 rounded-full text-sm font-medium border ${isApproved
+                              ? isCore
+                                ? 'bg-purple-600/30 border-purple-500 text-purple-300'
                                 : 'bg-blue-600/30 border-blue-500 text-blue-300'
                               : 'bg-slate-700/50 border-slate-600 text-slate-500'
-                          }`}
+                            }`}
                         >
                           {role} {isApproved ? '✓' : '○'}
                         </span>
@@ -938,12 +989,12 @@ const handleSubmitMyPubKey = useCallback(async () => {
                     })}
                   </div>
                 </div>
-                
+
                 {/* Core Role Warning */}
                 {!approvalStatus.approvedRoles.includes('buyer') && !approvalStatus.approvedRoles.includes('seller') && (
                   <div className="bg-yellow-900/30 border border-yellow-600 p-3 rounded">
                     <p className="text-yellow-300 text-sm">
-                      ⚠️ <strong>Warning:</strong> Neither buyer nor seller has approved yet. 
+                      ⚠️ <strong>Warning:</strong> Neither buyer nor seller has approved yet.
                       At least one core role must approve for valid execution.
                     </p>
                   </div>
@@ -985,31 +1036,31 @@ const handleSubmitMyPubKey = useCallback(async () => {
 
         {/* KHỐI 2: THANH TIẾN TRÌNH TSS 5-OF-7 */}
         {mediationAssigned && (
-        <section className="flex flex-col gap-4">
-          <div className="flex justify-between items-end">
-            <h3 className="text-slate-300 font-medium text-lg">Public Key Collection Progress</h3>
-            <span className="text-sm font-mono text-slate-400 bg-slate-800 px-3 py-1 rounded-md border border-slate-700">
-              {progress}/7
-            </span>
-          </div>
-          <div className="flex gap-4 justify-between bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-inner">
-            {[1, 2, 3, 4, 5, 6, 7].map((num) => {
-              const isNodeSigned = num <= progress;
-              return (
-                <div 
-                  key={num} 
-                  className={`w-12 h-12 rounded-full flex items-center justify-center font-bold text-lg transition-all duration-500
-                    ${isNodeSigned 
-                      ? 'bg-emerald-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.6)] scale-110' 
-                      : 'bg-slate-700 text-slate-500 border-2 border-slate-600'}`}
-                >
-                  {num}
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      )}
+          <section className="flex flex-col gap-4">
+            <div className="flex justify-between items-end">
+              <h3 className="text-slate-300 font-medium text-lg">Public Key Collection Progress</h3>
+              <span className="text-sm font-mono text-slate-400 bg-slate-800 px-3 py-1 rounded-md border border-slate-700">
+                {progress}/7
+              </span>
+            </div>
+            <div className="flex gap-4 justify-between bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-inner">
+              {[1, 2, 3, 4, 5, 6, 7].map((num) => {
+                const isNodeSigned = num <= progress;
+                return (
+                  <div
+                    key={num}
+                    className={`w-12 h-12 rounded-full flex items-center justify-center font-bold text-lg transition-all duration-500
+                    ${isNodeSigned
+                        ? 'bg-emerald-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.6)] scale-110'
+                        : 'bg-slate-700 text-slate-500 border-2 border-slate-600'}`}
+                  >
+                    {num}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         {/* KHỐI 3: TERMINAL LOGS */}
         <section className="bg-[#0A0F1C] p-5 rounded-xl border border-slate-800 h-64 overflow-y-auto font-mono text-sm shadow-2xl relative group">
@@ -1024,12 +1075,12 @@ const handleSubmitMyPubKey = useCallback(async () => {
           <div className="flex flex-col gap-2">
             {logs.map((log, index) => (
               <div key={index} className={`flex gap-3 hover:bg-white/5 px-2 py-1 rounded transition-colors
-                ${log.type === 'success' ? 'text-emerald-400' : 
-                  log.type === 'error' ? 'text-red-400' : 
-                  log.type === 'warning' ? 'text-yellow-400' : 'text-blue-300'}`
+                ${log.type === 'success' ? 'text-emerald-400' :
+                  log.type === 'error' ? 'text-red-400' :
+                    log.type === 'warning' ? 'text-yellow-400' : 'text-blue-300'}`
               }>
-                <span className="opacity-40 shrink-0">[{log.time}]</span> 
-                <span className="opacity-60">{'>'}</span> 
+                <span className="opacity-40 shrink-0">[{log.time}]</span>
+                <span className="opacity-60">{'>'}</span>
                 <span className="break-all">{log.message}</span>
               </div>
             ))}
@@ -1038,16 +1089,16 @@ const handleSubmitMyPubKey = useCallback(async () => {
         </section>
 
         {/* KHỐI 4: CỤM NÚT HÀNH ĐỘNG PUBKEY */}
-        {mediationAssigned &&progress < 7 && (
+        {mediationAssigned && progress < 7 && (
           <section className="flex gap-6 justify-center mt-4">
-            <button 
+            <button
               onClick={handleSubmitMyPubKey}
               disabled={hasSubmitted || isSubmittingKey || progress >= 7 || activeRole === 'Unknown' || !localPubKey}
               className={`px-8 py-4 rounded-xl font-bold transition-all duration-300 w-56 flex items-center justify-center gap-2
                 ${hasSubmitted || progress >= 7 || activeRole === 'Unknown' || !localPubKey
-                  ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed' 
-                  : isSubmittingKey 
-                    ? 'bg-blue-600/50 cursor-wait border border-blue-500/50' 
+                  ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                  : isSubmittingKey
+                    ? 'bg-blue-600/50 cursor-wait border border-blue-500/50'
                     : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/25 border border-blue-500'}`}
             >
               {isSubmittingKey && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}
@@ -1073,9 +1124,8 @@ const handleSubmitMyPubKey = useCallback(async () => {
                 <button
                   onClick={handleDeploy}
                   disabled={isDeploying}
-                  className={`px-8 py-4 w-full max-w-sm rounded-xl font-bold text-white transition-all ${
-                    isDeploying ? 'bg-amber-600 cursor-wait opacity-70' : 'bg-linear-to-r from-blue-600 to-emerald-600 hover:scale-105 shadow-lg'
-                  }`}
+                  className={`px-8 py-4 w-full max-w-sm rounded-xl font-bold text-white transition-all ${isDeploying ? 'bg-amber-600 cursor-wait opacity-70' : 'bg-linear-to-r from-blue-600 to-emerald-600 hover:scale-105 shadow-lg'
+                    }`}
                 >
                   {isDeploying ? 'Đang Deploy (Chờ MetaMask)...' : 'Deploy Vault Contract'}
                 </button>
@@ -1100,17 +1150,17 @@ const handleSubmitMyPubKey = useCallback(async () => {
             <p className="text-slate-300 mb-6 text-lg relative z-10">
               The network has successfully generated the Aggregated Public Key. As the Buyer, you need to deposit <strong>{normalizeDisplayAmount(escrow?.amount)} ETH</strong> into the Smart Contract to securely lock the funds before the execution process can be activated.
             </p>
-            <button 
+            <button
               onClick={handleDepositFunds}
               disabled={isPending || isConfirming}
               className={`w-full py-4 rounded-xl font-bold text-white text-xl transition-all shadow-xl relative z-10
-                ${isPending || isConfirming 
-                  ? 'bg-emerald-600/50 cursor-wait animate-pulse border border-emerald-500/50' 
+                ${isPending || isConfirming
+                  ? 'bg-emerald-600/50 cursor-wait animate-pulse border border-emerald-500/50'
                   : 'bg-linear-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 transform hover:-translate-y-1'}`}
             >
-              {isPending ? 'Confirming in MetaMask...' : 
-               isConfirming ? 'Mining Block on Ethereum...' : 
-               `Deposit ${normalizeDisplayAmount(escrow?.amount)} ETH Now`}
+              {isPending ? 'Confirming in MetaMask...' :
+                isConfirming ? 'Mining Block on Ethereum...' :
+                  `Deposit ${normalizeDisplayAmount(escrow?.amount)} ETH Now`}
             </button>
           </section>
         )}
@@ -1131,7 +1181,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
 
           return (
             <section className={`p-6 rounded-2xl border shadow-xl mt-6 flex flex-col md:flex-row gap-4 justify-center items-center transition-all ${isResolved ? 'bg-indigo-900/40 border-indigo-500/50' : 'bg-slate-800 border-slate-700'}`}>
-              
+
               {/* UI Blocker cho Mediator 4 và 5 */}
               {isMediator && !isAllowedSigner && (
                 <div className="w-full md:w-auto md:mr-auto bg-yellow-900/30 border border-yellow-600 p-3 rounded mb-2">
@@ -1140,7 +1190,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
                   </p>
                 </div>
               )}
-              
+
               {/* Context Banner for Dispute Phase */}
               {isResolved && (
                 <div className="w-full text-center md:w-auto md:mr-auto">
@@ -1148,7 +1198,7 @@ const handleSubmitMyPubKey = useCallback(async () => {
                   <p className="text-sm text-slate-300">Click the action matching the final outcome to begin TSS Signing.</p>
                 </div>
               )}
-              
+
               <button
                 onClick={handleStartRelease}
                 className="w-full md:w-auto px-6 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-white font-bold shadow-lg shadow-emerald-500/20 transform transition hover:-translate-y-1"
@@ -1179,72 +1229,72 @@ const handleSubmitMyPubKey = useCallback(async () => {
         {/* KHỐI 5: LUỒNG KÝ ĐA PHẦN (TSS SIGNING ORCHESTRATION) */}
         {/* Điều kiện: Đã có Vault và (Các Role khác sẽ thấy ngay. Riêng Buyer chỉ thấy khi isConfirmed = true HOẶC db đã báo LOCKED) */}
         {hasVaultAddress && !isSigningFlowClosed && (
-          ['nonce', 'z-share', 'ready'].includes(signingPhase) || 
+          ['nonce', 'z-share', 'ready'].includes(signingPhase) ||
           (mediationAssigned && progress >= 7 && (activeRole !== 'buyer' || isConfirmed || escrow?.status === 'LOCKED' || isVaultLockedOnChain))
         ) && (
-          <section className="bg-slate-800 p-8 rounded-2xl border border-blue-500/30 shadow-[0_0_30px_rgba(59,130,246,0.1)] mt-8">
-            <h3 className="text-xl font-bold mb-6 text-blue-400 border-b border-slate-700 pb-4">TSS Signing Orchestration</h3>
-        
-            {/* TRẠNG THÁI 1: ROUND 1 (NONCE) */}
-            {signingPhase === 'nonce' && (
-              <div className="flex flex-col gap-4">
-                <div className="flex justify-between items-center text-sm text-slate-300">
-                  <span>Round 1: Nonce Commitment</span>
-                  <span className="font-mono bg-slate-900 px-2 py-1 rounded">{signingProgress.percentage || 0}%</span>
-                </div>
-                <div className="w-full bg-slate-900 rounded-full h-2">
-                  <div className="bg-blue-500 h-2 rounded-full transition-all duration-500" style={{ width: `${signingProgress.percentage || 0}%` }}></div>
-                </div>
-                <button disabled className="w-full bg-blue-600/50 py-3 rounded-lg font-bold text-white/50 cursor-wait">
-                  Waiting for other nodes ({signingProgress.submitted || 0}/{signingProgress.needed || 7})...
-                </button>
-              </div>
-            )}
+            <section className="bg-slate-800 p-8 rounded-2xl border border-blue-500/30 shadow-[0_0_30px_rgba(59,130,246,0.1)] mt-8">
+              <h3 className="text-xl font-bold mb-6 text-blue-400 border-b border-slate-700 pb-4">TSS Signing Orchestration</h3>
 
-            {/* TRẠNG THÁI 2: ROUND 2 (Z-SHARE) */}
-            {signingPhase === 'z-share' && (
-              <div className="flex flex-col gap-4">
-                <div className="flex justify-between items-center text-sm text-slate-300">
-                  <span>Round 2: Partial Signature (Z-Share)</span>
-                  <span className="font-mono bg-slate-900 px-2 py-1 rounded">{signingProgress.percentage || 0}%</span>
+              {/* TRẠNG THÁI 1: ROUND 1 (NONCE) */}
+              {signingPhase === 'nonce' && (
+                <div className="flex flex-col gap-4">
+                  <div className="flex justify-between items-center text-sm text-slate-300">
+                    <span>Round 1: Nonce Commitment</span>
+                    <span className="font-mono bg-slate-900 px-2 py-1 rounded">{signingProgress.percentage || 0}%</span>
+                  </div>
+                  <div className="w-full bg-slate-900 rounded-full h-2">
+                    <div className="bg-blue-500 h-2 rounded-full transition-all duration-500" style={{ width: `${signingProgress.percentage || 0}%` }}></div>
+                  </div>
+                  <button disabled className="w-full bg-blue-600/50 py-3 rounded-lg font-bold text-white/50 cursor-wait">
+                    Waiting for other nodes ({signingProgress.submitted || 0}/{signingProgress.needed || 7})...
+                  </button>
                 </div>
-                <div className="w-full bg-slate-900 rounded-full h-2">
-                  <div className="bg-emerald-500 h-2 rounded-full transition-all duration-500" style={{ width: `${signingProgress.percentage || 0}%` }}></div>
-                </div>
-                <button 
-                  onClick={handleSubmitZShare} 
-                  disabled={!isAllowedSigner}
-                  className={`w-full py-3 rounded-lg font-bold text-white shadow-lg transition-colors
-                    ${!isAllowedSigner 
-                      ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed' 
-                      : 'bg-emerald-600 hover:bg-emerald-500'}`}
-                >
-                  { !isAllowedSigner ? 'Not authorized to sign (Mediator 4/5)' : 'Compute & Submit Z-Share' }
-                </button>
-              </div>
-            )}
+              )}
 
-            {/* TRẠNG THÁI 3: READY TO EXECUTE */}
-            {signingPhase === 'ready' && aggregatedSignature && (
-              <div className="flex flex-col gap-4 bg-emerald-900/20 border border-emerald-500/30 p-4 rounded-xl">
-                <p className="text-emerald-400 font-bold text-center">✓ Signature Aggregated Successfully</p>
-                <button 
-                  onClick={handleExecuteOnChain}
-                  disabled={isPending || isConfirming || isConfirmed}
-                  className={`w-full py-4 rounded-lg font-bold text-white shadow-[0_0_20px_rgba(16,185,129,0.3)] text-lg transition-all duration-300
-                    ${isConfirmed ? 'bg-emerald-600 cursor-not-allowed' : 
-                      isPending || isConfirming ? 'bg-amber-600 cursor-wait animate-pulse' : 
-                      'bg-linear-to-r from-blue-600 to-emerald-600 hover:from-blue-500 hover:to-emerald-500 transform hover:scale-[1.02]'}`}
-                >
-                  {isPending ? 'Confirming in Wallet...' : 
-                   isConfirming ? 'Waiting for Block Confirmation...' : 
-                   isConfirmed ? 'Executed Successfully ✓' : 
-                   'Execute On-Chain Transaction'}
-                </button>
-              </div>
-            )}
-          </section>
-        )}
+              {/* TRẠNG THÁI 2: ROUND 2 (Z-SHARE) */}
+              {signingPhase === 'z-share' && (
+                <div className="flex flex-col gap-4">
+                  <div className="flex justify-between items-center text-sm text-slate-300">
+                    <span>Round 2: Partial Signature (Z-Share)</span>
+                    <span className="font-mono bg-slate-900 px-2 py-1 rounded">{signingProgress.percentage || 0}%</span>
+                  </div>
+                  <div className="w-full bg-slate-900 rounded-full h-2">
+                    <div className="bg-emerald-500 h-2 rounded-full transition-all duration-500" style={{ width: `${signingProgress.percentage || 0}%` }}></div>
+                  </div>
+                  <button
+                    onClick={handleSubmitZShare}
+                    disabled={!isAllowedSigner}
+                    className={`w-full py-3 rounded-lg font-bold text-white shadow-lg transition-colors
+                    ${!isAllowedSigner
+                        ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                        : 'bg-emerald-600 hover:bg-emerald-500'}`}
+                  >
+                    {!isAllowedSigner ? 'Not authorized to sign (Mediator 4/5)' : 'Compute & Submit Z-Share'}
+                  </button>
+                </div>
+              )}
+
+              {/* TRẠNG THÁI 3: READY TO EXECUTE */}
+              {signingPhase === 'ready' && aggregatedSignature && (
+                <div className="flex flex-col gap-4 bg-emerald-900/20 border border-emerald-500/30 p-4 rounded-xl">
+                  <p className="text-emerald-400 font-bold text-center">✓ Signature Aggregated Successfully</p>
+                  <button
+                    onClick={handleExecuteOnChain}
+                    disabled={isPending || isConfirming || isConfirmed}
+                    className={`w-full py-4 rounded-lg font-bold text-white shadow-[0_0_20px_rgba(16,185,129,0.3)] text-lg transition-all duration-300
+                    ${isConfirmed ? 'bg-emerald-600 cursor-not-allowed' :
+                        isPending || isConfirming ? 'bg-amber-600 cursor-wait animate-pulse' :
+                          'bg-linear-to-r from-blue-600 to-emerald-600 hover:from-blue-500 hover:to-emerald-500 transform hover:scale-[1.02]'}`}
+                  >
+                    {isPending ? 'Confirming in Wallet...' :
+                      isConfirming ? 'Waiting for Block Confirmation...' :
+                        isConfirmed ? 'Executed Successfully ✓' :
+                          'Execute On-Chain Transaction'}
+                  </button>
+                </div>
+              )}
+            </section>
+          )}
 
         {progress >= 7 && hasVaultAddress && isSigningFlowClosed && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-emerald-500/30 shadow-[0_0_30px_rgba(16,185,129,0.1)] mt-8">

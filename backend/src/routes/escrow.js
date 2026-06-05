@@ -1,7 +1,7 @@
 import express from 'express';
 import { deleteSession, getSession, getPubKeyCollectionStatus, hasSession, saveSession, isSigningExpired } from '../store/session.js';
 import {
-  aggregateWhenReady,
+
   aggregatePubKeysForRoles,
   PARTICIPANT_ROLES,
   getPubKeyCollectionSummary,
@@ -48,24 +48,24 @@ let pubKeyPersistenceDisabled = false;
 // ─── Helpers (ĐÃ TÍCH HỢP AUTO-RECOVERY CỦA TECH LEAD) ──────────────────────
 
 async function getAllowedSignerRoles(escrowId) {
-  let allowedRoles = [...VALID_ROLES]; 
+  let allowedRoles = [...VALID_ROLES];
   const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
-  
-  const dispute = await prisma.dispute.findFirst({ 
-      where: { escrowId, status: 'RESOLVED' },
-      orderBy: { createdAt: 'desc' }
+
+  const dispute = await prisma.dispute.findFirst({
+    where: { escrowId, status: 'RESOLVED' },
+    orderBy: { createdAt: 'desc' }
   });
-  
+
   if (dispute) {
-      const outcome = String(dispute.outcome || '').toUpperCase();
-      if (outcome.includes('RELEASE') || outcome.includes('BUYER')) {
-          allowedRoles = allowedRoles.filter(r => r !== 'seller');
-      }
-      else if (outcome.includes('RETURN') || outcome.includes('REFUND') || outcome.includes('SELLER')) {
-          allowedRoles = allowedRoles.filter(r => r !== 'buyer');
-      }
+    const outcome = String(dispute.outcome || '').toUpperCase();
+    if (outcome.includes('RELEASE') || outcome.includes('BUYER')) {
+      allowedRoles = allowedRoles.filter(r => r !== 'seller');
+    }
+    else if (outcome.includes('RETURN') || outcome.includes('REFUND') || outcome.includes('SELLER')) {
+      allowedRoles = allowedRoles.filter(r => r !== 'buyer');
+    }
   }
-  
+
   return allowedRoles;
 }
 
@@ -77,8 +77,8 @@ async function checkSession(escrowId, res) {
     const existingMediators = Array.isArray(session.participants?.mediators)
       ? session.participants.mediators
       : Array.isArray(session.parties?.mediators)
-      ? session.parties.mediators
-      : [];
+        ? session.parties.mediators
+        : [];
 
     const missingOrShort = existingMediators.length !== MEDIATOR_COMMITTEE_SIZE || existingMediators.some((m) => !m);
     if (missingOrShort) {
@@ -115,7 +115,7 @@ async function checkSession(escrowId, res) {
       }
     }
   }
-  
+
   if (!session) {
     console.log(`[TSS Recovery] RAM trống. Đang tự động khôi phục Session cho Escrow ${escrowId}...`);
     const escrowDb = await prisma.escrow.findUnique({
@@ -126,11 +126,11 @@ async function checkSession(escrowId, res) {
     // BẢN VÁ 1: Bỏ chốt chặn 404 (Không bắt buộc phải có contractAddress lúc gom Key)
     if (!escrowDb) {
       if (res) res.status(404).json({ error: 'Không tìm thấy Escrow trong DB' });
-      return null; 
+      return null;
     }
 
     const pubKeysDb = await prisma.pubKeySubmission.findMany({ where: { escrowId } });
-    
+
     const participantsSnapshot = buildParticipantsSnapshot(escrowDb);
 
     // TẠO MẢNG DỰ PHÒNG GIỮ NGUYÊN INDEX SLOT
@@ -175,53 +175,68 @@ async function checkSession(escrowId, res) {
     } else {
       session.pubKeyCollectionState = 'PARTIAL';
     }
-    
+
     // Khôi phục chữ ký (Nonces) nếu có
     try {
       const noncesDb = await prisma.nonceSubmission.findMany({
         where: { escrowId, expiresAt: { gt: new Date() } }
       });
-      
+
       if (noncesDb && noncesDb.length > 0) {
-        const firstNonce = noncesDb[0];
-        session.signingAction = firstNonce.action;
-        session.nonces = {};
-        
+        // Group nonces by action to prevent mixing release-nonces with refund-nonces.
+        // Without this, the aggregated R_agg and challenge 'e' would be computed from
+        // a mix of both actions, breaking on-chain verification.
+        const noncesByAction = {};
         noncesDb.forEach(n => {
+          if (!noncesByAction[n.action]) noncesByAction[n.action] = [];
+          noncesByAction[n.action].push(n);
+        });
+
+        // Pick the action group that has the most nonces (most likely the active session).
+        // Tie-break by action name for determinism.
+        const [activeAction, activeNonces] = Object.entries(noncesByAction)
+          .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))[0];
+
+        console.log(`[TSS Recovery] Restoring ${activeNonces.length} nonce(s) for action '${activeAction}' (discarding ${noncesDb.length - activeNonces.length} nonce(s) from other actions).`);
+
+        session.signingAction = activeAction;
+        session.nonces = {};
+
+        activeNonces.forEach(n => {
           session.nonces[n.role] = { R_x: n.nonceR_x, R_y: n.nonceR_y };
         });
-        
+
         const roles = Object.keys(session.nonces);
         session.signingBitmap = calculateSignerBitmap(roles);
-        
+
         if (roles.length >= 5) {
-          const validation = validateSignerBitmap(session.signingBitmap, roles);
+          const validation = validateSignerBitmap(session.signingBitmap, roles, activeAction);
           if (validation.valid) {
-          try {
-            const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, roles, ROLE_TO_ID);
-            const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNoncesWithLagrange(session.nonces, ROLE_TO_ID);
-            
-            const vaultAddr = escrowDb.contractAddress || session.contractAddress;
-            if (vaultAddr) {
-              const vaultKey = await getVaultAggregateKey(vaultAddr);
-              assertSignerSetMatchesVault(pkAgg, vaultKey.pkAgg, roles);
-              
-              const msgHash = buildMsgHash(vaultKey.trueChainEscrowId, firstNonce.action, session.signingBitmap, vaultAddr, vaultKey.chainId);
-              const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
-              
-              session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
-              session.signingRoles = roles;
+            try {
+              const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, roles, ROLE_TO_ID);
+              const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNoncesWithLagrange(session.nonces, ROLE_TO_ID);
+
+              const vaultAddr = escrowDb.contractAddress || session.contractAddress;
+              if (vaultAddr) {
+                const vaultKey = await getVaultAggregateKey(vaultAddr);
+                assertSignerSetMatchesVault(pkAgg, vaultKey.pkAgg, roles);
+
+                const msgHash = buildMsgHash(vaultKey.trueChainEscrowId, activeAction, session.signingBitmap, vaultAddr, vaultKey.chainId);
+                const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
+
+                session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
+                session.signingRoles = roles;
+              }
+            } catch (challengeError) {
+              console.warn(`[TSS Recovery] Failed to auto-compute challenge: ${challengeError.message}`);
             }
-          } catch (challengeError) {
-            console.warn(`[TSS Recovery] Failed to auto-compute challenge: ${challengeError.message}`);
           }
         }
       }
-    }
     } catch (nonceError) {
       console.warn(`[TSS Recovery] Không thể khôi phục nonce: ${nonceError.message}`);
     }
-    
+
     await saveSession(escrowId, session);
   }
   return session;
@@ -273,7 +288,21 @@ async function getVaultAggregateKey(vaultAddr) {
 
 function assertSignerSetMatchesVault(pkAgg, deployedPkAgg, roles) {
   const deployedKeyIsUnset = BigInt(deployedPkAgg.x) === 0n && BigInt(deployedPkAgg.y) === 0n;
-  if (deployedKeyIsUnset || samePkAgg(pkAgg, deployedPkAgg)) return;
+
+  // A (0,0) key on-chain means the vault was never properly initialised OR the RPC call
+  // silently returned zero. Either way, signing with a mismatched pkAgg is cryptographically
+  // unsound — _verifySchnorr will always fail. Throw explicitly so callers know the state.
+  if (deployedKeyIsUnset) {
+    const error = new Error(
+      'Vault aggregate key is (0, 0). The vault contract may not have been deployed with a valid ' +
+      'aggregate key, or the RPC call to read pkAggX/pkAggY returned zero. ' +
+      'Verify the vault deployment and retry.'
+    );
+    error.statusCode = 503;
+    throw error;
+  }
+
+  if (samePkAgg(pkAgg, deployedPkAgg)) return;
 
   const error = new Error(`Signer set [${roles.join(', ')}] does not match the aggregate key deployed in the vault. Restart Round 1 with the roles used for vault deployment.`);
   error.statusCode = 409;
@@ -356,7 +385,7 @@ async function savePubKeySubmission(escrowId, role, pubKey) {
 
 async function clearPubKeySubmissions(escrowId) {
   if (pubKeyPersistenceDisabled || !prisma?.pubKeySubmission?.deleteMany) return;
-  try { await prisma.pubKeySubmission.deleteMany({ where: { escrowId } }); } 
+  try { await prisma.pubKeySubmission.deleteMany({ where: { escrowId } }); }
   catch (error) { if (isMissingTableError(error)) pubKeyPersistenceDisabled = true; else throw error; }
 }
 
@@ -375,8 +404,8 @@ function calculateSignerBitmap(roles) {
   return bitmap;
 }
 
-// Helper: Validate signerBitmap - buyer OR seller must be included
-function validateSignerBitmap(bitmap, submittedRoles) {
+// Helper: Validate signerBitmap
+function validateSignerBitmap(bitmap, submittedRoles, action) {
   const ALLOWED_BITS_MASK = 0x7f; // bits 0..6 only
   const CORE_ROLE_MASK = 0x03; // buyer (bit0) or seller (bit1)
   const MIN_SIGNERS = 5;
@@ -392,8 +421,11 @@ function validateSignerBitmap(bitmap, submittedRoles) {
 
   if (count < MIN_SIGNERS) return { valid: false, error: `Need at least ${MIN_SIGNERS} signers, got ${count}` };
 
-  // Ensure at least one core role (buyer or seller) is present
-  if ((b & CORE_ROLE_MASK) === 0) return { valid: false, error: 'At least one core role (buyer or seller) must approve' };
+  if (action === 'release' || action === 'split') {
+    if ((b & CORE_ROLE_MASK) !== CORE_ROLE_MASK) {
+      return { valid: false, error: `Action '${action}' requires both buyer and seller to approve` };
+    }
+  }
 
   return { valid: true };
 }
@@ -410,7 +442,7 @@ router.post('/init', escrowInitRateLimiter, async (req, res) => {
 
     let normalizedChainId;
     try { normalizedChainId = BigInt(chainId).toString(); } catch { return res.status(400).json({ error: 'Invalid chainId' }); }
-    
+
     const normalizedContractAddress = contractAddress ? ethers.getAddress(contractAddress) : null;
 
     if (await hasSession(escrowId)) return res.status(409).json({ error: 'Session already exists for this escrowId' });
@@ -507,30 +539,7 @@ router.post('/pubkey/submit', authMiddleware, escrowPubKeySubmitRateLimiter, asy
     let summary = getPubKeyCollectionSummary(session);
     session.pubKeyCollectionState = summary.complete ? 'COMPLETE' : 'PARTIAL';
     if (summary.complete && !session.pubKeyAggregationCompletedAt) {
-      session.precomputedPkAgg = aggregateWhenReady(session);
       session.pubKeyAggregationCompletedAt = Date.now();
-      
-      // Populate pkAgg into DB for all action combinations
-      try {
-        const buyerSellerPk = aggregatePubKeysForRoles(session.pubKeys, ['buyer', 'seller']);
-        const buyerMediatorPk = aggregatePubKeysForRoles(session.pubKeys, ['buyer', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5']);
-        const sellerMediatorPk = aggregatePubKeysForRoles(session.pubKeys, ['seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5']);
-        
-        await prisma.escrow.update({
-          where: { id: escrowId },
-          data: {
-            pkAggBsX: String(buyerSellerPk.x),
-            pkAggBsY: String(buyerSellerPk.y),
-            pkAggBmX: String(buyerMediatorPk.x),
-            pkAggBmY: String(buyerMediatorPk.y),
-            pkAggSmX: String(sellerMediatorPk.x),
-            pkAggSmY: String(sellerMediatorPk.y)
-          }
-        });
-        console.log(`[DKG] Populated pkAgg into DB for escrow ${escrowId}`);
-      } catch (dbError) {
-        console.warn(`[DKG] Failed to populate pkAgg into DB: ${dbError.message}`);
-      }
     }
     await saveSession(escrowId, session);
     summary = getPubKeyCollectionSummary(session);
@@ -583,14 +592,14 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     };
 
     let normalizedRx, normalizedRy;
-    try { normalizedRx = normalizeCoordinate(R_x); normalizedRy = normalizeCoordinate(R_y); } 
+    try { normalizedRx = normalizeCoordinate(R_x); normalizedRy = normalizeCoordinate(R_y); }
     catch (e) { return res.status(400).json({ error: 'Invalid coordinate format' }); }
 
     // Check if nonce already exists for this role
     if (session.nonces[role]) {
       const existingRx = session.nonces[role].R_x;
       const existingRy = session.nonces[role].R_y;
-      
+
       // Same nonce value - idempotent submission
       if (existingRx === normalizedRx && existingRy === normalizedRy) {
         const nonceCount = Object.keys(session.nonces).length;
@@ -612,11 +621,11 @@ router.post('/nonce', authMiddleware, async (req, res) => {
             message: 'Nonce already submitted with same values. Round 1 already complete.'
           });
         }
-        
+
         // If enough nonces collected but round2Context missing, auto-compute challenge
         if (nonceCount >= 5) {
           const roles = Object.keys(session.nonces);
-          const validation = validateSignerBitmap(session.signingBitmap, roles);
+          const validation = validateSignerBitmap(session.signingBitmap, roles, action);
           if (validation.valid) {
             try {
               const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
@@ -625,17 +634,17 @@ router.post('/nonce', authMiddleware, async (req, res) => {
               const vaultKey = await getVaultAggregateKey(vaultAddr);
               assertSignerSetMatchesVault(pkAgg, vaultKey.pkAgg, roles);
               const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNoncesWithLagrange(session.nonces, ROLE_TO_ID);
-              
+
               const msgHash = buildMsgHash(vaultKey.trueChainEscrowId, action, session.signingBitmap, vaultAddr, vaultKey.chainId);
               const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
-              
+
               session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
               session.signingRoles = roles;
               await saveSession(escrowId, session);
-              
+
               console.log(`[Nonce] Auto-computed challenge on idempotent submission: R_addr=${R_addr}, challenge=${challenge}`);
-              
-              return res.json({ 
+
+              return res.json({
                 state: 'round2_ready',
                 received: nonceCount,
                 needed: 5,
@@ -652,27 +661,27 @@ router.post('/nonce', authMiddleware, async (req, res) => {
             }
           }
         }
-        
-        return res.json({ 
-          received: nonceCount, 
-          needed: 5, 
+
+        return res.json({
+          received: nonceCount,
+          needed: 5,
           isIdempotent: true,
           signerBitmap: session.signingBitmap,
           message: 'Nonce already submitted with same values'
         });
       }
-      
+
       // Different nonce value - return current state and existing nonce to allow FE to sync
       console.warn(`[Nonce] Different nonce value from role '${role}' for escrow ${escrowId}. Returning current state and existing nonce.`);
       const nonceCount = Object.keys(session.nonces).length;
       const submittedRoles = Object.keys(session.nonces);
-      
+
       // Return existing nonce for this role to allow FE to sync
       const existingNonceForRole = session.nonces[role];
-      
+
       // If Round 1 is complete, return the round2Context
       if (session.round2Context) {
-        return res.json({ 
+        return res.json({
           state: 'round2_ready',
           received: nonceCount,
           needed: 5,
@@ -683,9 +692,9 @@ router.post('/nonce', authMiddleware, async (req, res) => {
           message: 'Your nonce differs from submitted value. Round 1 already complete. Use existing nonce from backend.'
         });
       }
-      
+
       // Round 1 still in progress
-      return res.json({ 
+      return res.json({
         state: 'round1_in_progress',
         received: nonceCount,
         needed: 5,
@@ -767,7 +776,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     }
 
     const roles = Object.keys(session.nonces);
-    const validation = validateSignerBitmap(session.signingBitmap, roles);
+    const validation = validateSignerBitmap(session.signingBitmap, roles, action);
     if (!validation.valid) return res.status(403).json({ error: validation.error });
     session.signingRoles = roles;
 
@@ -834,22 +843,22 @@ router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => 
     }
 
     const { R_addr, pkAgg, msgHash, challenge: e, signerBitmap: expectedBitmap } = session.round2Context;
-    
+
     // VALIDATE signerBitmap: Must match expected bitmap from nonce collection
     // and must have buyer or seller approval
     const submittedBitmap = Number(signerBitmap);
     if (submittedBitmap !== expectedBitmap) {
-      return res.status(400).json({ 
-        error: `Signer bitmap mismatch. Expected: ${expectedBitmap}, got: ${submittedBitmap}` 
+      return res.status(400).json({
+        error: `Signer bitmap mismatch. Expected: ${expectedBitmap}, got: ${submittedBitmap}`
       });
     }
-    
+
     // Validate bitmap structure (minimum 5 signers, core role required)
-    const validation = validateSignerBitmap(submittedBitmap, session.signingRoles);
+    const validation = validateSignerBitmap(submittedBitmap, session.signingRoles, session.signingAction);
     if (!validation.valid) {
       return res.status(400).json({ error: `Invalid signer bitmap: ${validation.error}` });
     }
-    
+
     // SSS aggregation: z = (z_1*λ_1 + z_2*λ_2 + ... + z_n*λ_n) mod ORDER.
     const z_agg = aggregateZSharesWithLagrange(session.zShares, ROLE_TO_ID);
 
@@ -870,13 +879,13 @@ router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => 
       return res.status(400).json({ error: 'Vault contract address not found.' });
     }
 
-    const sig = { 
+    const sig = {
       vaultContractAddress,
-      R_addr, 
-      z: z_agg, 
-      e, 
-      msgHash, 
-      signerBitmap: Number(signerBitmap) 
+      R_addr,
+      z: z_agg,
+      e,
+      msgHash,
+      signerBitmap: Number(signerBitmap)
     };
 
     if (io) io.to(escrowId).emit('schnorr_complete', { escrowId, ...sig });
@@ -891,23 +900,22 @@ router.get('/:id/aggregate-key', async (req, res) => {
   const session = await checkSession(req.params.id, res);
   if (!session) return;
 
-  let targetRoles = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'];
-  
-  // Nếu có query truyền lên từ Frontend (dùng cho luồng Dispute) thì lấy theo query
-  if (req.query.roles) {
-    const parsed = req.query.roles.split(',').map(r => r.trim());
-    if (parsed.length === 5) targetRoles = parsed;
+  if (!req.query.roles) {
+    return res.status(400).json({ error: 'roles query parameter is required' });
   }
+
+  const targetRoles = req.query.roles.split(',').map(r => r.trim());
   
-  const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, targetRoles, ROLE_TO_ID);
-  return res.json({
-    ok: true,
-    pkAggRelease: pkAgg,  pkAggReleaseCoords:  [pkAgg.x, pkAgg.y],
-    pkAggRefund: pkAgg,   pkAggRefundCoords:   [pkAgg.x, pkAgg.y],
-    pkAggTimeout: pkAgg,  pkAggTimeoutCoords:  [pkAgg.x, pkAgg.y],
-    pkAgg: pkAgg,
-    pkAggCoords: [pkAgg.x, pkAgg.y]
-  });
+  try {
+    const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, targetRoles, ROLE_TO_ID);
+    return res.json({
+      ok: true,
+      pkAgg: pkAgg,
+      pkAggCoords: [pkAgg.x, pkAgg.y]
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
 });
 
 router.get('/:id/status', async (req, res) => {
@@ -927,31 +935,31 @@ router.get('/:id/approvals', authMiddleware, async (req, res) => {
   try {
     const { id: escrowId } = req.params;
     const { action } = req.query;
-    
+
     if (!escrowId || !action) {
       return res.status(400).json({ error: 'Missing required fields: escrowId, action' });
     }
-    
+
     if (!VALID_ACTIONS.includes(action)) {
       return res.status(400).json({ error: `Invalid action. Allowed: ${VALID_ACTIONS.join(', ')}` });
     }
-    
+
     // Get escrow with buyer/seller info
     const escrow = await prisma.escrow.findUnique({
       where: { id: escrowId },
       include: { buyer: true, seller: true, escrowMediators: { include: { mediator: true }, orderBy: { slot: 'asc' } } }
     });
-    
+
     if (!escrow) {
       return res.status(404).json({ error: 'Escrow not found' });
     }
-    
+
     // Get approvals from database
     const approvals = await prisma.approval.findMany({
       where: { escrowId, action },
       include: { user: { select: { id: true, walletAddress: true } } }
     });
-    
+
     // Map approvals to roles
     const approvedRoles = [];
     for (const approval of approvals) {
@@ -967,13 +975,13 @@ router.get('/:id/approvals', authMiddleware, async (req, res) => {
         }
       }
     }
-    
+
     // Calculate expected signerBitmap
     const expectedBitmap = calculateSignerBitmap(approvedRoles);
-    
+
     // Validate bitmap
-    const validation = validateSignerBitmap(expectedBitmap, approvedRoles);
-    
+    const validation = validateSignerBitmap(expectedBitmap, approvedRoles, action);
+
     res.json({
       escrowId,
       action,
@@ -1043,7 +1051,7 @@ router.post('/record-deploy', authMiddleware, async (req, res) => {
     if (!foundVaultAddress) {
       return res.status(404).json({ error: 'EscrowCreatedEvent not found in tx logs' });
     }
-    
+
     if (!foundChainEscrowId) {
       return res.status(422).json({ error: 'EscrowCreated event does not contain chainEscrowId' });
     }
@@ -1056,11 +1064,6 @@ router.post('/record-deploy', authMiddleware, async (req, res) => {
 
     if (!existingEscrow) {
       return res.status(404).json({ error: 'Escrow not found in database' });
-    }
-
-    // Bắt buộc phải có DKG mới được Deploy
-    if (!existingEscrow.pkAggBsX || !existingEscrow.pkAggBsY) {
-      return res.status(409).json({ error: 'Aggregated key missing in DB. Complete DKG before recording on-chain deploy.' });
     }
 
     if (existingEscrow.contractAddress) {
@@ -1085,7 +1088,7 @@ router.post('/record-deploy', authMiddleware, async (req, res) => {
     // LƯU CẢ ĐỊA CHỈ LẪN MÃ ĐỊNH DANH VÀO DATABASE
     await prisma.escrow.update({
       where: { id: escrowId },
-      data: { 
+      data: {
         contractAddress: foundVaultAddress,
         chainEscrowId: foundChainEscrowId,
         status: 'INITIALIZED'
@@ -1140,39 +1143,39 @@ router.post('/:id/reset-signing', authMiddleware, async (req, res) => {
       }
 
       const pubKeysDb = await prisma.pubKeySubmission.findMany({ where: { escrowId } });
-    session = {
-      escrowId,
-      chainId: process.env.CHAIN_ID || "11155111",
-      contractAddress: escrowDb.contractAddress,
-      participants: {
-        buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
-        seller: normalizeAddress(escrowDb.seller?.walletAddress),
-        mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
-      },
-      parties: {
-        buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
-        seller: normalizeAddress(escrowDb.seller?.walletAddress),
-        mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
-      },
-      pubKeys: {}, status: 'ACTIVE', completedActions: [], nonces: {}, zShares: {}, createdAt: Date.now()
-    };
+      session = {
+        escrowId,
+        chainId: process.env.CHAIN_ID || "11155111",
+        contractAddress: escrowDb.contractAddress,
+        participants: {
+          buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
+          seller: normalizeAddress(escrowDb.seller?.walletAddress),
+          mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
+        },
+        parties: {
+          buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
+          seller: normalizeAddress(escrowDb.seller?.walletAddress),
+          mediators: escrowDb.escrowMediators.map(m => normalizeAddress(m.mediator?.walletAddress))
+        },
+        pubKeys: {}, status: 'ACTIVE', completedActions: [], nonces: {}, zShares: {}, createdAt: Date.now()
+      };
 
-    if (pubKeysDb && pubKeysDb.length > 0) {
-      pubKeysDb.forEach(pk => { session.pubKeys[pk.role] = pk.pubKey; });
-    }
+      if (pubKeysDb && pubKeysDb.length > 0) {
+        pubKeysDb.forEach(pk => { session.pubKeys[pk.role] = pk.pubKey; });
+      }
 
-    // CHỈ TỔNG HỢP KHÓA (AGGREGATE) NẾU ĐÃ THU THẬP ĐỦ 7 KEYS
-    if (pubKeysDb && pubKeysDb.length >= 7) {
-      try {
-        session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, PARTICIPANT_ROLES);
-        session.pubKeyCollectionState = 'COMPLETE';
-      } catch (e) {
-        console.warn(`[TSS Recovery] Lỗi khi gộp khóa: ${e.message}`);
+      // CHỈ TỔNG HỢP KHÓA (AGGREGATE) NẾU ĐÃ THU THẬP ĐỦ 7 KEYS
+      if (pubKeysDb && pubKeysDb.length >= 7) {
+        try {
+          session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, PARTICIPANT_ROLES);
+          session.pubKeyCollectionState = 'COMPLETE';
+        } catch (e) {
+          console.warn(`[TSS Recovery] Lỗi khi gộp khóa: ${e.message}`);
+          session.pubKeyCollectionState = 'PARTIAL';
+        }
+      } else {
         session.pubKeyCollectionState = 'PARTIAL';
       }
-    } else {
-      session.pubKeyCollectionState = 'PARTIAL';
-    }
       await saveSession(escrowId, session);
       console.log(`[ResetSigning] Session auto-created and public keys restored for escrow ${escrowId}`);
     }

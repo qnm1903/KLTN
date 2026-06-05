@@ -137,6 +137,8 @@ export const useTssWorker = () => {
       await clearNonce(nonceKey);
       return result;
     },
+    // Exposed so EscrowDetail can clear a stale nonce when a mismatch with the backend is detected
+    clearNonce,
     hasNonce
   }), [loadNonce, executeWorkerTask, persistNonce, clearNonce, hasNonce]);
 };

@@ -27,12 +27,7 @@ export const ROLE_TO_ID = {
   'mediator5': 7
 };
 
-export const ACTION_SIGNER_SETS = {
-  release: ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'],
-  refund: ['buyer', 'mediator1', 'mediator2', 'mediator3', 'mediator4'],
-  split: ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'],
-  timeout: ['seller', 'mediator2', 'mediator3', 'mediator4', 'mediator5']
-};
+
 
 const ROLE_BIT_POSITIONS = new Map(PARTICIPANT_ROLES.map((role, index) => [role, index]));
 
@@ -66,13 +61,6 @@ function normalizeRoles(roles) {
   return [...new Set(roles)].sort((left, right) => ROLE_BIT_POSITIONS.get(left) - ROLE_BIT_POSITIONS.get(right));
 }
 
-export function getActionSigners(action) {
-  const roles = ACTION_SIGNER_SETS[action];
-  if (!roles) {
-    throw new Error(`Unsupported action: ${action}`);
-  }
-  return [...roles];
-}
 
 function normalizePubKeyMap(session) {
   const normalized = createEmptyPubKeyMap();
@@ -253,16 +241,6 @@ export function initIncrementalDKG(
   return { session };
 }
 
-export function aggregateWhenReady(session) {
-  if (!isPubKeySetComplete(session)) {
-    return null;
-  }
-
-  return Object.entries(ACTION_SIGNER_SETS).reduce((accumulator, [action, roles]) => {
-    accumulator[action] = aggregatePubKeysForRoles(session.pubKeys, roles);
-    return accumulator;
-  }, {});
-}
 
 /**
  * Lấy PKagg phù hợp cho các bên đang ký.
@@ -274,9 +252,4 @@ export function getPkAggForRoles(session, roles) {
 
   return aggregatePubKeysForRoles(session.pubKeys, roles);
 }
-
-export function hasExactActionSigners(action, roles) {
-  const expected = getActionSigners(action).sort();
-  const actual = normalizeRoles(roles);
-  return expected.length === actual.length && expected.every((role, index) => role === actual[index]);
-}
+

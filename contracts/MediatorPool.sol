@@ -67,6 +67,7 @@ contract MediatorPool is
         address seller;
     }
     mapping(uint256 requestId => RequestDetails) public vrfRequests;
+    uint256 public upgradeNonce;
 
     /* ========== EVENTS ========== */
     event MediatorRegistered(address indexed mediator, uint256 amount);
@@ -112,6 +113,10 @@ contract MediatorPool is
         emit CoordinatorSet(_vrfCoordinator);
     }
     
+    function updateCallbackGasLimit(uint32 _callbackGasLimit) external onlyRole(ADMIN_ROLE) {
+        s_callbackGasLimit = _callbackGasLimit;
+    }
+
     function _authorizeUpgrade(address newImplementation) internal override onlyRole(ADMIN_ROLE) {}
     
     function getRequiredStake() public view returns (uint256) {

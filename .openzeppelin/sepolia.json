@@ -1530,6 +1530,324 @@
           ]
         }
       }
+    },
+    "d5c921e35e5436c233773872b0d3bc36415b43bcab2cf65ea5c71512d713968c": {
+      "address": "0x0a55Ed5120030cFf8579D7614BDd9e8DaDA4Fa6f",
+      "layout": {
+        "solcVersion": "0.8.30",
+        "storage": [
+          {
+            "label": "s_owner",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_address",
+            "contract": "ConfirmedOwnerWithProposal",
+            "src": "@chainlink\\contracts\\src\\v0.8\\shared\\access\\ConfirmedOwnerWithProposal.sol:9"
+          },
+          {
+            "label": "s_pendingOwner",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_address",
+            "contract": "ConfirmedOwnerWithProposal",
+            "src": "@chainlink\\contracts\\src\\v0.8\\shared\\access\\ConfirmedOwnerWithProposal.sol:10"
+          },
+          {
+            "label": "s_vrfCoordinator",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_contract(IVRFCoordinatorV2Plus)380",
+            "contract": "VRFConsumerBaseV2Plus",
+            "src": "@chainlink\\contracts\\src\\v0.8\\vrf\\dev\\VRFConsumerBaseV2Plus.sol:109"
+          },
+          {
+            "label": "isTestnet",
+            "offset": 20,
+            "slot": "2",
+            "type": "t_bool",
+            "contract": "MediatorPool",
+            "src": "contracts\\MediatorPool.sol:32"
+          },
+          {
+            "label": "s_subscriptionId",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_uint256",
+            "contract": "MediatorPool",
+            "src": "contracts\\MediatorPool.sol:42"
+          },
+          {
+            "label": "s_keyHash",
+            "offset": 0,
+            "slot": "4",
+            "type": "t_bytes32",
+            "contract": "MediatorPool",
+            "src": "contracts\\MediatorPool.sol:43"
+          },
+          {
+            "label": "s_callbackGasLimit",
+            "offset": 0,
+            "slot": "5",
+            "type": "t_uint32",
+            "contract": "MediatorPool",
+            "src": "contracts\\MediatorPool.sol:44"
+          },
+          {
+            "label": "mediatorsList",
+            "offset": 0,
+            "slot": "6",
+            "type": "t_array(t_address)dyn_storage",
+            "contract": "MediatorPool",
+            "src": "contracts\\MediatorPool.sol:60"
+          },
+          {
+            "label": "mediators",
+            "offset": 0,
+            "slot": "7",
+            "type": "t_mapping(t_address,t_struct(Mediator)3085_storage)",
+            "contract": "MediatorPool",
+            "src": "contracts\\MediatorPool.sol:61"
+          },
+          {
+            "label": "vrfRequests",
+            "offset": 0,
+            "slot": "8",
+            "type": "t_mapping(t_uint256,t_struct(RequestDetails)3100_storage)",
+            "contract": "MediatorPool",
+            "src": "contracts\\MediatorPool.sol:70"
+          },
+          {
+            "label": "upgradeNonce",
+            "offset": 0,
+            "slot": "9",
+            "type": "t_uint256",
+            "contract": "MediatorPool",
+            "src": "contracts\\MediatorPool.sol:73"
+          }
+        ],
+        "types": {
+          "t_address": {
+            "label": "address",
+            "numberOfBytes": "20"
+          },
+          "t_bool": {
+            "label": "bool",
+            "numberOfBytes": "1"
+          },
+          "t_bytes32": {
+            "label": "bytes32",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_bool)": {
+            "label": "mapping(address => bool)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_struct(RoleData)308_storage)": {
+            "label": "mapping(bytes32 => struct AccessControlUpgradeable.RoleData)",
+            "numberOfBytes": "32"
+          },
+          "t_struct(AccessControlStorage)318_storage": {
+            "label": "struct AccessControlUpgradeable.AccessControlStorage",
+            "members": [
+              {
+                "label": "_roles",
+                "type": "t_mapping(t_bytes32,t_struct(RoleData)308_storage)",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(InitializableStorage)783_storage": {
+            "label": "struct Initializable.InitializableStorage",
+            "members": [
+              {
+                "label": "_initialized",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_initializing",
+                "type": "t_bool",
+                "offset": 8,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(PausableStorage)485_storage": {
+            "label": "struct PausableUpgradeable.PausableStorage",
+            "members": [
+              {
+                "label": "_paused",
+                "type": "t_bool",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(RoleData)308_storage": {
+            "label": "struct AccessControlUpgradeable.RoleData",
+            "members": [
+              {
+                "label": "hasRole",
+                "type": "t_mapping(t_address,t_bool)",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "adminRole",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "1"
+              }
+            ],
+            "numberOfBytes": "64"
+          },
+          "t_uint64": {
+            "label": "uint64",
+            "numberOfBytes": "8"
+          },
+          "t_array(t_address)dyn_storage": {
+            "label": "address[]",
+            "numberOfBytes": "32"
+          },
+          "t_contract(IVRFCoordinatorV2Plus)380": {
+            "label": "contract IVRFCoordinatorV2Plus",
+            "numberOfBytes": "20"
+          },
+          "t_mapping(t_address,t_struct(Mediator)3085_storage)": {
+            "label": "mapping(address => struct MediatorPool.Mediator)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_uint256,t_struct(RequestDetails)3100_storage)": {
+            "label": "mapping(uint256 => struct MediatorPool.RequestDetails)",
+            "numberOfBytes": "32"
+          },
+          "t_struct(Mediator)3085_storage": {
+            "label": "struct MediatorPool.Mediator",
+            "members": [
+              {
+                "label": "wallet",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "stakeAmount",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "isActive",
+                "type": "t_bool",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "timeoutCount",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "3"
+              },
+              {
+                "label": "reputationScore",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "4"
+              },
+              {
+                "label": "totalVotes",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "5"
+              },
+              {
+                "label": "successfulVotes",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "6"
+              }
+            ],
+            "numberOfBytes": "224"
+          },
+          "t_struct(RequestDetails)3100_storage": {
+            "label": "struct MediatorPool.RequestDetails",
+            "members": [
+              {
+                "label": "escrowId",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "buyer",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "seller",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "2"
+              }
+            ],
+            "numberOfBytes": "96"
+          },
+          "t_uint256": {
+            "label": "uint256",
+            "numberOfBytes": "32"
+          },
+          "t_uint32": {
+            "label": "uint32",
+            "numberOfBytes": "4"
+          }
+        },
+        "namespaces": {
+          "erc7201:openzeppelin.storage.Pausable": [
+            {
+              "contract": "PausableUpgradeable",
+              "label": "_paused",
+              "type": "t_bool",
+              "src": "@openzeppelin\\contracts-upgradeable\\utils\\PausableUpgradeable.sol:21",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.AccessControl": [
+            {
+              "contract": "AccessControlUpgradeable",
+              "label": "_roles",
+              "type": "t_mapping(t_bytes32,t_struct(RoleData)308_storage)",
+              "src": "@openzeppelin\\contracts-upgradeable\\access\\AccessControlUpgradeable.sol:61",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Initializable": [
+            {
+              "contract": "Initializable",
+              "label": "_initialized",
+              "type": "t_uint64",
+              "src": "@openzeppelin\\contracts\\proxy\\utils\\Initializable.sol:69",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "Initializable",
+              "label": "_initializing",
+              "type": "t_bool",
+              "src": "@openzeppelin\\contracts\\proxy\\utils\\Initializable.sol:73",
+              "offset": 8,
+              "slot": "0"
+            }
+          ]
+        }
+      }
     }
   }
 }

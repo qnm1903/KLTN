@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useParams } from 'react-router-dom';
 import { useAtomValue, useSetAtom } from 'jotai';
 import { useAccount } from 'wagmi';
-import { ethers } from 'ethers';
 
 // --- IMPORT STATE & LOGIC HOOKS ---
 import {
@@ -21,10 +20,11 @@ import { useEscrowSync } from '../features/escrow/useEscrowSync';
 import { useSessionRecovery } from '../features/escrow/useSessionRecovery';
 import { useContractCall } from '../features/escrow/useContractCall';
 import { useTssWorker } from '../features/escrow/useTssWorker'; // Tích hợp Phase 5: Web Worker
+import { useDkgPhase, DKG_STATE, clearDkgLocalState } from '../features/escrow/use-dkg-phase';
 
 // --- IMPORT API & STORAGE ---
 import api from '../lib/api';
-import { clearPrivKey, getPubKey, getPrivKey, unlockEncryptedPrivKey } from '../lib/storage';
+import { getPubKey, getPrivKey, savePrivKey, savePubKey, unlockEncryptedPrivKey } from '../lib/storage';
 import { socket, joinEscrowRoom, leaveEscrowRoom } from '../lib/socket';
 
 import { getStoredAccessToken } from '../store/authStore';
@@ -86,26 +86,25 @@ export default function EscrowDetail() {
 
   const [escrow, setEscrow] = useState(null);
   const [isEscrowLoading, setIsEscrowLoading] = useState(true);
-  const [isSubmittingKey, setIsSubmittingKey] = useState(false);
   const [onChainVaultStatus, setOnChainVaultStatus] = useState(null);
   const [approvalStatus, setApprovalStatus] = useState(null);
   const [isLoadingApprovals, setIsLoadingApprovals] = useState(false);
+  const [isDkgComplete, setIsDkgComplete] = useState(null); // null=unknown, true=done, false=needed
   const addLog = useSetAtom(addSystemLogAtom);
   const setNonceRound1 = useSetAtom(nonceRound1Atom);
   const setSigningPhase = useSetAtom(signingPhaseAtom);
 
   // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm deployEscrowVault)
   const { isRecovering } = useSessionRecovery(escrowId, address);
-  const { submitPubKey, submitNonce, submitZShare, resetSigning } = useEscrowSync(escrowId, escrow?.status);
+  const { submitNonce, submitZShare, resetSigning } = useEscrowSync(escrowId, escrow?.status);
   const { executeTssAction, fundEscrow, getVaultStatus, isPending, isConfirming, isConfirmed, deployEscrowVault, waitForTx, hash: hookTxHash } = useContractCall();
-  const { computeNonce, computeZShare, hasNonce, clearNonce } = useTssWorker(); // Khởi tạo Web Worker Hook
+  const { computeNonceFrost, computeZShare, hasNonce, executeWorkerTask } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
   const status = useAtomValue(escrowStatusAtom);
   const progress = useAtomValue(signatureProgressAtom);
   const setProgress = useSetAtom(signatureProgressAtom);
   const logs = useAtomValue(systemLogsAtom);
-  const signedNodes = useAtomValue(signedNodesAtom);
   const setSignedNodes = useSetAtom(signedNodesAtom);
   const signingPhase = useAtomValue(signingPhaseAtom);
   const signingProgress = useAtomValue(signingProgressAtom);
@@ -117,9 +116,20 @@ export default function EscrowDetail() {
   const { login } = useSIWE();
   const hasLocalToken = Boolean(getStoredAccessToken());
 
+  // activeRole phải được khai báo trước useDkgPhase
   const activeRole = useMemo(() => {
     return resolveRoleFromEscrow(escrow, address);
   }, [escrow, address]);
+
+  // DKG Phase hook — chỉ active khi có privKey (lazy)
+  const dkgPrivKey = getPrivKey(address);
+  const { state: dkgState, error: dkgError, progress: dkgProgress, dkgResult, runDkg } = useDkgPhase(
+    escrowId,
+    activeRole !== 'Unknown' ? activeRole : null,
+    executeWorkerTask,
+    dkgPrivKey,
+    address
+  );
 
   const ALLOWED_SIGNERS = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
   const isAllowedSigner = ALLOWED_SIGNERS.includes(activeRole);
@@ -140,19 +150,42 @@ export default function EscrowDetail() {
     return () => { isMounted = false; };
   }, [escrowId, selectedAction, activeRole, hasNonce]);
 
-  const hasSubmitted = activeRole !== 'Unknown' && signedNodes.includes(activeRole);
+  // Cờ kiểm tra tính độc quyền UI — khai báo sớm để dùng trong useEffect bên dưới
+  const hasVaultAddress = Boolean(escrow?.contractAddress || escrow?.vaultAddress);
+
+  // Kiểm tra DKG master-pubkey có trên backend chưa (on mount + khi escrowId thay đổi)
+  useEffect(() => {
+    if (!escrowId || hasVaultAddress) return;
+    let active = true;
+    api.get(`/escrow/${escrowId}/dkg/master-pubkey`)
+      .then(() => { if (active) setIsDkgComplete(true); })
+      .catch(() => { if (active) setIsDkgComplete(false); });
+    return () => { active = false; };
+  }, [escrowId, hasVaultAddress]);
+
+  // Sau khi party này hoàn thành DKG, poll cho đến khi backend xác nhận tất cả parties xong
+  useEffect(() => {
+    if (dkgState !== DKG_STATE.COMPLETE || !escrowId || isDkgComplete) return;
+    let active = true;
+    const check = async () => {
+      try {
+        await api.get(`/escrow/${escrowId}/dkg/master-pubkey`);
+        if (active) setIsDkgComplete(true);
+      } catch { /* keep polling */ }
+    };
+    const interval = setInterval(check, 5000);
+    check();
+    return () => { active = false; clearInterval(interval); };
+  }, [dkgState, escrowId, isDkgComplete]);
+
   const localPubKey = getPubKey(address);
   const isVaultLockedOnChain = onChainVaultStatus !== null && Number(onChainVaultStatus) >= 1;
   const isVaultTerminalOnChain = onChainVaultStatus !== null && [2, 3].includes(Number(onChainVaultStatus));
   const isEscrowTerminal = ['RELEASED', 'REFUNDED'].includes(String(escrow?.status || '').toUpperCase());
   const isSigningFlowClosed = isVaultTerminalOnChain || isEscrowTerminal;
 
-  // Cờ kiểm tra tính độc quyền UI (Mutually Exclusive)
-  const hasVaultAddress = Boolean(escrow?.contractAddress || escrow?.vaultAddress);
-
-  // Auto-scroll cho Terminal & Biến cờ Auto-Submit (Phase 1)
+  // Auto-scroll Terminal
   const logsEndRef = useRef(null);
-  const autoSubmitAttempted = useRef(false);
 
   // Fallback Polling: Nếu kẹt ở DRAFT nhưng đã có Vault Address, tự động quét Backend mỗi 5s
   useEffect(() => {
@@ -207,7 +240,8 @@ export default function EscrowDetail() {
           setProgress(7);
           setSignedNodes(['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5']);
         }
-      } catch (error) {
+      } catch {
+        // ignore fetch error
       } finally {
         if (active) setIsEscrowLoading(false);
       }
@@ -231,7 +265,7 @@ export default function EscrowDetail() {
         const statusValue = await getVaultStatus(vaultAddress);
         if (!active) return;
         setOnChainVaultStatus(Number(statusValue));
-      } catch (error) {
+      } catch {
         if (!active) return;
       }
     };
@@ -242,70 +276,40 @@ export default function EscrowDetail() {
     };
   }, [escrow?.contractAddress, escrow?.vaultAddress]);
 
-  // --- CÁC HÀM XỬ LÝ HÀNH ĐỘNG ---
-  const handleSubmitMyPubKey = useCallback(async () => {
-    if (activeRole === 'Unknown') return alert('Cannot resolve your escrow role.');
-    if (!localPubKey) return alert('Public key not found. Please generate your key first.');
-
-    setIsSubmittingKey(true);
-    try {
-      await submitPubKey({ role: activeRole, pubKey: localPubKey });
-    } catch (error) {
-      const status = error.response?.status;
-      if (status === 409) {
-        console.warn(`[DKG] Pubkey conflict ignored for ${activeRole}. It was likely submitted previously.`);
-      } else {
-        alert(error.response ? `Backend Error: ${JSON.stringify(error.response.data)}` : `Error: ${error.message}`);
-      }
-    } finally {
-      setIsSubmittingKey(false);
-    }
-  }, [activeRole, localPubKey, submitPubKey, addLog]);
-
-  // --- BẢN VÁ PHASE 1: LUỒNG AUTO-SUBMIT KEY ---
+  // --- DKG COMPLETION: lưu signing private key cục bộ ---
+  // Backend tự suy signing pubkeys (Pⱼ) từ Feldman commitments nên KHÔNG cần submit pubkey
+  // lên backend nữa. Chỉ cần lưu private share sⱼ cục bộ để party này dùng khi ký (z-share).
+  // (Không ghi đè PubKeySubmission trên backend vì nó là nguồn identity-key cho ECDH của shares.)
   useEffect(() => {
-    if (isEscrowLoading || isRecovering) return;
+    if (dkgState !== DKG_STATE.COMPLETE || !dkgResult || !activeRole || activeRole === 'Unknown' || !address) return;
 
-    if (hasVaultAddress) {
-      return;
-    }
+    const { finalShareHex, signingPubKey } = dkgResult;
+    const pubKeyHex = `0x04${signingPubKey.x.padStart(64, '0')}${signingPubKey.y.padStart(64, '0')}`;
 
-    const escrowStatus = String(escrow?.status || '').toUpperCase();
-    const dkgAllowed = ['DRAFT', 'INITIALIZED', 'LOCKED', 'DISPUTED'].includes(escrowStatus);
+    savePrivKey(finalShareHex, address);
+    savePubKey(pubKeyHex, address);
+    addLog({ message: '[DKG] ✅ Signing private key đã lưu cục bộ. Sẵn sàng ký.', type: 'success' });
+  }, [dkgState, dkgResult, activeRole, address, addLog]);
 
-    if (!dkgAllowed) return;
-    if (activeRole === 'Unknown' || !localPubKey || hasSubmitted || isSubmittingKey || progress >= 7 || autoSubmitAttempted.current) return;
-
-    autoSubmitAttempted.current = true;
-    handleSubmitMyPubKey();
-
-  }, [isEscrowLoading, isRecovering, escrow?.status, activeRole, localPubKey, hasSubmitted, progress, isSubmittingKey]);
-
-
-  const lastLogRef = useRef(0);
-
+  // --- KHÔI PHỤC STATE ROUND 2 KHI RE-LOGIN / RELOAD ---
+  // Nếu backend báo Round 1 đã chốt (round2_ready), hiển thị ngay nút Z-Share với challenge
+  // đã khoá — không bắt party chạy lại Round 1 (gây đổi challenge → InvalidSignature).
   useEffect(() => {
-    try {
-      const now = Date.now();
-      // Chỉ log tối đa 1 lần mỗi 1000ms (1 giây)
-      if (now - lastLogRef.current < 1000) return;
-      lastLogRef.current = now;
-
-      const mediatorCount = escrow?.escrowMediators?.length || 0;
-      const table = [
-        { Biến: 'DKG Progress', Giá_trị: progress },
-        { Biến: 'Trạng thái Escrow', Giá_trị: escrow?.status ?? 'Chưa có' },
-        { Biến: 'Số lượng Trọng tài', Giá_trị: mediatorCount },
-        { Biến: 'Vai trò hiện tại (Role)', Giá_trị: activeRole },
-        { Biến: 'Đã có LocalPubKey?', Giá_trị: Boolean(localPubKey) },
-        { Biến: 'Đã Submit (hasSubmitted)?', Giá_trị: hasSubmitted },
-        { Biến: 'Đã chặn Auto-Submit (Attempted)?', Giá_trị: !!autoSubmitAttempted.current }
-      ];
-      console.group('🚀 [STATE MONITOR] THEO DÕI DEADLOCK');
-      console.table(table);
-      console.groupEnd();
-    } catch (err) { }
-  }, [progress, escrow?.status, escrow?.escrowMediators?.length, activeRole, localPubKey, hasSubmitted]);
+    if (!escrowId || !activeRole || activeRole === 'Unknown') return;
+    let active = true;
+    api.get(`/escrow/${escrowId}/status`)
+      .then(({ data }) => {
+        if (!active) return;
+        if (data?.signingState === 'round2_ready' && data?.round2Context) {
+          if (data.signingAction) setSelectedAction(data.signingAction);
+          setNonceRound1(data.round2Context);
+          setSigningPhase('z-share');
+          addLog({ message: 'Khôi phục phiên ký: Round 1 đã hoàn tất, sẵn sàng Round 2 (Z-Share).', type: 'info' });
+        }
+      })
+      .catch(() => { /* no active signing session — ignore */ });
+    return () => { active = false; };
+  }, [escrowId, activeRole, setNonceRound1, setSigningPhase, setSelectedAction, addLog]);
 
   // --- DEBOUNCE REFRESH: Gom nhóm các API request bị spam ---
   const refreshTimeoutRef = useRef(null);
@@ -367,6 +371,24 @@ export default function EscrowDetail() {
     };
   }, [escrowId, addLog]);
 
+  // --- RESET DKG (cho phép chạy lại DKG khi vault key không khớp signing keys) ---
+  const [isResettingDkg, setIsResettingDkg] = useState(false);
+
+  const handleResetDkg = useCallback(async () => {
+    if (!escrowId || !address) return;
+    if (!window.confirm('Reset toàn bộ DKG? Tất cả 7 parties phải chạy lại DKG từ đầu. Vault đã deploy sẽ không còn dùng được nữa nếu master key thay đổi!')) return;
+    setIsResettingDkg(true);
+    try {
+      await api.post(`/escrow/${escrowId}/dkg/reset`);
+      clearDkgLocalState(escrowId, address);
+      addLog({ message: 'DKG đã được reset. Tất cả parties cần chạy lại DKG.', type: 'warning' });
+    } catch (e) {
+      addLog({ message: `Reset DKG thất bại: ${e.message}`, type: 'error' });
+    } finally {
+      setIsResettingDkg(false);
+    }
+  }, [escrowId, address, addLog]);
+
   // --- KHỐI XỬ LÝ DEPLOY TỪ VÍ BUYER ---
   const [isDeploying, setIsDeploying] = useState(false);
 
@@ -389,16 +411,15 @@ export default function EscrowDetail() {
       }
       const mediatorAddrs = mediatorsRows.map((r) => normalizeAddress(r.mediator?.walletAddress || r.mediatorAddress));
 
-      // 2) Lấy khóa tổng hợp pkAgg đã được sinh ra từ bước DKG
-      const { data: agg } = await api.get(`/escrow/${escrowId}/aggregate-key?roles=buyer,seller,mediator1,mediator2,mediator3,mediator4,mediator5`);
-      const coords = agg?.pkAggCoords || agg?.pkAggReleaseCoords;
-      if (!coords || coords.length !== 2) {
-        throw new Error('Aggregated public key missing. DKG not completed.');
+      // 2) Lấy master public key từ Pedersen VSS DKG (P = Σ Cᵢ₀)
+      const { data: dkgKey } = await api.get(`/escrow/${escrowId}/dkg/master-pubkey`);
+      if (!dkgKey?.masterPubKey) {
+        throw new Error(`DKG incomplete: ${dkgKey?.error || 'master public key not available'}. Chờ tất cả 7 parties hoàn thành DKG.`);
       }
 
-      const x = BigInt(coords[0]);
-      const y = BigInt(coords[1]);
-      if (x === 0n || y === 0n) throw new Error('Aggregated key invalid (zero).');
+      const x = BigInt(dkgKey.masterPubKey.x);
+      const y = BigInt(dkgKey.masterPubKey.y);
+      if (x === 0n || y === 0n) throw new Error('Master public key invalid (zero).');
 
       const factoryAddress = import.meta.env.VITE_ESCROW_CONTRACT_ADDRESS;
       addLog({ message: 'Vui lòng xác nhận giao dịch Deploy trên MetaMask...', type: 'info' });
@@ -609,6 +630,10 @@ export default function EscrowDetail() {
       addLog({ message: 'Release flow is closed because this vault is already finalized.', type: 'warning' });
       return;
     }
+    if (progress < 7) {
+      addLog({ message: `⚠️ Cannot sign: chỉ có ${progress}/7 signing keys đã được submit. Chờ tất cả parties hoàn thành DKG.`, type: 'warning' });
+      return;
+    }
     const action = 'release';
     setSelectedAction(action);
 
@@ -616,66 +641,35 @@ export default function EscrowDetail() {
       const nonceKey = buildNonceKey(action);
       if (!nonceKey) throw new Error('Cannot start Round 1: unresolved escrow/action/role context');
 
-      const { R_x, R_y } = await computeNonce(nonceKey);
+      // FROST: sinh dual nonce k1, k2 → R1, R2
+      const frostResult = await computeNonceFrost(nonceKey);
+      const safe_R_x = extractTrueHex(frostResult.R1_x);
+      const safe_R_y = extractTrueHex(frostResult.R1_y);
+      const safe_R2_x = extractTrueHex(frostResult.R2_x);
+      const safe_R2_y = extractTrueHex(frostResult.R2_y);
 
-      const safe_R_x = extractTrueHex(R_x);
-      const safe_R_y = extractTrueHex(R_y);
+      addLog({ message: `Submitting FROST dual nonce for action: ${action}...`, type: 'info' });
+      const nonceResponse = await submitNonce(escrowId, activeRole, action, 0, safe_R_x, safe_R_y, safe_R2_x, safe_R2_y);
 
-      // Backend will calculate signerBitmap from actual submitted roles
-      addLog({ message: `Submitting nonce for action: ${action}...`, type: 'info' });
-      const nonceResponse = await submitNonce(escrowId, activeRole, action, 0, safe_R_x, safe_R_y);
-
-      // Use signerBitmap from backend response
       const actualSignerBitmap = nonceResponse.signerBitmap;
       addLog({ message: `Backend confirmed signerBitmap: ${actualSignerBitmap}`, type: 'info' });
 
-      // If Round 1 is already complete, set nonceRound1 atom and transition to Round 2
-      // ── NONCE MISMATCH GUARD ─────────────────────────────────────────────────────
-      // `existingNonce` is returned whenever the backend already stored a DIFFERENT
-      // nonce for our role. This happens when IndexedDB was cleared between Round 1
-      // and Round 2 (e.g. page refresh, browser storage clear).
-      //
-      // The private scalar k_i is NEVER sent to the backend and is unrecoverable once
-      // IndexedDB is wiped. If we proceed, z_i = k_new + e * x_i will be computed
-      // with a k that does NOT match the R already baked into the challenge 'e'.
-      // The on-chain Schnorr check will always fail with InvalidSignature.
-      //
-      // Correct recovery: clear the wrong k_new from IndexedDB, reset the backend
-      // signing session, and ask all participants to restart Round 1.
-      if (nonceResponse.existingNonce) {
-        addLog({
-          message:
-            '⚠️ NONCE MISMATCH DETECTED: Your signing nonce (k_i) was lost from local storage. ' +
-            'A new nonce was generated but it conflicts with the one already registered in the session. ' +
-            'The signing session must be reset — all participants will need to restart Round 1.',
-          type: 'error'
-        });
-        // Remove the wrong nonce we just saved so it cannot be accidentally reused.
-        if (clearNonce) await clearNonce(nonceKey);
-        // Reset the backend session so other participants can restart cleanly too.
-        try {
-          await resetSigning(action, 'Nonce lost from IndexedDB — nonce mismatch with backend session');
-          addLog({ message: 'Signing session has been reset. Please coordinate with all participants to restart Round 1.', type: 'warning' });
-        } catch (resetErr) {
-          addLog({ message: `⚠️ Auto-reset failed (${resetErr.message}). Please reset manually via the admin panel.`, type: 'warning' });
-        }
-        return; // Do NOT fall through to Round 2 with an invalid nonce
-      }
-      // ─────────────────────────────────────────────────────────────────────────────
-
+      // ƯU TIÊN round2_ready: Round 1 đã chốt → vào thẳng Round 2 với challenge đã khoá.
+      // KHÔNG auto-reset (đổi challenge giữa chừng = InvalidSignature).
       if (nonceResponse.state === 'round2_ready' && nonceResponse.round2Context) {
         setNonceRound1(nonceResponse.round2Context);
         setSigningPhase('z-share');
-        addLog({ message: `Round 1 already complete. You can proceed to Round 2.`, type: 'success' });
+        addLog({ message: `Round 1 đã hoàn tất. Chuyển sang Round 2 (Z-Share).`, type: 'success' });
+        return;
       }
+
+      addLog({ message: `Round 1 đang tiến hành. Chờ đủ 5 nonce...`, type: 'info' });
     } catch (error) {
       const status = error.response?.status;
       const exactError = error.response?.data?.error || error.message;
 
-      // Handle 409 conflict - different action or bitmap in progress
       if (status === 409) {
         addLog({ message: `⚠️ ${exactError}`, type: 'warning' });
-        // Don't block UI - user can continue with Round 2 if they have nonce stored locally
       } else {
         addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
       }
@@ -687,6 +681,10 @@ export default function EscrowDetail() {
       addLog({ message: 'Refund flow is closed because this vault is already finalized.', type: 'warning' });
       return;
     }
+    if (progress < 7) {
+      addLog({ message: `⚠️ Cannot sign: chỉ có ${progress}/7 signing keys đã được submit. Chờ tất cả parties hoàn thành DKG.`, type: 'warning' });
+      return;
+    }
     const action = 'refund';
     setSelectedAction(action);
 
@@ -694,54 +692,35 @@ export default function EscrowDetail() {
       const nonceKey = buildNonceKey(action);
       if (!nonceKey) throw new Error('Cannot start Round 1: unresolved escrow/action/role context');
 
-      const { R_x, R_y } = await computeNonce(nonceKey);
+      // FROST: sinh dual nonce k1, k2 → R1, R2
+      const frostResult = await computeNonceFrost(nonceKey);
+      const safe_R_x = extractTrueHex(frostResult.R1_x);
+      const safe_R_y = extractTrueHex(frostResult.R1_y);
+      const safe_R2_x = extractTrueHex(frostResult.R2_x);
+      const safe_R2_y = extractTrueHex(frostResult.R2_y);
 
-      const safe_R_x = extractTrueHex(R_x);
-      const safe_R_y = extractTrueHex(R_y);
+      addLog({ message: `Submitting FROST dual nonce for action: ${action}...`, type: 'info' });
+      const nonceResponse = await submitNonce(escrowId, activeRole, action, 0, safe_R_x, safe_R_y, safe_R2_x, safe_R2_y);
 
-      // Backend will calculate signerBitmap from actual submitted roles
-      addLog({ message: `Submitting nonce for action: ${action}...`, type: 'info' });
-      const nonceResponse = await submitNonce(escrowId, activeRole, action, 0, safe_R_x, safe_R_y);
-
-      // Use signerBitmap from backend response
       const actualSignerBitmap = nonceResponse.signerBitmap;
       addLog({ message: `Backend confirmed signerBitmap: ${actualSignerBitmap}`, type: 'info' });
 
-      // ── NONCE MISMATCH GUARD ────────────────────────────────────────────────
-      // Same guard as handleStartRelease — see inline comment there for full explanation.
-      if (nonceResponse.existingNonce) {
-        addLog({
-          message:
-            '⚠️ NONCE MISMATCH DETECTED: Your signing nonce (k_i) was lost from local storage. ' +
-            'A new nonce was generated but it conflicts with the one already registered in the session. ' +
-            'The signing session must be reset — all participants will need to restart Round 1.',
-          type: 'error'
-        });
-        if (clearNonce) await clearNonce(nonceKey);
-        try {
-          await resetSigning(action, 'Nonce lost from IndexedDB — nonce mismatch with backend session');
-          addLog({ message: 'Signing session has been reset. Please coordinate with all participants to restart Round 1.', type: 'warning' });
-        } catch (resetErr) {
-          addLog({ message: `⚠️ Auto-reset failed (${resetErr.message}). Please reset manually via the admin panel.`, type: 'warning' });
-        }
-        return;
-      }
-      // ────────────────────────────────────────────────────────────────────────
-
-      // If Round 1 is already complete, set nonceRound1 atom and transition to Round 2
+      // ƯU TIÊN round2_ready: Round 1 đã chốt → vào thẳng Round 2 với challenge đã khoá.
+      // KHÔNG auto-reset (đổi challenge giữa chừng = InvalidSignature).
       if (nonceResponse.state === 'round2_ready' && nonceResponse.round2Context) {
         setNonceRound1(nonceResponse.round2Context);
         setSigningPhase('z-share');
-        addLog({ message: `Round 1 already complete. You can proceed to Round 2.`, type: 'success' });
+        addLog({ message: `Round 1 đã hoàn tất. Chuyển sang Round 2 (Z-Share).`, type: 'success' });
+        return;
       }
+
+      addLog({ message: `Round 1 đang tiến hành. Chờ đủ 5 nonce...`, type: 'info' });
     } catch (error) {
       const status = error.response?.status;
       const exactError = error.response?.data?.error || error.message;
 
-      // Handle 409 conflict - different action or bitmap in progress
       if (status === 409) {
         addLog({ message: `⚠️ ${exactError}`, type: 'warning' });
-        // Don't block UI - user can continue with Round 2 if they have nonce stored locally
       } else {
         addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
       }
@@ -827,14 +806,18 @@ export default function EscrowDetail() {
       const nonceKey = buildNonceKey(selectedAction);
       if (!nonceKey) throw new Error('Cannot start Round 2: action/role context is missing');
 
-      const { z } = await computeZShare(privateKeyHex, challengeHex, nonceKey);
+      // FROST: lấy binding factor của role mình từ round2Context (nếu có)
+      const bindingFactorHex = nonceRound1.bindingFactors?.[activeRole] || null;
 
-      clearPrivKey(address);
+      const { z } = await computeZShare(privateKeyHex, challengeHex, nonceKey, bindingFactorHex);
+
+      // KHÔNG clearPrivKey ở đây: để bấm lại Z-Share không phải nhập lại passphrase (idempotent).
 
       addLog({ message: `✅ Round 2 Z-Share computed successfully with real challenge: ${challengeHex}`, type: 'info' });
       addLog({ message: `📝 Submitting Z-Share with signerBitmap: ${signerBitmap}`, type: 'info' });
 
-      await submitZShare(escrowId, activeRole, signerBitmap, z);
+      // Gửi kèm challenge để backend từ chối nếu z tính trên Round 1 cũ (chống trộn challenge).
+      await submitZShare(escrowId, activeRole, signerBitmap, z, challengeHex);
     } catch (error) {
       const errorMessage = String(error?.message || 'Unknown error');
       const helpMessage = errorMessage.includes('Round 1 nonce not found')
@@ -1034,11 +1017,11 @@ export default function EscrowDetail() {
           </div>
         </section>
 
-        {/* KHỐI 2: THANH TIẾN TRÌNH TSS 5-OF-7 */}
+        {/* KHỐI 2: THANH TIẾN TRÌNH DKG SIGNING KEY */}
         {mediationAssigned && (
           <section className="flex flex-col gap-4">
             <div className="flex justify-between items-end">
-              <h3 className="text-slate-300 font-medium text-lg">Public Key Collection Progress</h3>
+              <h3 className="text-slate-300 font-medium text-lg">DKG Signing Key Submission Progress</h3>
               <span className="text-sm font-mono text-slate-400 bg-slate-800 px-3 py-1 rounded-md border border-slate-700">
                 {progress}/7
               </span>
@@ -1088,37 +1071,110 @@ export default function EscrowDetail() {
           </div>
         </section>
 
-        {/* KHỐI 4: CỤM NÚT HÀNH ĐỘNG PUBKEY */}
-        {mediationAssigned && progress < 7 && (
-          <section className="flex gap-6 justify-center mt-4">
-            <button
-              onClick={handleSubmitMyPubKey}
-              disabled={hasSubmitted || isSubmittingKey || progress >= 7 || activeRole === 'Unknown' || !localPubKey}
-              className={`px-8 py-4 rounded-xl font-bold transition-all duration-300 w-56 flex items-center justify-center gap-2
-                ${hasSubmitted || progress >= 7 || activeRole === 'Unknown' || !localPubKey
-                  ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
-                  : isSubmittingKey
-                    ? 'bg-blue-600/50 cursor-wait border border-blue-500/50'
-                    : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/25 border border-blue-500'}`}
-            >
-              {isSubmittingKey && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}
-              {isSubmittingKey ? 'Submitting...' : hasSubmitted ? 'Pubkey Submitted ✓' : !localPubKey ? 'Generate Key First' : 'Submit My Pubkey'}
-            </button>
+        {/* KHỐI 4.2: DKG PHASE */}
+        {!hasVaultAddress && isAllowedSigner && (
+          <section className="bg-slate-800 p-8 rounded-2xl border border-purple-500/30 shadow-xl mt-4">
+            <div className="flex justify-between items-center border-b border-slate-700 pb-4 mb-6">
+              <h3 className="text-xl font-bold text-purple-400">Bước 1.5: Pedersen VSS DKG</h3>
+              <span className={`px-3 py-1 rounded-full text-xs font-bold border ${
+                isDkgComplete ? 'bg-green-900/40 border-green-500 text-green-400' :
+                dkgState === DKG_STATE.ERROR ? 'bg-red-900/40 border-red-500 text-red-400' :
+                dkgState === DKG_STATE.IDLE ? 'bg-slate-700 border-slate-600 text-slate-400' :
+                'bg-purple-900/40 border-purple-500 text-purple-400 animate-pulse'
+              }`}>
+                {isDkgComplete ? 'COMPLETE' : dkgState.toUpperCase()}
+              </span>
+            </div>
 
-            <a
-              href="/generate-key"
-              className="px-8 py-4 rounded-xl font-bold transition-all duration-300 w-64 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white shadow-[0_0_30px_rgba(16,185,129,0.4)] border border-emerald-500"
-            >
-              Generate / Rotate Key
-            </a>
+            {/* Progress bars */}
+            <div className="grid grid-cols-2 gap-4 mb-6">
+              <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700">
+                <p className="text-slate-400 text-xs mb-2">Commitments nhận được</p>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 bg-slate-700 rounded-full h-2">
+                    <div
+                      className="bg-purple-500 h-2 rounded-full transition-all"
+                      style={{ width: `${Math.min(100, (dkgProgress.commitmentsReceived / 7) * 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-white text-sm font-mono">{dkgProgress.commitmentsReceived}/7</span>
+                </div>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700">
+                <p className="text-slate-400 text-xs mb-2">Shares nhận được</p>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 bg-slate-700 rounded-full h-2">
+                    <div
+                      className="bg-blue-500 h-2 rounded-full transition-all"
+                      style={{ width: `${Math.min(100, (dkgProgress.sharesReceived / 7) * 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-white text-sm font-mono">{dkgProgress.sharesReceived}/7</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Signing key result */}
+            {dkgResult && (
+              <div className="bg-green-900/20 border border-green-600/40 p-3 rounded-lg mb-4">
+                <p className="text-green-400 text-xs font-mono break-all">
+                  Signing PubKey: ({dkgResult.signingPubKey?.x?.slice(0, 16)}..., {dkgResult.signingPubKey?.y?.slice(0, 16)}...)
+                </p>
+              </div>
+            )}
+
+            {/* Error message */}
+            {dkgState === DKG_STATE.ERROR && dkgError && (
+              <div className="bg-red-900/20 border border-red-600/40 p-3 rounded-lg mb-4">
+                <p className="text-red-400 text-sm">{dkgError}</p>
+              </div>
+            )}
+
+            {/* Action button */}
+            {isDkgComplete ? (
+              <p className="text-center text-green-400 font-bold">✅ DKG hoàn tất — tất cả 7 parties đã đóng góp shares. Sẵn sàng Deploy.</p>
+            ) : dkgState === DKG_STATE.IDLE || dkgState === DKG_STATE.ERROR ? (
+              isAllowedSigner && dkgPrivKey ? (
+                <button
+                  onClick={runDkg}
+                  disabled={!escrowId || !activeRole || activeRole === 'Unknown' || !dkgPrivKey}
+                  className="w-full py-4 rounded-xl font-bold text-white bg-linear-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {dkgState === DKG_STATE.ERROR ? 'Retry DKG' : 'Run Pedersen VSS DKG'}
+                </button>
+              ) : (
+                <p className="text-center text-slate-400 text-sm">
+                  {!dkgPrivKey ? 'Cần có private key để chạy DKG. Hãy tạo key trước.' : 'Không đủ quyền hạn để chạy DKG.'}
+                </p>
+              )
+            ) : (
+              <div className="flex items-center justify-center gap-3 text-purple-300">
+                <div className="w-5 h-5 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
+                <span className="text-sm">DKG đang chạy... Chờ tất cả parties hoàn thành.</span>
+              </div>
+            )}
+
+            {/* Reset DKG — danger zone for when vault key mismatches signing keys */}
+            {isAllowedSigner && (
+              <div className="mt-4 pt-4 border-t border-red-900/30">
+                <button
+                  onClick={handleResetDkg}
+                  disabled={isResettingDkg}
+                  className="w-full py-2 rounded-lg text-xs font-semibold text-red-400 border border-red-700/50 hover:bg-red-900/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isResettingDkg ? 'Đang reset...' : '⚠ Reset DKG (xóa toàn bộ, chạy lại từ đầu)'}
+                </button>
+              </div>
+            )}
           </section>
         )}
-        {/* KHỐI 4.1: DEPLOY VAULT (CHỈ HIỆN KHI CHƯA CÓ CONTRACT) */}
-        {!hasVaultAddress && progress >= 7 && (
+
+        {/* KHỐI 4.1: DEPLOY VAULT (CHỈ HIỆN KHI ĐÃ CÓ DKG VÀ CHƯA CÓ CONTRACT) */}
+        {!hasVaultAddress && isDkgComplete && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-yellow-500/30 shadow-sm mt-6">
             {activeRole === 'buyer' ? (
               <div className="flex flex-col items-center text-center gap-4">
-                <h3 className="text-xl font-bold text-yellow-400">Bước 1: Triển khai Hợp đồng (Deploy)</h3>
+                <h3 className="text-xl font-bold text-yellow-400">Bước 2: Triển khai Hợp đồng (Deploy)</h3>
                 <p className="text-slate-300">Hợp đồng Escrow chưa được tạo trên mạng lưới Blockchain.</p>
                 <p className="text-sm text-slate-400 mb-2">Với tư cách là Buyer, bạn cần ký giao dịch (trả phí Gas) để tạo Hợp đồng.</p>
                 <button
@@ -1136,6 +1192,14 @@ export default function EscrowDetail() {
                 <p className="text-sm text-slate-500">Sau khi Buyer tạo Hợp đồng thành công, các chức năng khác sẽ được mở khóa.</p>
               </div>
             )}
+          </section>
+        )}
+
+        {/* KHỐI 4.1b: WAITING FOR DKG (non-buyer, DKG not complete) */}
+        {!hasVaultAddress && !isDkgComplete && !isAllowedSigner && mediationAssigned && (
+          <section className="bg-slate-800 p-6 rounded-2xl border border-slate-700 mt-6 text-center text-slate-400">
+            <p className="text-lg font-bold text-yellow-500/80">⏳ Đang chờ DKG hoàn thành...</p>
+            <p className="text-sm text-slate-500 mt-1">Tất cả 7 parties phải hoàn thành DKG trước khi Buyer có thể Deploy.</p>
           </section>
         )}
         {/* KHỐI 4.5 (PHASE 2): ĐỘC QUYỀN HIỂN THỊ NÚT DEPOSIT CHỈ KHI ĐÃ CÓ VAULT ADDRESS */}
@@ -1199,16 +1263,25 @@ export default function EscrowDetail() {
                 </div>
               )}
 
+              {progress < 7 && (
+                <div className="w-full text-center bg-yellow-900/30 border border-yellow-600/50 px-4 py-2 rounded-lg">
+                  <p className="text-yellow-300 text-sm">⏳ Chờ tất cả 7 parties hoàn thành DKG và submit signing key ({progress}/7).</p>
+                </div>
+              )}
               <button
                 onClick={handleStartRelease}
-                className="w-full md:w-auto px-6 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-white font-bold shadow-lg shadow-emerald-500/20 transform transition hover:-translate-y-1"
+                disabled={progress < 7}
+                className={`w-full md:w-auto px-6 py-3 rounded-xl text-white font-bold shadow-lg transform transition
+                  ${progress < 7 ? 'bg-emerald-800/50 cursor-not-allowed opacity-50' : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20 hover:-translate-y-1'}`}
               >
                 Start Release (TSS)
               </button>
 
               <button
                 onClick={handleStartRefund}
-                className="w-full md:w-auto px-6 py-3 bg-amber-600 hover:bg-amber-500 rounded-xl text-white font-bold shadow-lg shadow-amber-500/20 transform transition hover:-translate-y-1"
+                disabled={progress < 7}
+                className={`w-full md:w-auto px-6 py-3 rounded-xl text-white font-bold shadow-lg transform transition
+                  ${progress < 7 ? 'bg-amber-800/50 cursor-not-allowed opacity-50' : 'bg-amber-600 hover:bg-amber-500 shadow-amber-500/20 hover:-translate-y-1'}`}
               >
                 Start Refund (TSS)
               </button>
@@ -1296,7 +1369,7 @@ export default function EscrowDetail() {
             </section>
           )}
 
-        {progress >= 7 && hasVaultAddress && isSigningFlowClosed && (
+        {hasVaultAddress && isSigningFlowClosed && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-emerald-500/30 shadow-[0_0_30px_rgba(16,185,129,0.1)] mt-8">
             <h3 className="text-xl font-bold mb-4 text-emerald-400 border-b border-slate-700 pb-4">Escrow Finalized</h3>
             <p className="text-slate-300">

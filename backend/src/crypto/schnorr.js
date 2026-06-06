@@ -282,6 +282,31 @@ export function aggregateZShares(zShares) {
  * @param {Object} roleToId - { role: id } ví dụ { buyer: 1, seller: 2, ... }
  * @returns {string} z (bytes32 hex)
  */
+/**
+ * Verify một z-share riêng lẻ (Lagrange-at-aggregation scheme):
+ *   zᵢ·G == R_effᵢ + e·Pᵢ
+ * trong đó Pᵢ là signing pubkey của party i, R_effᵢ là effective nonce (đã gồm binding factor).
+ *
+ * @param {string} zHex        - z-share của party (hex scalar)
+ * @param {{R_x,R_y}} rEff      - effective nonce của party
+ * @param {string} eHex        - challenge
+ * @param {string} pubKeyHex   - signing pubkey Pᵢ ("0x04..." hoặc 128-hex)
+ * @returns {boolean}
+ */
+export function verifyZShare(zHex, rEff, eHex, pubKeyHex) {
+  const z = BigInt(zHex.startsWith('0x') ? zHex : '0x' + zHex);
+  const e = BigInt(eHex.startsWith('0x') ? eHex : '0x' + eHex) % ORDER;
+
+  const zG = ec.g.mul(scalarForPointMul(z));
+  const P = ec.keyFromPublic(normalizePubKey(pubKeyHex), 'hex').getPublic();
+  const Reff = ec.keyFromPublic({ x: normalize64(rEff.R_x), y: normalize64(rEff.R_y) }, 'hex').getPublic();
+  const eP = P.mul(scalarForPointMul(e));
+  const expected = Reff.add(eP);
+
+  return zG.getX().toString(16) === expected.getX().toString(16) &&
+         zG.getY().toString(16) === expected.getY().toString(16);
+}
+
 export function aggregateZSharesWithLagrange(zSharesByRole, roleToId) {
   if (!zSharesByRole || typeof zSharesByRole !== 'object') {
     throw new Error('zSharesByRole is required');
@@ -556,3 +581,78 @@ export function createOwnershipChallenge(walletAddress, pubKeyHex) {
 }
 
 export { pointToAddress };
+
+// ─── FROST (binding factor + effective nonces) ────────────────────────────────
+
+/**
+ * Tính FROST binding factors: ρ_i = H(i, msgHash, {all R1s, R2s for signers})
+ *
+ * Ngăn Wagner attack: mỗi party có binding factor khác nhau phụ thuộc vào
+ * toàn bộ tập nonces. Nếu bất kỳ nonce nào thay đổi → tất cả ρ thay đổi.
+ *
+ * @param {string[]}   signerRoles  - ordered roles tham gia ký
+ * @param {string}     msgHash      - 32 bytes hex
+ * @param {{ role: { R1_x, R1_y } }} r1Points
+ * @param {{ role: { R2_x, R2_y } }} r2Points
+ * @param {{ role: number }} roleToId
+ * @returns {{ role: string }} binding factor hex per role
+ */
+export function computeBindingFactors(signerRoles, msgHash, r1Points, r2Points, roleToId) {
+  // Build commitment list: sorted by participantId to ensure determinism
+  const sortedRoles = [...signerRoles].sort((a, b) => roleToId[a] - roleToId[b]);
+
+  // Encode all R1 + R2 nonces in a canonical order
+  const noncesEncoded = sortedRoles.flatMap(role => {
+    const r1 = r1Points[role];
+    const r2 = r2Points[role];
+    return [
+      normalize64(r1.R1_x), normalize64(r1.R1_y),
+      normalize64(r2.R2_x), normalize64(r2.R2_y),
+    ];
+  }).join('');
+
+  const bindingFactors = {};
+  for (const role of signerRoles) {
+    const id = roleToId[role];
+    // ρ_i = keccak256(i_id || msgHash || all_nonces)
+    const encoded = ethers.solidityPackedKeccak256(
+      ['uint256', 'bytes32', 'bytes'],
+      [id, msgHash, '0x' + noncesEncoded]
+    );
+    bindingFactors[role] = encoded;
+  }
+
+  return bindingFactors;
+}
+
+/**
+ * Tính effective nonce Rᵢ = R1_i + ρ_i * R2_i cho mỗi party
+ *
+ * @param {{ role: { R1_x, R1_y } }} r1Points
+ * @param {{ role: { R2_x, R2_y } }} r2Points
+ * @param {{ role: string }} bindingFactors  - kết quả từ computeBindingFactors
+ * @returns {{ role: { R_x, R_y } }} effective nonces
+ */
+export function computeEffectiveNonces(r1Points, r2Points, bindingFactors) {
+  const effectiveNonces = {};
+
+  for (const role of Object.keys(bindingFactors)) {
+    const r1 = r1Points[role];
+    const r2 = r2Points[role];
+    const rho = BigInt(bindingFactors[role]);
+
+    const R1 = ec.keyFromPublic({ x: normalize64(r1.R1_x), y: normalize64(r1.R1_y) }, 'hex').getPublic();
+    const R2 = ec.keyFromPublic({ x: normalize64(r2.R2_x), y: normalize64(r2.R2_y) }, 'hex').getPublic();
+
+    // Rᵢ = R1_i + ρ_i * R2_i
+    const rho_R2 = R2.mul(scalarForPointMul(rho));
+    const Ri = R1.add(rho_R2);
+
+    effectiveNonces[role] = {
+      R_x: '0x' + Ri.getX().toString(16).padStart(64, '0'),
+      R_y: '0x' + Ri.getY().toString(16).padStart(64, '0'),
+    };
+  }
+
+  return effectiveNonces;
+}

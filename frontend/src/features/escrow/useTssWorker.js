@@ -13,18 +13,18 @@ export const useTssWorker = () => {
   const addLog = useSetAtom(addSystemLogAtom); // Lấy hàm ghi log lên Terminal UI
 
   // Khởi tạo Worker khi component mount
-  const persistNonce = useCallback(async (nonceKey, nonceHex) => {
-    if (!nonceKey || !nonceHex) return;
+  const persistNonce = useCallback(async (nonceKey, nonceHex, frostExtras) => {
+    if (!nonceKey) return;
     console.log(`[TSS Worker Main] Saving nonce: ${nonceKey}`);
-    
-    // Check if nonce already exists to prevent overwrite
+
+    // Don't overwrite an existing nonce (idempotent)
     const existingNonce = await getNonceRecord(nonceKey);
     if (existingNonce) {
       console.log(`[TSS Worker Main] Nonce already exists, skipping overwrite: ${nonceKey}`);
-      return; // Don't overwrite existing nonce
+      return;
     }
-    
-    await saveNonceRecord(nonceKey, nonceHex);
+
+    await saveNonceRecord(nonceKey, nonceHex, frostExtras);
   }, []);
 
   const loadNonce = useCallback(async (nonceKey) => {
@@ -80,9 +80,9 @@ export const useTssWorker = () => {
       try {
         // Reject toàn bộ task đang chờ để tránh memory leak
         Object.values(taskResolvers.current).forEach(({ reject }) => {
-          try { 
-            reject(new Error('TSS worker terminated forcefully on unmount')); 
-          } catch (e) {}
+          try {
+            reject(new Error('TSS worker terminated forcefully on unmount'));
+          } catch { /* ignore rejection errors during cleanup */ }
         });
         taskResolvers.current = {};
         
@@ -119,24 +119,55 @@ export const useTssWorker = () => {
 
   return useMemo(() => ({
     computeNonce: async (nonceKey) => {
-      const existingNonceHex = await loadNonce(nonceKey);
+      const existing = await loadNonce(nonceKey);
+      // existing is string (legacy) or null
+      const existingNonceHex = typeof existing === 'string' ? existing : null;
       if (existingNonceHex) {
         console.log(`[TSS Worker Main] Reusing existing nonce from IndexedDB: ${nonceKey}`);
         return await executeWorkerTask('COMPUTE_NONCE_FROM_EXISTING', { nonceKey, nonceHex: existingNonceHex });
       }
-      
+
       const result = await executeWorkerTask('COMPUTE_NONCE', { nonceKey });
       await persistNonce(nonceKey, result?.nonceHex);
       return result;
     },
-    computeZShare: async (privateKeyHex, challengeHex, nonceKey) => {
-      console.log(`[TSS Worker Main] computeZShare called with nonceKey: ${nonceKey}`);
-      const nonceHex = await loadNonce(nonceKey);
-      console.log(`[TSS Worker Main] computeZShare nonceHex: ${nonceHex}`);
-      const result = await executeWorkerTask('COMPUTE_Z_SHARE', { privateKeyHex, challengeHex, nonceKey, nonceHex });
-      await clearNonce(nonceKey);
+    computeNonceFrost: async (nonceKey) => {
+      const existing = await loadNonce(nonceKey);
+      // Existing may be object with k1Hex, k2Hex from a previous FROST run
+      if (existing && typeof existing === 'object' && existing.k1Hex && existing.k2Hex) {
+        console.log(`[TSS Worker Main] Reusing existing FROST nonces from IndexedDB: ${nonceKey}`);
+        // Restore k1/k2 into worker memory via two COMPUTE_NONCE_FROM_EXISTING-style calls
+        // Re-derive R1, R2 from stored k1, k2
+        const kp1 = await executeWorkerTask('COMPUTE_NONCE_FROM_EXISTING', { nonceKey: nonceKey + ':k1', nonceHex: existing.k1Hex });
+        const kp2 = await executeWorkerTask('COMPUTE_NONCE_FROM_EXISTING', { nonceKey: nonceKey + ':k2', nonceHex: existing.k2Hex });
+        return {
+          R1_x: kp1.R_x, R1_y: kp1.R_y,
+          R2_x: kp2.R_x, R2_y: kp2.R_y,
+          k1Hex: existing.k1Hex, k2Hex: existing.k2Hex,
+        };
+      }
+
+      const result = await executeWorkerTask('COMPUTE_NONCE_FROST', { nonceKey });
+      // Save both k1 and k2
+      await persistNonce(nonceKey, null, { k1Hex: result.k1Hex, k2Hex: result.k2Hex });
       return result;
     },
+    computeZShare: async (privateKeyHex, challengeHex, nonceKey, bindingFactorHex, k1Hex, k2Hex) => {
+      console.log(`[TSS Worker Main] computeZShare called with nonceKey: ${nonceKey}, FROST: ${!!bindingFactorHex}`);
+      const nonceRecord = await loadNonce(nonceKey);
+      const nonceHex = typeof nonceRecord === 'string' ? nonceRecord : null;
+      const result = await executeWorkerTask('COMPUTE_Z_SHARE', {
+        privateKeyHex, challengeHex, nonceKey, nonceHex,
+        bindingFactorHex: bindingFactorHex || null,
+        k1Hex: k1Hex || (typeof nonceRecord === 'object' ? nonceRecord?.k1Hex : null),
+        k2Hex: k2Hex || (typeof nonceRecord === 'object' ? nonceRecord?.k2Hex : null),
+      });
+      // KHÔNG xóa nonce ngay: cho phép tính lại Z-Share (idempotent) trên cùng challenge.
+      // Nonce chỉ bị xóa khi reset signing hoặc khi ký hoàn tất — tránh "FROST nonces not found".
+      return result;
+    },
+    // Raw task executor — dùng cho useDkgPhase và các use cases nâng cao
+    executeWorkerTask,
     // Exposed so EscrowDetail can clear a stale nonce when a mismatch with the backend is detected
     clearNonce,
     hasNonce

@@ -42,13 +42,14 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
   const setAggregatedSignature = useSetAtom(aggregatedSignatureAtom);
   const setSigningProgress = useSetAtom(signingProgressAtom);
 
-  const applyCollectionSnapshot = useCallback((collection) => {
+  const applyCollectionSnapshot = useCallback((collection, { authoritative = false } = {}) => {
     if (!collection) return;
-    // Đảm bảo progress không bao giờ bị đè lùi về 0
-    setProgress((prev) => Math.max(prev, Number(collection.received || 0)));
+    const received = Number(collection.received || 0);
+    // authoritative=true (API sync) sets exact value; socket events only increase
+    setProgress((prev) => authoritative ? received : Math.max(prev, received));
     setSignedNodes((prev) => {
       const newNodes = submittedRolesFromCollection(collection);
-      return newNodes.length > prev.length ? newNodes : prev;
+      return authoritative ? newNodes : (newNodes.length > prev.length ? newNodes : prev);
     });
     setStatus(toStatusState(collection.state));
   }, [setProgress, setSignedNodes, setStatus]);
@@ -63,7 +64,7 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
     
     if (tssAllowed) {
       api.get(`/escrow/${escrowId}/status`).then(({ data }) => {
-        if (isMounted) applyCollectionSnapshot(data?.pubkeyCollection);
+        if (isMounted) applyCollectionSnapshot(data?.pubkeyCollection, { authoritative: true });
       }).catch(() => {
          // Silently ignore sync errors
       });
@@ -111,7 +112,7 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
       setProgress(7);
       setSignedNodes(PARTICIPANT_ROLES);
       setStatus('completed');
-      addLog({ message: `All pubkeys collected (${data.received || 7}/7). DKG Complete!`, type: 'success' });
+      addLog({ message: `All DKG signing keys submitted (${data.received || 7}/7). Ready to deploy.`, type: 'success' });
     };
 
     const handleCollectionExpired = (data) => {
@@ -154,6 +155,14 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
       addLog({ message: `⚠️ ${data.message || 'Signing session reset by another participant.'}`, type: 'error' });
     };
 
+    const handleDkgReset = (data) => {
+      if (data?.escrowId !== escrowId) return;
+      setProgress(0);
+      setSignedNodes([]);
+      setStatus('dkg_ready');
+      addLog({ message: `⚠️ DKG đã bị reset bởi một participant. Tất cả parties cần chạy lại DKG.`, type: 'error' });
+    };
+
     socket.on('pubkey_received', handlePubKeyReceived);
     socket.on('pubkey_rejected', handlePubKeyRejected);
     socket.on('pubkey_collection_complete', handleCollectionComplete);
@@ -163,6 +172,7 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
     socket.on('z_received', handleZReceived);
     socket.on('schnorr_complete', handleSchnorrComplete);
     socket.on('signing_reset', handleSigningReset);
+    socket.on('dkg_reset', handleDkgReset);
 
     return () => {
       socket.off('pubkey_received', handlePubKeyReceived);
@@ -174,6 +184,7 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
       socket.off('z_received', handleZReceived);
       socket.off('schnorr_complete', handleSchnorrComplete);
       socket.off('signing_reset', handleSigningReset);
+      socket.off('dkg_reset', handleDkgReset);
       leaveEscrowRoom(escrowId);
     };
   }, [escrowId, setProgress, setSignedNodes, setStatus, addLog, setSigningPhase, setNonceRound1, setSigningProgress, setAggregatedSignature]);
@@ -201,7 +212,7 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
     return data;
   }, [escrowId, escrowStatus, addLog, applyCollectionSnapshot]);
 
-  const submitNonce = useCallback(async (escrowId, role, action, signerBitmap, R_x, R_y) => {
+  const submitNonce = useCallback(async (escrowId, role, action, signerBitmap, R_x, R_y, R2_x, R2_y) => {
     // Đảm bảo Session JWT khớp với Ví MetaMask hiện tại
     const token = getStoredAccessToken();
     if (!token) throw new Error('Yêu cầu xác thực: Vui lòng đăng nhập (SIWE) trước khi thực hiện.');
@@ -225,7 +236,9 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
 
     addLog({ message: `Submitting Nonce for action: ${action}...`, type: 'warning' });
     try {
-      const { data } = await api.post(`/escrow/nonce`, { escrowId, role, action, signerBitmap, R_x, R_y });
+      const nonceBody = { escrowId, role, action, signerBitmap, R_x, R_y };
+      if (R2_x && R2_y) { nonceBody.R2_x = R2_x; nonceBody.R2_y = R2_y; }
+      const { data } = await api.post(`/escrow/nonce`, nonceBody);
       
       if (data.isIdempotent) {
         addLog({ message: `Nonce already submitted (idempotent), skipping...`, type: 'info' });
@@ -254,10 +267,18 @@ export const useEscrowSync = (escrowId, escrowStatus) => {
     }
   }, [addLog, address]); 
 
-  const submitZShare = useCallback(async (escrowId, role, signerBitmap, z) => {
+  const submitZShare = useCallback(async (escrowId, role, signerBitmap, z, challenge) => {
     addLog({ message: `Submitting Z-Share...`, type: 'warning' });
-    const { data } = await api.post(`/escrow/sign`, { escrowId, role, signerBitmap, z });
-    return data;
+    try {
+      const { data } = await api.post(`/escrow/sign`, { escrowId, role, signerBitmap, z, challenge });
+      return data;
+    } catch (error) {
+      if (error.response?.status === 409) {
+        // Stale challenge: z tính trên Round 1 cũ. Báo người dùng làm mới Round 2.
+        addLog({ message: `⚠️ ${error.response?.data?.error || 'Stale challenge — refresh Round 2.'}`, type: 'error' });
+      }
+      throw error;
+    }
   }, [addLog]);
 
   const resetSigning = useCallback(async (action, reason) => {

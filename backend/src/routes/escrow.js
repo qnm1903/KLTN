@@ -11,7 +11,7 @@ import {
   initIncrementalDKG,
   SESSION_TTL_MS
 } from '../crypto/dkg.js';
-import { aggregateNoncesWithLagrange, computeChallenge, aggregateZSharesWithLagrange, aggregatePubKeysWithLagrange } from '../crypto/schnorr.js';
+import { aggregateNoncesWithLagrange, computeChallenge, aggregateZSharesWithLagrange, aggregatePubKeysWithLagrange, computeBindingFactors, computeEffectiveNonces, verifyZShare } from '../crypto/schnorr.js';
 import { ethers } from 'ethers';
 import { createRouteRateLimiter, getRateLimitConfig } from '../middleware/rate-limit.js';
 import { authMiddleware } from '../middleware/auth.js';
@@ -114,6 +114,33 @@ async function checkSession(escrowId, res) {
         console.warn('[TSS Recovery] Could not refresh session participants from DB:', err?.message || err);
       }
     }
+
+    // Sync pubkeys from PubKeySubmission DB into session — handles case where session was
+    // persisted with partial pubkeys (e.g., backend restarted mid-submission flow).
+    try {
+      const summary = getPubKeyCollectionSummary(session);
+      if (!summary.complete && prisma?.pubKeySubmission) {
+        const pubKeysDb = await prisma.pubKeySubmission.findMany({ where: { escrowId } });
+        if (pubKeysDb && pubKeysDb.length > 0) {
+          session.pubKeys = session.pubKeys || {};
+          let merged = false;
+          for (const pk of pubKeysDb) {
+            if (!session.pubKeys[pk.role]) {
+              session.pubKeys[pk.role] = pk.pubKey;
+              merged = true;
+            }
+          }
+          if (merged) {
+            const newSummary = getPubKeyCollectionSummary(session);
+            session.pubKeyCollectionState = newSummary.complete ? 'COMPLETE' : 'PARTIAL';
+            await saveSession(escrowId, session);
+            console.log(`[TSS Recovery] Synced ${pubKeysDb.length} pubkeys from DB for escrow ${escrowId}`);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[TSS Recovery] Could not sync pubkeys from DB:', err?.message || err);
+    }
   }
 
   if (!session) {
@@ -203,7 +230,10 @@ async function checkSession(escrowId, res) {
         session.nonces = {};
 
         activeNonces.forEach(n => {
-          session.nonces[n.role] = { R_x: n.nonceR_x, R_y: n.nonceR_y };
+          // Khôi phục cả FROST dual-nonce (R1/R2) nếu có, để Round 2 tính đúng binding factor
+          session.nonces[n.role] = (n.nonceR2_x && n.nonceR2_y)
+            ? { R_x: n.nonceR_x, R_y: n.nonceR_y, R1_x: n.nonceR_x, R1_y: n.nonceR_y, R2_x: n.nonceR2_x, R2_y: n.nonceR2_y }
+            : { R_x: n.nonceR_x, R_y: n.nonceR_y };
         });
 
         const roles = Object.keys(session.nonces);
@@ -213,18 +243,15 @@ async function checkSession(escrowId, res) {
           const validation = validateSignerBitmap(session.signingBitmap, roles, activeAction);
           if (validation.valid) {
             try {
-              const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, roles, ROLE_TO_ID);
-              const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNoncesWithLagrange(session.nonces, ROLE_TO_ID);
+              const signingPubKeys = await resolveSigningPubKeys(escrowId, session);
+              const pkAgg = aggregatePubKeysWithLagrange(signingPubKeys, roles, ROLE_TO_ID);
 
               const vaultAddr = escrowDb.contractAddress || session.contractAddress;
               if (vaultAddr) {
                 const vaultKey = await getVaultAggregateKey(vaultAddr);
                 assertSignerSetMatchesVault(pkAgg, vaultKey.pkAgg, roles);
 
-                const msgHash = buildMsgHash(vaultKey.trueChainEscrowId, activeAction, session.signingBitmap, vaultAddr, vaultKey.chainId);
-                const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
-
-                session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
+                session.round2Context = computeRound2Context(session, activeAction, roles, pkAgg, vaultKey, vaultAddr);
                 session.signingRoles = roles;
               }
             } catch (challengeError) {
@@ -330,6 +357,83 @@ function toCollectionPayload(summary) {
   return { state: summary.state, required: summary.required, received: summary.received, missingRoles: summary.missingRoles, dueAt: toIsoTimestamp(summary.dueAt) };
 }
 
+/**
+ * Suy ra signing public keys (Pⱼ) của tất cả parties từ Feldman commitments công khai.
+ *
+ *   Pⱼ = Σᵢ Σₖ Cᵢₖ · jᵏ   (không cần secret/shares)
+ *
+ * Đây là nguồn chân lý cho khóa ký dùng trong Lagrange aggregation, đảm bảo
+ * Σ λⱼ·Pⱼ = master key (= Σ Cᵢ₀) — luôn khớp vault theo kiến trúc.
+ *
+ * @returns {Promise<{ [role: string]: string } | null>} map role → "0x04<x><y>", hoặc null nếu chưa đủ 7 commitments
+ */
+async function deriveSigningPubKeys(escrowId) {
+  const commitmentRows = await prisma.dkgCommitment.findMany({ where: { escrowId } });
+  if (!commitmentRows || commitmentRows.length < 7) return null;
+
+  const { computeSigningPublicKeyFromCommitments } = await import('../crypto/pedersen-vss.js');
+
+  // Parse commitments theo role để đảm bảo thứ tự nhất quán
+  const commitmentsByRole = {};
+  for (const row of commitmentRows) {
+    commitmentsByRole[row.role] = JSON.parse(row.commitments);
+  }
+
+  const allCommitments = PARTICIPANT_ROLES.map(role => commitmentsByRole[role]).filter(Boolean);
+  if (allCommitments.length < 7) return null;
+
+  const signingPubKeys = {};
+  for (const role of PARTICIPANT_ROLES) {
+    const id = ROLE_TO_ID[role];
+    const P = computeSigningPublicKeyFromCommitments(allCommitments, id);
+    const x = P.x.replace(/^0x/i, '').padStart(64, '0');
+    const y = P.y.replace(/^0x/i, '').padStart(64, '0');
+    signingPubKeys[role] = `0x04${x}${y}`;
+  }
+  return signingPubKeys;
+}
+
+/**
+ * Lấy signing pubkeys cho aggregation, ưu tiên khóa suy ra từ commitments (chuẩn DKG).
+ * Cache trên session để tránh đọc DB lặp. Fallback về session.pubKeys cho escrow cũ
+ * (chưa dùng DKG commitments).
+ */
+async function resolveSigningPubKeys(escrowId, session) {
+  if (session?.signingPubKeys) return session.signingPubKeys;
+  const derived = await deriveSigningPubKeys(escrowId);
+  if (derived && session) session.signingPubKeys = derived;
+  return derived || session?.pubKeys;
+}
+
+/**
+ * Tính round2Context cho Round 2 — xử lý CẢ FROST (dual-nonce + binding factor) lẫn legacy.
+ * Dùng chung cho mọi đường dẫn hoàn tất Round 1 (main, idempotent, recovery) để đảm bảo
+ * round2Context LUÔN có bindingFactors khi nonces ở chế độ FROST. Thiếu binding factor sẽ
+ * khiến frontend rơi về legacy z-share và không tìm thấy nonce → "Round 1 nonce not found".
+ */
+function computeRound2Context(session, action, roles, pkAgg, vaultKey, vaultAddr) {
+  const frostEnabled = roles.every(r => session.nonces[r]?.R2_x && session.nonces[r]?.R2_y);
+  const msgHash = buildMsgHash(vaultKey.trueChainEscrowId, action, session.signingBitmap, vaultAddr, vaultKey.chainId);
+
+  let noncesForAggregation = session.nonces;
+  let bindingFactors = null;
+  if (frostEnabled) {
+    const r1Points = Object.fromEntries(roles.map(r => [r, { R1_x: session.nonces[r].R1_x, R1_y: session.nonces[r].R1_y }]));
+    const r2Points = Object.fromEntries(roles.map(r => [r, { R2_x: session.nonces[r].R2_x, R2_y: session.nonces[r].R2_y }]));
+    bindingFactors = computeBindingFactors(roles, msgHash, r1Points, r2Points, ROLE_TO_ID);
+    noncesForAggregation = computeEffectiveNonces(r1Points, r2Points, bindingFactors);
+  }
+
+  const { R_x, R_y, R_addr } = aggregateNoncesWithLagrange(noncesForAggregation, ROLE_TO_ID);
+  const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
+
+  // Lưu effective nonce R_eff per-role để /sign verify từng z-share riêng lẻ.
+  const effectiveNonces = {};
+  for (const r of roles) effectiveNonces[r] = { R_x: noncesForAggregation[r].R_x, R_y: noncesForAggregation[r].R_y };
+
+  return { R_x, R_y, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap, bindingFactors, frostEnabled, effectiveNonces };
+}
+
 function getRoleAddress(participants, role) {
   if (!participants || typeof participants !== 'object') return null;
   if (role === 'buyer') return normalizeAddress(participants.buyer);
@@ -364,21 +468,28 @@ async function resolveEscrowParticipants(escrowId) {
 }
 
 async function savePubKeySubmission(escrowId, role, pubKey) {
-  if (pubKeyPersistenceDisabled || !prisma?.pubKeySubmission?.create) return { status: 'skipped' };
+  if (pubKeyPersistenceDisabled || !prisma?.pubKeySubmission) return { status: 'skipped' };
   try {
-    await prisma.pubKeySubmission.create({ data: { escrowId, role, pubKey } });
-    return { status: 'created' };
+    const existing = prisma.pubKeySubmission.findUnique
+      ? await prisma.pubKeySubmission.findUnique({ where: { escrowId_role: { escrowId, role } }, select: { pubKey: true } })
+      : null;
+    if (existing?.pubKey) {
+      const existingNorm = ('0x' + normalizePubKey(existing.pubKey)).toLowerCase();
+      const incomingNorm = ('0x' + normalizePubKey(pubKey)).toLowerCase();
+      if (existingNorm === incomingNorm) return { status: 'idempotent' };
+    }
+    if (prisma.pubKeySubmission.upsert) {
+      await prisma.pubKeySubmission.upsert({
+        where: { escrowId_role: { escrowId, role } },
+        create: { escrowId, role, pubKey },
+        update: { pubKey },
+      });
+    } else {
+      await prisma.pubKeySubmission.create({ data: { escrowId, role, pubKey } });
+    }
+    return existing ? { status: 'updated' } : { status: 'created' };
   } catch (error) {
     if (isMissingTableError(error)) { pubKeyPersistenceDisabled = true; return { status: 'skipped' }; }
-    if (error?.code === 'P2002' && prisma?.pubKeySubmission?.findUnique) {
-      const existing = await prisma.pubKeySubmission.findUnique({ where: { escrowId_role: { escrowId, role } }, select: { pubKey: true } });
-      if (existing?.pubKey) {
-        const existingPubKey = '0x' + normalizePubKey(existing.pubKey);
-        const incomingPubKey = '0x' + normalizePubKey(pubKey);
-        if (existingPubKey.toLowerCase() === incomingPubKey.toLowerCase()) return { status: 'idempotent' };
-      }
-      return { status: 'conflict' };
-    }
     throw error;
   }
 }
@@ -509,13 +620,9 @@ router.post('/pubkey/submit', authMiddleware, escrowPubKeySubmitRateLimiter, asy
         return res.json({ ok: true, state: collection.state, received: collection.received, required: collection.required, isIdempotent: true, collection: toCollectionPayload(collection) });
       }
 
-      const summaryCheck = getPubKeyCollectionSummary(session);
-      if (summaryCheck.complete || session.contractAddress) {
-        return res.json({ ok: true, isIdempotent: true, message: 'DKG already complete. Ignored conflicting key.' });
-      }
-
-      if (io) io.to(escrowId).emit('pubkey_rejected', { escrowId, role, reason: 'CONFLICT' });
-      return res.status(409).json({ error: `Role '${role}' already submitted a different pubKey` });
+      // Allow DKG signing key to replace identity pubkey even after vault deploy.
+      // Vault pkAgg is derived from Feldman commitments (Σ Cᵢ₀), not from pubkey submissions,
+      // so signing keys can legitimately be submitted after the vault is deployed.
     }
 
     const expectedAddress = getRoleAddress(session.participants || session.parties, role);
@@ -557,8 +664,9 @@ router.post('/pubkey/submit', authMiddleware, escrowPubKeySubmitRateLimiter, asy
 // ─── Phase 2: Threshold Signing — Round 1 (Nonce submission) ──────────────────
 router.post('/nonce', authMiddleware, async (req, res) => {
   try {
-    const { escrowId, role, action, signerBitmap, R_x, R_y } = req.body;
+    const { escrowId, role, action, signerBitmap, R_x, R_y, R2_x, R2_y } = req.body;
     if (!escrowId || !role || !action || signerBitmap === undefined || !R_x || !R_y) return res.status(400).json({ error: 'Missing required fields' });
+    const isFrostMode = Boolean(R2_x && R2_y);
     if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: `Invalid role` });
 
     const session = await checkSession(escrowId, res);
@@ -591,9 +699,11 @@ router.post('/nonce', authMiddleware, async (req, res) => {
       return '0x' + clean.padStart(64, '0');
     };
 
-    let normalizedRx, normalizedRy;
-    try { normalizedRx = normalizeCoordinate(R_x); normalizedRy = normalizeCoordinate(R_y); }
-    catch (e) { return res.status(400).json({ error: 'Invalid coordinate format' }); }
+    let normalizedRx, normalizedRy, normalizedR2x, normalizedR2y;
+    try {
+      normalizedRx = normalizeCoordinate(R_x); normalizedRy = normalizeCoordinate(R_y);
+      if (isFrostMode) { normalizedR2x = normalizeCoordinate(R2_x); normalizedR2y = normalizeCoordinate(R2_y); }
+    } catch (e) { return res.status(400).json({ error: 'Invalid coordinate format' }); }
 
     // Check if nonce already exists for this role
     if (session.nonces[role]) {
@@ -601,7 +711,10 @@ router.post('/nonce', authMiddleware, async (req, res) => {
       const existingRy = session.nonces[role].R_y;
 
       // Same nonce value - idempotent submission
-      if (existingRx === normalizedRx && existingRy === normalizedRy) {
+      const existingR2x = session.nonces[role].R2_x;
+      const existingR2y = session.nonces[role].R2_y;
+      const r2Match = !isFrostMode || (existingR2x === normalizedR2x && existingR2y === normalizedR2y);
+      if (existingRx === normalizedRx && existingRy === normalizedRy && r2Match) {
         const nonceCount = Object.keys(session.nonces).length;
         console.log(`[Nonce] Idempotent submission from role '${role}' for escrow ${escrowId}`);
 
@@ -609,8 +722,27 @@ router.post('/nonce', authMiddleware, async (req, res) => {
         const submittedRoles = Object.keys(session.nonces);
         session.signingBitmap = calculateSignerBitmap(submittedRoles);
 
-        // If Round 1 is complete, return the round2Context
+        // If Round 1 is complete, return the round2Context.
+        // Self-heal: nếu context cũ thiếu bindingFactors trong khi nonces là FROST → tính lại.
         if (session.round2Context) {
+          const ctxRoles = Object.keys(session.nonces);
+          const noncesAreFrost = ctxRoles.every(r => session.nonces[r]?.R2_x && session.nonces[r]?.R2_y);
+          const ctxMissingBinding = noncesAreFrost && !session.round2Context.bindingFactors;
+          if (ctxMissingBinding && nonceCount >= 5) {
+            try {
+              const dbEscrowHeal = await prisma.escrow.findUnique({ where: { id: escrowId } });
+              const vaultAddrHeal = dbEscrowHeal?.contractAddress || session.contractAddress;
+              const signingPubKeysHeal = await resolveSigningPubKeys(escrowId, session);
+              const pkAggHeal = aggregatePubKeysWithLagrange(signingPubKeysHeal, ctxRoles, ROLE_TO_ID);
+              const vaultKeyHeal = await getVaultAggregateKey(vaultAddrHeal);
+              assertSignerSetMatchesVault(pkAggHeal, vaultKeyHeal.pkAgg, ctxRoles);
+              session.round2Context = computeRound2Context(session, action, ctxRoles, pkAggHeal, vaultKeyHeal, vaultAddrHeal);
+              await saveSession(escrowId, session);
+              console.log(`[Nonce] Self-healed stale round2Context with FROST binding factors for escrow ${escrowId}`);
+            } catch (healErr) {
+              console.warn(`[Nonce] Could not self-heal round2Context: ${healErr.message}`);
+            }
+          }
           return res.json({
             state: 'round2_ready',
             received: nonceCount,
@@ -630,19 +762,16 @@ router.post('/nonce', authMiddleware, async (req, res) => {
             try {
               const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
               const vaultAddr = dbEscrow?.contractAddress || session.contractAddress;
-              const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, roles, ROLE_TO_ID);
+              const signingPubKeys = await resolveSigningPubKeys(escrowId, session);
+              const pkAgg = aggregatePubKeysWithLagrange(signingPubKeys, roles, ROLE_TO_ID);
               const vaultKey = await getVaultAggregateKey(vaultAddr);
               assertSignerSetMatchesVault(pkAgg, vaultKey.pkAgg, roles);
-              const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNoncesWithLagrange(session.nonces, ROLE_TO_ID);
 
-              const msgHash = buildMsgHash(vaultKey.trueChainEscrowId, action, session.signingBitmap, vaultAddr, vaultKey.chainId);
-              const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
-
-              session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
+              session.round2Context = computeRound2Context(session, action, roles, pkAgg, vaultKey, vaultAddr);
               session.signingRoles = roles;
               await saveSession(escrowId, session);
 
-              console.log(`[Nonce] Auto-computed challenge on idempotent submission: R_addr=${R_addr}, challenge=${challenge}`);
+              console.log(`[Nonce] Auto-computed challenge on idempotent submission: R_addr=${session.round2Context.R_addr}, FROST=${session.round2Context.frostEnabled}`);
 
               return res.json({
                 state: 'round2_ready',
@@ -671,41 +800,32 @@ router.post('/nonce', authMiddleware, async (req, res) => {
         });
       }
 
-      // Different nonce value - return current state and existing nonce to allow FE to sync
-      console.warn(`[Nonce] Different nonce value from role '${role}' for escrow ${escrowId}. Returning current state and existing nonce.`);
-      const nonceCount = Object.keys(session.nonces).length;
-      const submittedRoles = Object.keys(session.nonces);
-
-      // Return existing nonce for this role to allow FE to sync
-      const existingNonceForRole = session.nonces[role];
-
-      // If Round 1 is complete, return the round2Context
+      // Different nonce value.
+      // QUAN TRỌNG: nếu Round 1 ĐÃ hoàn tất (round2Context locked) → KHÔNG cho đổi nonce,
+      // trả round2_ready để party đi tiếp Round 2. Aggregate R/challenge đã chốt; đổi nonce
+      // lúc này sẽ đổi challenge và làm hỏng các z-share đã/đang ký → InvalidSignature.
+      // KHÔNG trả existingNonce ở đây để frontend không hiểu nhầm là cần reset.
       if (session.round2Context) {
+        console.warn(`[Nonce] Role '${role}' submitted new nonce but Round 1 is locked. Returning round2_ready (ignore new nonce).`);
         return res.json({
           state: 'round2_ready',
-          received: nonceCount,
+          received: Object.keys(session.nonces).length,
           needed: 5,
-          submittedRoles,
+          submittedRoles: Object.keys(session.nonces),
           round2Context: session.round2Context,
-          existingNonce: existingNonceForRole ? { R_x: existingNonceForRole.R_x, R_y: existingNonceForRole.R_y } : null,
           signerBitmap: session.signingBitmap,
-          message: 'Your nonce differs from submitted value. Round 1 already complete. Use existing nonce from backend.'
+          message: 'Round 1 already complete. Proceed to Round 2 with the locked challenge.'
         });
       }
 
-      // Round 1 still in progress
-      return res.json({
-        state: 'round1_in_progress',
-        received: nonceCount,
-        needed: 5,
-        submittedRoles,
-        existingNonce: existingNonceForRole ? { R_x: existingNonceForRole.R_x, R_y: existingNonceForRole.R_y } : null,
-        signerBitmap: session.signingBitmap,
-        message: 'Your nonce differs from submitted value. Round 1 still in progress. Use existing nonce from backend.'
-      });
+      // Round 1 CHƯA hoàn tất → cho phép GHI ĐÈ nonce mới nhất của party (an toàn vì chưa
+      // aggregate). Cho phép party đã mất nonce cục bộ submit lại nonce mới mà không phải reset.
+      console.log(`[Nonce] Overwriting in-progress nonce for role '${role}' (Round 1 not yet complete).`);
     }
 
-    session.nonces[role] = { R_x: normalizedRx, R_y: normalizedRy };
+    session.nonces[role] = isFrostMode
+      ? { R_x: normalizedRx, R_y: normalizedRy, R1_x: normalizedRx, R1_y: normalizedRy, R2_x: normalizedR2x, R2_y: normalizedR2y }
+      : { R_x: normalizedRx, R_y: normalizedRy };
 
     // Update signerBitmap based on actual submitted roles
     const submittedRoles = Object.keys(session.nonces);
@@ -749,6 +869,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
         update: {
           nonceR_x: normalizedRx,
           nonceR_y: normalizedRy,
+          ...(isFrostMode && { nonceR2_x: normalizedR2x, nonceR2_y: normalizedR2y }),
           expiresAt: new Date(Date.now() + nonceTTL)
         },
         create: {
@@ -757,6 +878,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
           role,
           nonceR_x: normalizedRx,
           nonceR_y: normalizedRy,
+          ...(isFrostMode && { nonceR2_x: normalizedR2x, nonceR2_y: normalizedR2y }),
           expiresAt: new Date(Date.now() + nonceTTL)
         }
       });
@@ -780,35 +902,32 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     if (!validation.valid) return res.status(403).json({ error: validation.error });
     session.signingRoles = roles;
 
-    const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, roles, ROLE_TO_ID);
+    const signingPubKeys = await resolveSigningPubKeys(escrowId, session);
+    const pkAgg = aggregatePubKeysWithLagrange(signingPubKeys, roles, ROLE_TO_ID);
 
     // VÁ LỖI: Lấy Vault thật chuẩn xác để băm chữ ký
     const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
     const vaultAddr = dbEscrow?.contractAddress || session.contractAddress;
     const vaultKey = await getVaultAggregateKey(vaultAddr);
     assertSignerSetMatchesVault(pkAgg, vaultKey.pkAgg, roles);
-    const { R_x: agg_Rx, R_y: agg_Ry, R_addr } = aggregateNoncesWithLagrange(session.nonces, ROLE_TO_ID);
 
-    // Đọc trực tiếp ID thực sự của Két sắt từ Blockchain để băm chữ ký
-    const msgHash = buildMsgHash(vaultKey.trueChainEscrowId, action, session.signingBitmap, vaultAddr, vaultKey.chainId);
-    const challenge = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
+    // Tính round2Context (FROST-aware) — dùng helper dùng chung
+    session.round2Context = computeRound2Context(session, action, roles, pkAgg, vaultKey, vaultAddr);
+    const { R_addr, challenge, msgHash, bindingFactors, frostEnabled } = session.round2Context;
 
-    console.log(`[TSS Round 2] Escrow: ${escrowId}`);
+    console.log(`[TSS Round 2] Escrow: ${escrowId}, FROST: ${frostEnabled}`);
     console.log(`[TSS Round 2] Action: ${action}, Bitmap: ${session.signingBitmap}`);
     console.log(`[TSS Round 2] Vault: ${vaultAddr}, ChainId: ${vaultKey.chainId}`);
-    console.log(`[TSS Round 2] escrowId (raw): ${vaultKey.trueChainEscrowId}`);
     console.log(`[TSS Round 2] msgHash: ${msgHash}`);
-    console.log(`[TSS Round 2] pkAgg: x=${pkAgg.x}, y=${pkAgg.y}`);
     console.log(`[TSS Round 2] R_addr: ${R_addr}, challenge (e): ${challenge}`);
 
-    session.round2Context = { R_x: agg_Rx, R_y: agg_Ry, R_addr, pkAgg, msgHash, challenge, signerBitmap: session.signingBitmap };
     await saveSession(escrowId, session);
 
     if (io) {
-      io.to(escrowId).emit('nonce_collected', { escrowId, R_addr, challenge, msgHash, pkAgg, signerBitmap: session.signingBitmap });
+      io.to(escrowId).emit('nonce_collected', { escrowId, R_addr, challenge, msgHash, pkAgg, signerBitmap: session.signingBitmap, bindingFactors, frostEnabled });
     }
 
-    return res.json({ ok: true, R_addr, challenge, msgHash, pkAgg, signerBitmap: session.signingBitmap });
+    return res.json({ ok: true, R_addr, challenge, msgHash, pkAgg, signerBitmap: session.signingBitmap, bindingFactors, frostEnabled });
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
     if (error.message.includes('bad point')) return res.status(400).json({ error: 'Invalid point coordinates' });
@@ -819,7 +938,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
 // ─── Phase 2: Threshold Signing — Round 2 (z share submission) ───────────────
 router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => {
   try {
-    const { escrowId, role, signerBitmap, z } = req.body;
+    const { escrowId, role, signerBitmap, z, challenge: submittedChallenge } = req.body;
     if (!escrowId || !role || signerBitmap === undefined || !z) return res.status(400).json({ error: 'Missing required fields' });
 
     const session = await checkSession(escrowId, res);
@@ -829,6 +948,42 @@ router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => 
     // Check signing timeout (6 hours)
     if (isSigningExpired(session)) {
       return res.status(410).json({ error: 'Signing session expired. Please restart signing.' });
+    }
+
+    // CHỐNG TRỘN CHALLENGE: nếu frontend gửi kèm challenge mà nó dùng để tính z, phải khớp
+    // challenge hiện tại của session. Lệch nghĩa là z tính trên Round 1 cũ (đã bị reset/đổi)
+    // → từ chối để tránh aggregate trộn challenge → InvalidSignature on-chain.
+    if (submittedChallenge) {
+      const cur = String(session.round2Context.challenge || '').toLowerCase();
+      const got = String(submittedChallenge).toLowerCase();
+      if (cur && got && cur !== got) {
+        return res.status(409).json({
+          error: 'Stale challenge: your Z-Share was computed against an outdated Round 1. Refresh and recompute Round 2.',
+          currentChallenge: session.round2Context.challenge
+        });
+      }
+    }
+
+    // VERIFY z-share riêng lẻ: zᵢ·G == R_effᵢ + e·Pᵢ.
+    // Bắt ngay party có private key sⱼ KHÔNG khớp Pⱼ (vd: key cũ từ DKG run trước) →
+    // tránh aggregate ra chữ ký hỏng và InvalidSignature mơ hồ on-chain.
+    try {
+      const rEff = session.round2Context.effectiveNonces?.[role];
+      const signingPubKeysForVerify = await resolveSigningPubKeys(escrowId, session);
+      const myPubKey = signingPubKeysForVerify?.[role];
+      if (rEff && myPubKey) {
+        const ok = verifyZShare(z, rEff, session.round2Context.challenge, myPubKey);
+        if (!ok) {
+          return res.status(400).json({
+            error: `Z-Share của role '${role}' không hợp lệ: private signing key không khớp với khóa công khai suy ra từ DKG commitments. ` +
+                   `Có thể bạn đang dùng key cũ từ lần DKG trước — hãy chạy lại DKG (Reset DKG) để đồng bộ, hoặc khôi phục đúng signing key.`
+          });
+        }
+      } else {
+        console.warn(`[Sign] Skip per-share verify for '${role}': missing effectiveNonces or pubkey.`);
+      }
+    } catch (verifyErr) {
+      console.warn(`[Sign] Per-share verify error for '${role}': ${verifyErr.message}`);
     }
 
     session.zShares[role] = z;
@@ -905,9 +1060,10 @@ router.get('/:id/aggregate-key', async (req, res) => {
   }
 
   const targetRoles = req.query.roles.split(',').map(r => r.trim());
-  
+
   try {
-    const pkAgg = aggregatePubKeysWithLagrange(session.pubKeys, targetRoles, ROLE_TO_ID);
+    const signingPubKeys = await resolveSigningPubKeys(req.params.id, session);
+    const pkAgg = aggregatePubKeysWithLagrange(signingPubKeys, targetRoles, ROLE_TO_ID);
     return res.json({
       ok: true,
       pkAgg: pkAgg,
@@ -918,13 +1074,208 @@ router.get('/:id/aggregate-key', async (req, res) => {
   }
 });
 
+// ─── DKG (Pedersen VSS) Routes ───────────────────────────────────────────────
+
+/**
+ * POST /escrow/:id/dkg/commitment
+ * Party i broadcast Feldman commitments: [{x,y} * 5]
+ * Body: { role, commitments: [{x,y}*5], pubKeyHex }
+ * pubKeyHex là identity public key của party — dùng để các party khác mã hóa shares gửi đến party này
+ */
+router.post('/:id/dkg/commitment', authMiddleware, async (req, res) => {
+  const { id: escrowId } = req.params;
+  const { role, commitments, pubKeyHex } = req.body;
+
+  if (!role || !VALID_ROLES.includes(role)) {
+    return res.status(400).json({ error: 'Invalid role' });
+  }
+  if (!Array.isArray(commitments) || commitments.length !== 5) {
+    return res.status(400).json({ error: 'commitments must be array of 5 EC points' });
+  }
+  if (!pubKeyHex) {
+    return res.status(400).json({ error: 'pubKeyHex is required' });
+  }
+
+  try {
+    // Upsert commitment
+    await prisma.dkgCommitment.upsert({
+      where: { escrowId_role: { escrowId, role } },
+      create: { escrowId, role, commitments: JSON.stringify(commitments) },
+      update: { commitments: JSON.stringify(commitments) }
+    });
+
+    // Also persist identity pubkey to pubKeySubmission for /dkg/shares ECDH lookup.
+    // This row will be overwritten with the signing pubkey when party calls /pubkey/submit.
+    await prisma.pubKeySubmission.upsert({
+      where: { escrowId_role: { escrowId, role } },
+      create: { escrowId, role, pubKey: pubKeyHex },
+      update: { pubKey: pubKeyHex }
+    });
+
+    // Đếm xem đã có bao nhiêu commitments
+    const count = await prisma.dkgCommitment.count({ where: { escrowId } });
+
+    // Emit progress event
+    emitToEscrow(escrowId, 'dkg:commitment', { role, total: count, required: 7 });
+
+    res.json({ ok: true, role, total: count, required: 7 });
+  } catch (error) {
+    console.error('[DKG/commitment]', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /escrow/:id/dkg/share
+ * Party i gửi encrypted shares cho tất cả parties khác (6 shares mỗi lần call)
+ * Body: { fromRole, shares: [{ toRole, encryptedBlob }] }
+ */
+router.post('/:id/dkg/share', authMiddleware, async (req, res) => {
+  const { id: escrowId } = req.params;
+  const { fromRole, shares } = req.body;
+
+  if (!fromRole || !VALID_ROLES.includes(fromRole)) {
+    return res.status(400).json({ error: 'Invalid fromRole' });
+  }
+  if (!Array.isArray(shares) || shares.length === 0) {
+    return res.status(400).json({ error: 'shares array is required' });
+  }
+
+  // Validate mỗi share entry
+  for (const s of shares) {
+    if (!s.toRole || !VALID_ROLES.includes(s.toRole)) {
+      return res.status(400).json({ error: `Invalid toRole: ${s.toRole}` });
+    }
+    if (!s.encryptedBlob) {
+      return res.status(400).json({ error: `Missing encryptedBlob for toRole: ${s.toRole}` });
+    }
+  }
+
+  try {
+    // Upsert tất cả shares trong transaction
+    await prisma.$transaction(
+      shares.map(s =>
+        prisma.dkgShare.upsert({
+          where: { escrowId_fromRole_toRole: { escrowId, fromRole, toRole: s.toRole } },
+          create: { escrowId, fromRole, toRole: s.toRole, encryptedBlob: s.encryptedBlob },
+          update: { encryptedBlob: s.encryptedBlob }
+        })
+      )
+    );
+
+    // Đếm total shares đã submit
+    const totalShares = await prisma.dkgShare.count({ where: { escrowId } });
+
+    emitToEscrow(escrowId, 'dkg:shares', { fromRole, totalShares });
+
+    res.json({ ok: true, fromRole, submitted: shares.length, totalShares });
+  } catch (error) {
+    console.error('[DKG/share]', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /escrow/:id/dkg/shares?toRole=xxx
+ * Party j fetch tất cả encrypted shares được gửi đến mình (6 shares từ 6 parties khác)
+ * Đồng thời trả về commitments của tất cả parties (để Feldman verify)
+ */
+router.get('/:id/dkg/shares', authMiddleware, async (req, res) => {
+  const { id: escrowId } = req.params;
+  const { toRole } = req.query;
+
+  if (!toRole || !VALID_ROLES.includes(toRole)) {
+    return res.status(400).json({ error: 'toRole query parameter is required and must be valid' });
+  }
+
+  try {
+    // Fetch shares gửi đến party này
+    const shares = await prisma.dkgShare.findMany({
+      where: { escrowId, toRole }
+    });
+
+    // Fetch tất cả commitments (cần để Feldman verify)
+    const commitments = await prisma.dkgCommitment.findMany({
+      where: { escrowId }
+    });
+
+    // Fetch identity pubkeys của tất cả parties (cần để ECDH decrypt)
+    const pubKeys = await prisma.pubKeySubmission.findMany({
+      where: { escrowId }
+    });
+
+    const commitmentsMap = Object.fromEntries(
+      commitments.map(c => [c.role, JSON.parse(c.commitments)])
+    );
+    const pubKeysMap = Object.fromEntries(
+      pubKeys.map(p => [p.role, p.pubKey])
+    );
+
+    res.json({
+      ok: true,
+      toRole,
+      shares: shares.map(s => ({ fromRole: s.fromRole, encryptedBlob: s.encryptedBlob })),
+      commitments: commitmentsMap,
+      pubKeys: pubKeysMap,
+      sharesReady: shares.length,
+      sharesRequired: 7  // cần nhận từ 7 parties (6 khác + 1 self)
+    });
+  } catch (error) {
+    console.error('[DKG/shares]', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /escrow/:id/dkg/master-pubkey
+ * Tính master public key P = Σ Cᵢ₀ từ tất cả Feldman commitments
+ * Dùng để deploy EscrowVault (thay thế aggregate-key cũ)
+ * Chỉ khả dụng khi đủ 7 commitments
+ */
+router.get('/:id/dkg/master-pubkey', async (req, res) => {
+  const { id: escrowId } = req.params;
+
+  try {
+    const commitments = await prisma.dkgCommitment.findMany({
+      where: { escrowId }
+    });
+
+    if (commitments.length < 7) {
+      return res.status(400).json({
+        error: `DKG incomplete: ${commitments.length}/7 commitments received`,
+        received: commitments.length,
+        required: 7
+      });
+    }
+
+    // Tính P = Σ Cᵢ₀ (sum constant-term commitments)
+    const { computeMasterPublicKey } = await import('../crypto/pedersen-vss.js');
+    const allCommitments = commitments.map(c => JSON.parse(c.commitments));
+    const masterPubKey = computeMasterPublicKey(allCommitments);
+
+    res.json({
+      ok: true,
+      masterPubKey,
+      commitmentCount: commitments.length
+    });
+  } catch (error) {
+    console.error('[DKG/master-pubkey]', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get('/:id/status', async (req, res) => {
   const session = await checkSession(req.params.id, res);
   if (!session) return;
+  // Báo frontend biết đang ở phase nào của signing để khôi phục UI sau khi re-login.
+  // round2_ready: Round 1 đã chốt, có round2Context → FE hiển thị nút Z-Share ngay.
+  const signingState = session.round2Context ? 'round2_ready' : (session.signingAction ? 'round1_in_progress' : 'idle');
   res.json({
     status: session.status, signingAction: session.signingAction, signerBitmap: session.signingBitmap,
     nonceCount: Object.keys(session.nonces).length, zShareCount: Object.keys(session.zShares).length,
-    completedActions: session.completedActions, pubkeyCollection: toCollectionPayload(getPubKeyCollectionStatus(session))
+    completedActions: session.completedActions, pubkeyCollection: toCollectionPayload(getPubKeyCollectionStatus(session)),
+    signingState,
+    round2Context: session.round2Context || null
   });
 });
 
@@ -1242,6 +1593,55 @@ router.post('/:id/reset-signing', authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error('[ResetSigning] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── Reset DKG State ──────────────────────────────────────────────────────────
+// Clears DkgCommitment, DkgShare, PubKeySubmission so all parties can re-run DKG.
+// Use when vault key doesn't match signing keys (e.g. vault deployed before DKG completed).
+router.post('/:id/dkg/reset', authMiddleware, async (req, res) => {
+  try {
+    const { id: escrowId } = req.params;
+    if (!escrowId) return res.status(400).json({ error: 'Missing escrowId' });
+
+    // Delete all DKG-related DB rows for this escrow
+    const [delCommitments, delShares, delPubKeys] = await Promise.allSettled([
+      prisma.dkgCommitment.deleteMany({ where: { escrowId } }),
+      prisma.dkgShare.deleteMany({ where: { escrowId } }),
+      prisma.pubKeySubmission.deleteMany({ where: { escrowId } }),
+    ]);
+
+    console.log(`[ResetDKG] escrow=${escrowId} commitments=${delCommitments.value?.count ?? 'err'} shares=${delShares.value?.count ?? 'err'} pubkeys=${delPubKeys.value?.count ?? 'err'}`);
+
+    // Reset session state so pubkey collection starts fresh
+    let session = await getSession(escrowId);
+    if (session) {
+      session.pubKeys = {};
+      session.signingPubKeys = null;
+      session.pubKeyCollectionState = 'PARTIAL';
+      session.pubKeyCollectionDueAt = null;
+      session.precomputedPkAgg = null;
+      session.nonces = {};
+      session.zShares = {};
+      session.signingRoles = null;
+      session.signingAction = null;
+      session.round2Context = null;
+      await saveSession(escrowId, session);
+    }
+
+    // Notify all connected clients that DKG was reset
+    const io = req.app.get('io');
+    if (io) {
+      io.to(escrowId).emit('dkg_reset', {
+        escrowId,
+        message: 'DKG state has been reset. All parties must re-run DKG.',
+      });
+    }
+
+    res.json({ ok: true, message: 'DKG state reset successfully. All parties must re-run DKG.', escrowId });
+  } catch (error) {
+    console.error('[ResetDKG] Error:', error);
     res.status(500).json({ error: error.message });
   }
 });

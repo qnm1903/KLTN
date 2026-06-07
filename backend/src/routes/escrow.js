@@ -1,7 +1,6 @@
 import express from 'express';
 import { deleteSession, getSession, getPubKeyCollectionStatus, hasSession, saveSession, isSigningExpired } from '../store/session.js';
 import {
-
   aggregatePubKeysForRoles,
   PARTICIPANT_ROLES,
   getPubKeyCollectionSummary,
@@ -9,7 +8,9 @@ import {
   ROLE_TO_ID,
   initDKG,
   initIncrementalDKG,
-  SESSION_TTL_MS
+  SESSION_TTL_MS,
+  generateRoles,
+  generateRoleToId
 } from '../crypto/dkg.js';
 import { aggregateNoncesWithLagrange, computeChallenge, aggregateZSharesWithLagrange, aggregatePubKeysWithLagrange, computeBindingFactors, computeEffectiveNonces, verifyZShare } from '../crypto/schnorr.js';
 import { ethers } from 'ethers';
@@ -41,7 +42,24 @@ const escrowPubKeySubmitRateLimiter = createRouteRateLimiter({
 
 const VALID_ROLES = [...PARTICIPANT_ROLES];
 const VALID_ACTIONS = ['release', 'refund', 'timeout'];
-const MEDIATOR_COMMITTEE_SIZE = 5;
+const MEDIATOR_COMMITTEE_SIZE = 5; // default cho production 5-of-7
+
+/**
+ * Đọc config t-of-n từ session. Fallback về production default (5-of-7) nếu chưa có.
+ * @param {Object} session
+ * @returns {{ threshold: number, numParties: number, numMediators: number, roles: string[], roleToId: Object }}
+ */
+function getSessionConfig(session) {
+  const numParties = session?.config?.numParties ?? 7;
+  const threshold  = session?.config?.threshold  ?? 5;
+  return {
+    threshold,
+    numParties,
+    numMediators: numParties - 2,
+    roles: generateRoles(numParties),
+    roleToId: generateRoleToId(numParties),
+  };
+}
 
 let pubKeyPersistenceDisabled = false;
 
@@ -89,7 +107,8 @@ async function checkSession(escrowId, res) {
         ? session.parties.mediators
         : [];
 
-    const missingOrShort = existingMediators.length !== MEDIATOR_COMMITTEE_SIZE || existingMediators.some((m) => !m);
+    const cfg = getSessionConfig(session);
+    const missingOrShort = existingMediators.length !== cfg.numMediators || existingMediators.some((m) => !m);
     if (missingOrShort) {
       try {
         const escrowDb = await prisma.escrow.findUnique({
@@ -101,10 +120,9 @@ async function checkSession(escrowId, res) {
           session.participants = participantsSnapshot;
           session.parties = participantsSnapshot;
         } else if (escrowDb) {
-          // Fallback giữ nguyên đúng vị trí slot (không dùng map nén mảng)
-          const fallbackMediators = new Array(MEDIATOR_COMMITTEE_SIZE).fill(null);
+          const fallbackMediators = new Array(cfg.numMediators).fill(null);
           for (const row of escrowDb.escrowMediators || []) {
-            if (row?.slot && row.slot >= 1 && row.slot <= MEDIATOR_COMMITTEE_SIZE) {
+            if (row?.slot && row.slot >= 1 && row.slot <= cfg.numMediators) {
               fallbackMediators[row.slot - 1] = normalizeAddress(row?.mediator?.walletAddress);
             }
           }
@@ -170,27 +188,33 @@ async function checkSession(escrowId, res) {
     const participantsSnapshot = buildParticipantsSnapshot(escrowDb);
 
     // TẠO MẢNG DỰ PHÒNG GIỮ NGUYÊN INDEX SLOT
-    const fallbackMediators = new Array(MEDIATOR_COMMITTEE_SIZE).fill(null);
+    // Số mediators đọc từ DB escrowMediators để tự adapt với bất kỳ n nào
+    const dbMediatorCount = escrowDb.escrowMediators?.length || MEDIATOR_COMMITTEE_SIZE;
+    const fallbackMediators = new Array(dbMediatorCount).fill(null);
     for (const row of escrowDb.escrowMediators || []) {
-      if (row?.slot && row.slot >= 1 && row.slot <= MEDIATOR_COMMITTEE_SIZE) {
+      if (row?.slot && row.slot >= 1 && row.slot <= dbMediatorCount) {
         fallbackMediators[row.slot - 1] = normalizeAddress(row?.mediator?.walletAddress);
       }
     }
 
-    // BẢN VÁ 2: Bỏ chốt chặn 400 (Cho phép tạo Session kể cả khi chưa đủ 7 Keys)
+    // Khôi phục config từ DB (numMediators → numParties)
+    const recoveredConfig = { threshold: 5, numParties: 2 + dbMediatorCount, numMediators: dbMediatorCount };
+
+    // BẢN VÁ 2: Bỏ chốt chặn 400 (Cho phép tạo Session kể cả khi chưa đủ Keys)
     session = {
       escrowId,
       chainId: process.env.CHAIN_ID || "11155111",
       contractAddress: escrowDb.contractAddress || null,
+      config: recoveredConfig,
       participants: participantsSnapshot || {
         buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
         seller: normalizeAddress(escrowDb.seller?.walletAddress),
-        mediators: fallbackMediators // Đã thay thế hàm .map() gây lỗi
+        mediators: fallbackMediators
       },
       parties: participantsSnapshot || {
         buyer: normalizeAddress(escrowDb.buyer?.walletAddress),
         seller: normalizeAddress(escrowDb.seller?.walletAddress),
-        mediators: fallbackMediators // Đã thay thế hàm .map() gây lỗi
+        mediators: fallbackMediators
       },
       pubKeys: {}, status: 'ACTIVE', completedActions: [], nonces: {}, zShares: {}, createdAt: Date.now()
     };
@@ -199,10 +223,11 @@ async function checkSession(escrowId, res) {
       pubKeysDb.forEach(pk => { session.pubKeys[pk.role] = pk.pubKey; });
     }
 
-    // Chỉ gộp khóa tổng pkAgg khi thực sự đã đủ 7 Key
-    if (pubKeysDb && pubKeysDb.length >= 7) {
+    // Chỉ gộp khóa tổng pkAgg khi đã đủ tất cả parties
+    const sessionCfg = getSessionConfig(session);
+    if (pubKeysDb && pubKeysDb.length >= sessionCfg.numParties) {
       try {
-        session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, PARTICIPANT_ROLES);
+        session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, sessionCfg.roles);
         session.pubKeyCollectionState = 'COMPLETE';
       } catch (e) {
         console.warn(`[TSS Recovery] Lỗi khi gộp khóa: ${e.message}`);
@@ -376,25 +401,32 @@ function toCollectionPayload(summary) {
  *
  * @returns {Promise<{ [role: string]: string } | null>} map role → "0x04<x><y>", hoặc null nếu chưa đủ 7 commitments
  */
-async function deriveSigningPubKeys(escrowId) {
+async function deriveSigningPubKeys(escrowId, session = null) {
   const commitmentRows = await prisma.dkgCommitment.findMany({ where: { escrowId } });
-  if (!commitmentRows || commitmentRows.length < 7) return null;
+  if (!commitmentRows || commitmentRows.length === 0) return null;
 
   const { computeSigningPublicKeyFromCommitments } = await import('../crypto/pedersen-vss.js');
 
-  // Parse commitments theo role để đảm bảo thứ tự nhất quán
+  const cfg = getSessionConfig(session);
+  const threshold = cfg.threshold;
+  const roles = cfg.roles;
+  const roleToId = cfg.roleToId;
+
+  // Đủ commitments mới derive
+  if (commitmentRows.length < roles.length) return null;
+
   const commitmentsByRole = {};
   for (const row of commitmentRows) {
     commitmentsByRole[row.role] = JSON.parse(row.commitments);
   }
 
-  const allCommitments = PARTICIPANT_ROLES.map(role => commitmentsByRole[role]).filter(Boolean);
-  if (allCommitments.length < 7) return null;
+  const allCommitments = roles.map(role => commitmentsByRole[role]).filter(Boolean);
+  if (allCommitments.length < roles.length) return null;
 
   const signingPubKeys = {};
-  for (const role of PARTICIPANT_ROLES) {
-    const id = ROLE_TO_ID[role];
-    const P = computeSigningPublicKeyFromCommitments(allCommitments, id);
+  for (const role of roles) {
+    const id = roleToId[role];
+    const P = computeSigningPublicKeyFromCommitments(allCommitments, id, threshold);
     const x = P.x.replace(/^0x/i, '').padStart(64, '0');
     const y = P.y.replace(/^0x/i, '').padStart(64, '0');
     signingPubKeys[role] = `0x04${x}${y}`;
@@ -409,7 +441,7 @@ async function deriveSigningPubKeys(escrowId) {
  */
 async function resolveSigningPubKeys(escrowId, session) {
   if (session?.signingPubKeys) return session.signingPubKeys;
-  const derived = await deriveSigningPubKeys(escrowId);
+  const derived = await deriveSigningPubKeys(escrowId, session);
   if (derived && session) session.signingPubKeys = derived;
   return derived || session?.pubKeys;
 }
@@ -509,48 +541,45 @@ async function clearPubKeySubmissions(escrowId) {
   catch (error) { if (isMissingTableError(error)) pubKeyPersistenceDisabled = true; else throw error; }
 }
 
-// Helper: Calculate signerBitmap from roles list
-// bit 0: buyer, bit 1: seller, bits 2-6: mediator 1-5
+// Helper: Calculate signerBitmap from roles list (t-of-n generic)
+// bit 0: buyer, bit 1: seller, bits 2..n-1: mediator1..mediator(n-2)
 function calculateSignerBitmap(roles) {
-  let bitmap = 0;
+  let bitmap = 0n;
   for (const role of roles) {
-    if (role === 'buyer') bitmap |= 1; // bit 0
-    else if (role === 'seller') bitmap |= 2; // bit 1
+    if (role === 'buyer') bitmap |= 1n;
+    else if (role === 'seller') bitmap |= 2n;
     else if (role.startsWith('mediator')) {
       const slot = Number(role.replace('mediator', ''));
-      if (slot >= 1 && slot <= 5) bitmap |= (1 << (slot + 1)); // bits 2-6
+      if (slot >= 1) bitmap |= (1n << BigInt(slot + 1)); // bit (slot+1)
     }
   }
   return bitmap;
 }
 
-// Helper: Validate signerBitmap
+// Helper: Validate signerBitmap theo session config (t-of-n aware)
 // isDisputeResolution=true relaxes core-role check to AT LEAST ONE (mirrors contract logic)
-// because dispute may exclude the losing party from the signer set
-function validateSignerBitmap(bitmap, submittedRoles, action, isDisputeResolution = false) {
-  const ALLOWED_BITS_MASK = 0x7f; // bits 0..6 only
-  const CORE_ROLE_MASK = 0x03; // buyer (bit0) | seller (bit1)
-  const MIN_SIGNERS = 5;
+function validateSignerBitmap(bitmap, submittedRoles, action, isDisputeResolution = false, sessionConfig = null) {
+  const cfg = sessionConfig || { threshold: 5, numParties: 7 };
+  const CORE_ROLE_MASK = 0x03n; // bit0=buyer, bit1=seller (luôn cố định)
+  const allowedMask = (1n << BigInt(cfg.numParties)) - 1n;
 
-  const b = Number(bitmap);
-  if (!Number.isFinite(b)) return { valid: false, error: 'Invalid bitmap' };
-  if ((b & ~ALLOWED_BITS_MASK) !== 0) return { valid: false, error: 'Bitmap contains invalid bits' };
+  const b = BigInt(bitmap);
+  if (b < 0n) return { valid: false, error: 'Invalid bitmap' };
+  if ((b & ~allowedMask) !== 0n) return { valid: false, error: 'Bitmap contains invalid bits' };
 
-  // Count set bits using Kernighan's method (same idea as Solidity)
+  // Count set bits
   let temp = b;
   let count = 0;
-  while (temp) { temp &= temp - 1; count++; }
+  while (temp) { temp &= temp - 1n; count++; }
 
-  if (count < MIN_SIGNERS) return { valid: false, error: `Need at least ${MIN_SIGNERS} signers, got ${count}` };
+  if (count < cfg.threshold) return { valid: false, error: `Need at least ${cfg.threshold} signers, got ${count}` };
 
   if (action === 'release' || action === 'split') {
     if (isDisputeResolution) {
-      // Dispute path: contract only requires at least one core role
-      if ((b & CORE_ROLE_MASK) === 0) {
+      if ((b & CORE_ROLE_MASK) === 0n) {
         return { valid: false, error: `Action '${action}' requires at least one core party (buyer or seller)` };
       }
     } else {
-      // Happy path: both buyer and seller must approve
       if ((b & CORE_ROLE_MASK) !== CORE_ROLE_MASK) {
         return { valid: false, error: `Action '${action}' requires both buyer and seller to approve` };
       }
@@ -564,7 +593,7 @@ function validateSignerBitmap(bitmap, submittedRoles, action, isDisputeResolutio
 
 router.post('/init', escrowInitRateLimiter, async (req, res) => {
   try {
-    const { escrowId, chainId, contractAddress, buyerAddr, sellerAddr, mediatorAddrs, buyerPubKey, sellerPubKey, mediatorPubKeys } = req.body;
+    const { escrowId, chainId, contractAddress, buyerAddr, sellerAddr, mediatorAddrs, buyerPubKey, sellerPubKey, mediatorPubKeys, threshold: reqThreshold, numParties: reqNumParties } = req.body;
     if (!escrowId || !chainId) return res.status(400).json({ error: 'Missing required fields' });
     if (contractAddress && !ethers.isAddress(contractAddress)) {
       return res.status(400).json({ error: 'Invalid contractAddress format' });
@@ -579,8 +608,8 @@ router.post('/init', escrowInitRateLimiter, async (req, res) => {
 
     const batchPayloadProvided = Boolean(buyerAddr || sellerAddr || mediatorAddrs || buyerPubKey || sellerPubKey || mediatorPubKeys);
     if (batchPayloadProvided) {
-      if (!buyerAddr || !sellerAddr || !Array.isArray(mediatorAddrs) || mediatorAddrs.length !== 5 || !buyerPubKey || !sellerPubKey || !Array.isArray(mediatorPubKeys) || mediatorPubKeys.length !== 5) {
-        return res.status(400).json({ error: 'Missing required fields' });
+      if (!buyerAddr || !sellerAddr || !Array.isArray(mediatorAddrs) || mediatorAddrs.length < 1 || !buyerPubKey || !sellerPubKey || !Array.isArray(mediatorPubKeys) || mediatorPubKeys.length !== mediatorAddrs.length) {
+        return res.status(400).json({ error: 'Missing required fields (mediatorAddrs and mediatorPubKeys must be non-empty arrays of equal length)' });
       }
       const derivedBuyer = ethers.computeAddress('0x' + normalizePubKey(buyerPubKey));
       const derivedSeller = ethers.computeAddress('0x' + normalizePubKey(sellerPubKey));
@@ -592,8 +621,17 @@ router.post('/init', escrowInitRateLimiter, async (req, res) => {
         if (derivedMediatorAddrs[index].toLowerCase() !== mediatorAddrs[index].toLowerCase()) return res.status(400).json({ error: `mediatorPubKeys[${index}] does not match mediatorAddrs[${index}]` });
       }
 
+      // Build config — infer numParties từ mediatorAddrs nếu không truyền
+      const inferredNumParties = reqNumParties ?? (2 + mediatorAddrs.length);
+      const sessionConfig = {
+        threshold: reqThreshold ?? 5,
+        numParties: inferredNumParties,
+        numMediators: inferredNumParties - 2,
+      };
+
       const { session } = initDKG(escrowId, { buyerPubKey, sellerPubKey, mediatorPubKeys, participants: { buyer: buyerAddr.toLowerCase(), seller: sellerAddr.toLowerCase(), mediators: mediatorAddrs.map((address) => address.toLowerCase()) }, contractAddress: normalizedContractAddress, chainId: normalizedChainId });
       session.parties = { buyer: buyerAddr.toLowerCase(), seller: sellerAddr.toLowerCase(), mediators: mediatorAddrs.map((address) => address.toLowerCase()) };
+      session.config = sessionConfig;
       await saveSession(escrowId, session);
       const collection = getPubKeyCollectionSummary(session);
       return res.json({ ok: true, contractAddress: normalizedContractAddress, chainId: normalizedChainId, collection: toCollectionPayload(collection) });
@@ -602,8 +640,17 @@ router.post('/init', escrowInitRateLimiter, async (req, res) => {
     const participants = await resolveEscrowParticipants(escrowId);
     if (!participants) return res.status(404).json({ error: 'Escrow not found' });
     await clearPubKeySubmissions(escrowId);
+
+    const inferredNumMediators = participants.mediators?.filter(Boolean).length ?? MEDIATOR_COMMITTEE_SIZE;
+    const sessionConfig = {
+      threshold: reqThreshold ?? 5,
+      numParties: reqNumParties ?? (2 + inferredNumMediators),
+      numMediators: inferredNumMediators,
+    };
+
     const { session } = initIncrementalDKG(escrowId, { participants, contractAddress: normalizedContractAddress, chainId: normalizedChainId, dueAtMs: Date.now() + SESSION_TTL_MS });
     session.parties = participants;
+    session.config = sessionConfig;
     await saveSession(escrowId, session);
     const collection = getPubKeyCollectionSummary(session);
     return res.json({ ok: true, contractAddress: normalizedContractAddress, chainId: normalizedChainId, collection: toCollectionPayload(collection) });
@@ -623,10 +670,11 @@ router.post('/pubkey/submit', authMiddleware, escrowPubKeySubmitRateLimiter, asy
     const session = await checkSession(escrowId, res);
     if (!session) return;
     const io = req.app.get('io');
-    // DKG flow: bypass expiry when all 7 parties have committed (Feldman VSS is the
+    // DKG flow: bypass expiry when all n parties have committed (Feldman VSS is the
     // authorization, not the old time-based window). Old non-DKG escrows still expire normally.
     const dkgCount = await prisma.dkgCommitment.count({ where: { escrowId } });
-    const dkgComplete = dkgCount >= 7;
+    const { numParties: cfgN } = getSessionConfig(session);
+    const dkgComplete = dkgCount >= cfgN;
     const summaryBefore = getPubKeyCollectionSummary(session);
     if (summaryBefore.expired && !dkgComplete) {
       session.pubKeyCollectionState = 'EXPIRED';
@@ -701,8 +749,8 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     // Derive signing pubkeys from DKG commitments if not already in session.
     // Eliminates need for parties to submit pubkeys separately after DKG.
     if (!getPubKeyCollectionSummary(session).complete) {
-      const derived = await deriveSigningPubKeys(escrowId);
-      if (!derived) return res.status(409).json({ error: 'DKG chưa hoàn tất (cần đủ 7 commitments).' });
+      const derived = await deriveSigningPubKeys(escrowId, session);
+      if (!derived) return res.status(409).json({ error: `DKG chưa hoàn tất (cần đủ ${cfgN} commitments).` });
       session.pubKeys = { ...derived, ...session.pubKeys };
       session.pubKeyCollectionState = 'COMPLETE';
       await saveSession(escrowId, session);
@@ -1153,9 +1201,11 @@ router.post('/:id/dkg/commitment', authMiddleware, async (req, res) => {
     const count = await prisma.dkgCommitment.count({ where: { escrowId } });
 
     // Emit progress event
-    emitToEscrow(escrowId, 'dkg:commitment', { role, total: count, required: 7 });
+    const session = await getSession(escrowId, { allowExpired: true });
+    const { numParties: reqN } = getSessionConfig(session);
+    emitToEscrow(escrowId, 'dkg:commitment', { role, total: count, required: reqN });
 
-    res.json({ ok: true, role, total: count, required: 7 });
+    res.json({ ok: true, role, total: count, required: reqN });
   } catch (error) {
     console.error('[DKG/commitment]', error);
     res.status(500).json({ error: error.message });
@@ -1252,7 +1302,7 @@ router.get('/:id/dkg/shares', authMiddleware, async (req, res) => {
       commitments: commitmentsMap,
       pubKeys: pubKeysMap,
       sharesReady: shares.length,
-      sharesRequired: 7  // cần nhận từ 7 parties (6 khác + 1 self)
+      sharesRequired: commitments.length  // cần nhận từ tất cả n parties
     });
   } catch (error) {
     console.error('[DKG/shares]', error);
@@ -1274,11 +1324,13 @@ router.get('/:id/dkg/master-pubkey', async (req, res) => {
       where: { escrowId }
     });
 
-    if (commitments.length < 7) {
+    const masterSession = await getSession(escrowId, { allowExpired: true });
+    const { numParties: masterN } = getSessionConfig(masterSession);
+    if (commitments.length < masterN) {
       return res.status(400).json({
-        error: `DKG incomplete: ${commitments.length}/7 commitments received`,
+        error: `DKG incomplete: ${commitments.length}/${masterN} commitments received`,
         received: commitments.length,
-        required: 7
+        required: masterN
       });
     }
 
@@ -1305,9 +1357,10 @@ router.get('/:id/status', async (req, res) => {
   // Báo frontend biết đang ở phase nào của signing để khôi phục UI sau khi re-login.
   // round2_ready: Round 1 đã chốt, có round2Context → FE hiển thị nút Z-Share ngay.
   const signingState = session.round2Context ? 'round2_ready' : (session.signingAction ? 'round1_in_progress' : 'idle');
-  // dkgCommitmentCount: số parties đã hoàn thành DKG B1 (0-7). Gate signing/dispute
+  // dkgCommitmentCount: số parties đã hoàn thành DKG B1 (0-n). Gate signing/dispute
   // bằng giá trị này thay vì pubkeyCollection.received (đã không còn được submit sau refactor).
   const dkgCommitmentCount = await prisma.dkgCommitment.count({ where: { escrowId } });
+  const statusCfg = getSessionConfig(session);
   res.json({
     status: session.status, signingAction: session.signingAction, signerBitmap: session.signingBitmap,
     nonceCount: Object.keys(session.nonces).length, zShareCount: Object.keys(session.zShares).length,
@@ -1315,7 +1368,8 @@ router.get('/:id/status', async (req, res) => {
     signingState,
     round2Context: session.round2Context || null,
     dkgCommitmentCount,
-    dkgReady: dkgCommitmentCount >= 7
+    dkgRequired: statusCfg.numParties,
+    dkgReady: dkgCommitmentCount >= statusCfg.numParties
   });
 });
 
@@ -1556,10 +1610,11 @@ router.post('/:id/reset-signing', authMiddleware, async (req, res) => {
         pubKeysDb.forEach(pk => { session.pubKeys[pk.role] = pk.pubKey; });
       }
 
-      // CHỈ TỔNG HỢP KHÓA (AGGREGATE) NẾU ĐÃ THU THẬP ĐỦ 7 KEYS
-      if (pubKeysDb && pubKeysDb.length >= 7) {
+      // CHỈ TỔNG HỢP KHÓA (AGGREGATE) NẾU ĐÃ THU THẬP ĐỦ n KEYS
+      const rstCfg = getSessionConfig(session);
+      if (pubKeysDb && pubKeysDb.length >= rstCfg.numParties) {
         try {
-          session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, PARTICIPANT_ROLES);
+          session.precomputedPkAgg = aggregatePubKeysForRoles(session.pubKeys, rstCfg.roles);
           session.pubKeyCollectionState = 'COMPLETE';
         } catch (e) {
           console.warn(`[TSS Recovery] Lỗi khi gộp khóa: ${e.message}`);

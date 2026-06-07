@@ -3,6 +3,7 @@ import { aggregatePublicKeys, aggregatePubKeysWithLagrange } from './schnorr.js'
 export const SESSION_TTL_MS = 30 * 60 * 1000; // 30 phút (DKG phase)
 export const SIGNING_TTL_MS = 6 * 60 * 60 * 1000; // 6 giờ (signing phase)
 
+// Production default: 5-of-7 (buyer + seller + 5 mediators)
 export const PARTICIPANT_ROLES = [
   'buyer',
   'seller',
@@ -26,6 +27,30 @@ export const ROLE_TO_ID = {
   'mediator4': 6,
   'mediator5': 7
 };
+
+/**
+ * Sinh danh sách roles cho cấu hình t-of-n tổng quát.
+ * n parties = buyer + seller + (n-2) mediators.
+ * @param {number} n - tổng số parties
+ * @returns {string[]}
+ */
+export function generateRoles(n) {
+  const roles = ['buyer', 'seller'];
+  for (let i = 1; i <= n - 2; i++) roles.push(`mediator${i}`);
+  return roles;
+}
+
+/**
+ * Sinh ROLE_TO_ID cho cấu hình t-of-n tổng quát.
+ * buyer=1, seller=2, mediator1=3, ..., mediator(n-2)=n
+ * @param {number} n - tổng số parties
+ * @returns {Object}
+ */
+export function generateRoleToId(n) {
+  const map = { buyer: 1, seller: 2 };
+  for (let i = 1; i <= n - 2; i++) map[`mediator${i}`] = i + 2;
+  return map;
+}
 
 
 

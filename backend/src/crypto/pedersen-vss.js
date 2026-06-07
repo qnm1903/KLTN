@@ -18,8 +18,8 @@ import { randomBytes } from 'crypto';
 const ec = new EC_Module.ec('secp256k1');
 const ORDER = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
 
-// Threshold: bất kỳ 5-of-7 party đều có thể ký
-const THRESHOLD = 5;
+// Default threshold cho production config 5-of-7. Truyền qua tham số khi cần config khác.
+const DEFAULT_THRESHOLD = 5;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -65,14 +65,15 @@ function coordsToPoint(coords) {
 // ─── Core VSS Functions ────────────────────────────────────────────────────────
 
 /**
- * Sinh polynomial bậc (THRESHOLD-1) với t hệ số ngẫu nhiên.
+ * Sinh polynomial bậc (threshold-1) với t hệ số ngẫu nhiên.
  * fᵢ(x) = coeffs[0] + coeffs[1]*x + ... + coeffs[t-1]*x^(t-1)
  *
- * @returns {{ coeffs: string[] }}  mảng THRESHOLD scalars (hex), coeffs[0] = hệ số tự do a₀
+ * @param {number} [threshold=DEFAULT_THRESHOLD]
+ * @returns {{ coeffs: string[] }}  mảng threshold scalars (hex), coeffs[0] = hệ số tự do a₀
  */
-export function generatePolynomial() {
+export function generatePolynomial(threshold = DEFAULT_THRESHOLD) {
   const coeffs = [];
-  for (let j = 0; j < THRESHOLD; j++) {
+  for (let j = 0; j < threshold; j++) {
     coeffs.push(scalarToHex(randomScalar()));
   }
   return { coeffs };
@@ -120,8 +121,8 @@ export function evaluatePolynomial(coeffs, participantId) {
  * @param {number}               participantId  - ROLE_TO_ID[role_j]
  * @returns {boolean}
  */
-export function verifyShare(shareHex, commitments, participantId) {
-  if (!commitments || commitments.length !== THRESHOLD) return false;
+export function verifyShare(shareHex, commitments, participantId, threshold = DEFAULT_THRESHOLD) {
+  if (!commitments || commitments.length !== threshold) return false;
 
   const G = ec.g;
   const share = hexToScalar(shareHex);
@@ -207,13 +208,13 @@ export function computeMasterPublicKey(allCommitments) {
  * @param {number}                       participantId  - ROLE_TO_ID[role_j] (1..7)
  * @returns {{ x: string, y: string }}   Pⱼ
  */
-export function computeSigningPublicKeyFromCommitments(allCommitments, participantId) {
+export function computeSigningPublicKeyFromCommitments(allCommitments, participantId, threshold = DEFAULT_THRESHOLD) {
   const x = BigInt(participantId);
   let total = null;
 
   for (const commitments of allCommitments) {
-    if (!commitments || commitments.length !== THRESHOLD) {
-      throw new Error(`Mỗi party phải có ${THRESHOLD} commitments`);
+    if (!commitments || commitments.length !== threshold) {
+      throw new Error(`Mỗi party phải có ${threshold} commitments`);
     }
     // Σₖ Cᵢₖ · jᵏ  (đóng góp của party i vào Pⱼ)
     let partyContribution = null;

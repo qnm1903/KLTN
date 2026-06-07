@@ -1,21 +1,14 @@
 {
   "network": "sepolia",
   "chainId": "11155111",
-  "deployedAt": "2026-05-09T13:10:07.732Z",
-  "deployer": "0xc3104EC2E70B577bCB980052afBb1deE9C66f523",
+  "deployedAt": "2026-06-07T14:31:24.448Z",
+  "deployer": "0x6CcC9b052f9A429e9Bf945668de8E5fF7117e028",
   "contracts": {
     "EscrowFactory": {
-      "address": "0x0b8e742E0EFA8F2c7dad31A29401848F45a6eB9f",
-      "txHash": "0x6299adfd7fc8327ce63c87da2a0f5b377195a5003f3dea1ba0395c8ef7b51030",
-      "blockNumber": 10820884,
+      "address": "0x40CE0593d96d1d46445fe8e2E65dE5A99e284Cd6",
+      "txHash": "0xe2d2f3c8673b96a694cab614e05ebc47f328289f3e605370af38bd572ad62c04",
+      "blockNumber": 11009188,
       "constructorArgs": []
-    },
-    "MediatorPool": {
-      "address": "0xb3585dD66a67081f0558e3858ca8925a9e88036C",
-      "proxyType": "UUPS",
-      "upgradedAt": "2026-05-11T04:02:52.034Z",
-      "txHash": null,
-      "blockNumber": null
     }
   }
 }

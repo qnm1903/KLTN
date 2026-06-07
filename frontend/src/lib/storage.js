@@ -225,12 +225,20 @@ function getNonceRecordKey(nonceKey) {
   return `nonce_${nonceKey}`;
 }
 
-export const saveNonceRecord = async (nonceKey, nonceHex) => {
-  if (!nonceKey || !nonceHex) return;
+/**
+ * Lưu nonce record. Hỗ trợ cả legacy (nonceHex) và FROST (k1Hex + k2Hex).
+ * @param {string} nonceKey
+ * @param {string} nonceHex - legacy single nonce
+ * @param {{ k1Hex?: string, k2Hex?: string }} [frostExtras]
+ */
+export const saveNonceRecord = async (nonceKey, nonceHex, frostExtras) => {
+  if (!nonceKey) return;
 
   try {
     await escrowDB.setItem(getNonceRecordKey(nonceKey), {
       nonceHex,
+      ...(frostExtras?.k1Hex && { k1Hex: frostExtras.k1Hex }),
+      ...(frostExtras?.k2Hex && { k2Hex: frostExtras.k2Hex }),
       timestamp: Date.now(),
     });
   } catch (err) {
@@ -238,12 +246,19 @@ export const saveNonceRecord = async (nonceKey, nonceHex) => {
   }
 };
 
+/**
+ * Lấy nonce record.
+ * @returns {{ nonceHex, k1Hex?, k2Hex? } | null}
+ */
 export const getNonceRecord = async (nonceKey) => {
   if (!nonceKey) return null;
 
   try {
     const record = await escrowDB.getItem(getNonceRecordKey(nonceKey));
-    return record?.nonceHex || null;
+    if (!record) return null;
+    // Backward compat: return string if only nonceHex present (legacy consumers expect string)
+    if (!record.k1Hex && !record.k2Hex) return record.nonceHex || null;
+    return record; // FROST mode: return full object
   } catch (err) {
     console.error('[Storage Error] Khong the doc nonce:', err);
     return null;

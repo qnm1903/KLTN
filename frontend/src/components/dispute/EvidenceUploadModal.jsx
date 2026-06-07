@@ -170,7 +170,7 @@ export default function EvidenceUploadModal({ isOpen, onClose, onUpload, dispute
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              className="mt-2 block w-full rounded-md border-gray-200 shadow-sm py-2 px-3 text-sm min-h-20"
+              className="mt-2 block w-full rounded-md border border-gray-200 shadow-sm py-2 px-3 text-sm text-gray-900 bg-white min-h-20"
               placeholder="Mô tả ngắn về Evidence..."
               disabled={uploading}
             />

@@ -1,12 +1,16 @@
-// 1. ABI của Factory (Dùng trực tiếp mảng chuỗi cho ethers.js)
+// 1. ABI của Factory 
 export const factoryAbi = [
-  'function createEscrow(address seller, address[5] calldata mediators, uint256[2] calldata pkAggCoords, uint256 amount, uint256 confirmDays, uint256 timeoutDays) external returns (address)',
-  'event EscrowCreatedEvent(address escrowAddress, bytes32 escrowId, address buyer, address seller, address[5] mediators)',
-  'function escrowsByBuyer(address) external view returns (address[])',
-  'function escrowsBySeller(address) external view returns (address[])'
+  { "inputs": [], "name": "DuplicateMediator", "type": "error" },
+  { "inputs": [], "name": "InvalidAggregateKey", "type": "error" },
+  { "inputs": [], "name": "ParticipantConflict", "type": "error" },
+  { "inputs": [], "name": "ZeroAddress", "type": "error" },
+  { "anonymous": false, "inputs": [ { "indexed": false, "internalType": "address", "name": "escrowAddress", "type": "address" }, { "indexed": false, "internalType": "bytes32", "name": "escrowId", "type": "bytes32" }, { "indexed": false, "internalType": "address", "name": "buyer", "type": "address" }, { "indexed": false, "internalType": "address", "name": "seller", "type": "address" }, { "indexed": false, "internalType": "address[5]", "name": "mediators", "type": "address[5]" } ], "name": "EscrowCreatedEvent", "type": "event" },
+  { "inputs": [ { "internalType": "address", "name": "seller", "type": "address" }, { "internalType": "address[5]", "name": "mediators", "type": "address[5]" }, { "internalType": "uint256[2]", "name": "pkAggCoords", "type": "uint256[2]" }, { "internalType": "uint256", "name": "amount", "type": "uint256" }, { "internalType": "uint256", "name": "confirmDays", "type": "uint256" }, { "internalType": "uint256", "name": "timeoutDays", "type": "uint256" } ], "name": "createEscrow", "outputs": [ { "internalType": "address", "name": "", "type": "address" } ], "stateMutability": "nonpayable", "type": "function" },
+  { "inputs": [ { "internalType": "address", "name": "", "type": "address" }, { "internalType": "uint256", "name": "", "type": "uint256" } ], "name": "escrowsByBuyer", "outputs": [ { "internalType": "address", "name": "", "type": "address" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [ { "internalType": "address", "name": "", "type": "address" }, { "internalType": "uint256", "name": "", "type": "uint256" } ], "name": "escrowsBySeller", "outputs": [ { "internalType": "address", "name": "", "type": "address" } ], "stateMutability": "view", "type": "function" }
 ];
 
-// 2. ABI của MediatorPool (cho event listener)
+// 2. ABI của MediatorPool 
 export const mediatorPoolAbi = [
   'function mediators(address) external view returns (address wallet, uint256 stakeAmount, bool isActive, uint256 timeoutCount, uint256 reputationScore, uint256 totalVotes, uint256 successfulVotes)',
   'function requestRandomMediator(bytes32 escrowId, address buyer, address seller) external',
@@ -16,27 +20,31 @@ export const mediatorPoolAbi = [
   'event MediatorSlashed(address indexed mediator, uint256 amount)'
 ];
 
-// 3. ABI của Vault
+// 3. ABI của Vault 
 export const vaultAbi = [
-  'function escrowId() external view returns (bytes32)',
-  'function buyer() external view returns (address)',
-  'function seller() external view returns (address)',
-  'function mediators(uint256) external view returns (address)',
-  'function pkAggX() external view returns (uint256)',
-  'function pkAggY() external view returns (uint256)',
-  'function amount() external view returns (uint256)',
-  'function status() external view returns (uint8)',
-  'function confirmDeadline() external view returns (uint256)',
-  'function timeoutDeadline() external view returns (uint256)',
-  'function lockFunds() external payable',
-  'function release(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 signerBitmap) external',
-  'function refund(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 signerBitmap) external',
-  'function dispute() external',
-  'function timeoutRelease(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 signerBitmap) external',
-  'function signerCount(uint8 signerBitmap) external pure returns (uint8)',
-  'function validateSignerBitmap(uint8 signerBitmap) external pure returns (bool)',
-  'event EscrowCreated(bytes32 indexed escrowId, address indexed buyer, address indexed seller, uint256 amount)',
-  'event FundsLocked(bytes32 indexed escrowId, uint256 amount)',
-  'event FundsReleased(bytes32 indexed escrowId, address indexed recipient, uint8 signerBitmap, string action)',
-  'event DisputeOpened(bytes32 indexed escrowId)'
+  { "inputs": [ { "internalType": "bytes32", "name": "_escrowId", "type": "bytes32" }, { "internalType": "address", "name": "_buyer", "type": "address" }, { "internalType": "address", "name": "_seller", "type": "address" }, { "internalType": "address[5]", "name": "_mediators", "type": "address[5]" }, { "internalType": "uint256[2]", "name": "_pkAggCoords", "type": "uint256[2]" }, { "internalType": "uint256", "name": "_amount", "type": "uint256" }, { "internalType": "uint256", "name": "_confirmDays", "type": "uint256" }, { "internalType": "uint256", "name": "_timeoutDays", "type": "uint256" } ], "stateMutability": "nonpayable", "type": "constructor" },
+  { "inputs": [], "name": "DuplicateMediator", "type": "error" }, { "inputs": [], "name": "IncorrectValue", "type": "error" }, { "inputs": [], "name": "InvalidAggregateKey", "type": "error" }, { "inputs": [], "name": "InvalidAmount", "type": "error" }, { "inputs": [], "name": "InvalidDeadline", "type": "error" }, { "inputs": [], "name": "InvalidMsgHash", "type": "error" }, { "inputs": [], "name": "InvalidSignature", "type": "error" }, { "inputs": [], "name": "InvalidSignerBitmap", "type": "error" }, { "inputs": [], "name": "InvalidStatus", "type": "error" }, { "inputs": [], "name": "NotAuthorized", "type": "error" }, { "inputs": [], "name": "NotBuyer", "type": "error" }, { "inputs": [], "name": "NotTimedOut", "type": "error" }, { "inputs": [], "name": "ParticipantConflict", "type": "error" }, { "inputs": [], "name": "TransferFailed", "type": "error" }, { "inputs": [], "name": "ZeroAddress", "type": "error" },
+  { "anonymous": false, "inputs": [ { "indexed": false, "internalType": "bytes32", "name": "escrowId", "type": "bytes32" } ], "name": "DisputeOpened", "type": "event" },
+  { "anonymous": false, "inputs": [ { "indexed": false, "internalType": "bytes32", "name": "escrowId", "type": "bytes32" }, { "indexed": false, "internalType": "address", "name": "buyer", "type": "address" }, { "indexed": false, "internalType": "address", "name": "seller", "type": "address" }, { "indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256" } ], "name": "EscrowCreated", "type": "event" },
+  { "anonymous": false, "inputs": [ { "indexed": false, "internalType": "bytes32", "name": "escrowId", "type": "bytes32" }, { "indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256" } ], "name": "FundsLocked", "type": "event" },
+  { "anonymous": false, "inputs": [ { "indexed": false, "internalType": "bytes32", "name": "escrowId", "type": "bytes32" }, { "indexed": false, "internalType": "address", "name": "recipient", "type": "address" }, { "indexed": false, "internalType": "uint8", "name": "signerBitmap", "type": "uint8" }, { "indexed": false, "internalType": "string", "name": "action", "type": "string" } ], "name": "FundsReleased", "type": "event" },
+  { "anonymous": false, "inputs": [ { "indexed": false, "internalType": "bytes32", "name": "escrowId", "type": "bytes32" }, { "indexed": false, "internalType": "address", "name": "buyer", "type": "address" }, { "indexed": false, "internalType": "address", "name": "seller", "type": "address" }, { "indexed": false, "internalType": "uint256", "name": "buyerAmount", "type": "uint256" }, { "indexed": false, "internalType": "uint256", "name": "sellerAmount", "type": "uint256" }, { "indexed": false, "internalType": "uint8", "name": "signerBitmap", "type": "uint8" } ], "name": "FundsSplit", "type": "event" },
+  { "inputs": [], "name": "amount", "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [], "name": "buyer", "outputs": [ { "internalType": "address", "name": "", "type": "address" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [], "name": "confirmDeadline", "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [], "name": "dispute", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
+  { "inputs": [], "name": "escrowId", "outputs": [ { "internalType": "bytes32", "name": "", "type": "bytes32" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [], "name": "lockFunds", "outputs": [], "stateMutability": "payable", "type": "function" },
+  { "inputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ], "name": "mediators", "outputs": [ { "internalType": "address", "name": "", "type": "address" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [], "name": "pkAggX", "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [], "name": "pkAggY", "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [ { "internalType": "address", "name": "rAddr", "type": "address" }, { "internalType": "bytes32", "name": "z", "type": "bytes32" }, { "internalType": "bytes32", "name": "e", "type": "bytes32" }, { "internalType": "bytes32", "name": "msgHash", "type": "bytes32" }, { "internalType": "uint8", "name": "signerBitmap", "type": "uint8" } ], "name": "refund", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
+  { "inputs": [ { "internalType": "address", "name": "rAddr", "type": "address" }, { "internalType": "bytes32", "name": "z", "type": "bytes32" }, { "internalType": "bytes32", "name": "e", "type": "bytes32" }, { "internalType": "bytes32", "name": "msgHash", "type": "bytes32" }, { "internalType": "uint8", "name": "signerBitmap", "type": "uint8" } ], "name": "split", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
+  { "inputs": [ { "internalType": "address", "name": "rAddr", "type": "address" }, { "internalType": "bytes32", "name": "z", "type": "bytes32" }, { "internalType": "bytes32", "name": "e", "type": "bytes32" }, { "internalType": "bytes32", "name": "msgHash", "type": "bytes32" }, { "internalType": "uint8", "name": "signerBitmap", "type": "uint8" } ], "name": "release", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
+  { "inputs": [], "name": "seller", "outputs": [ { "internalType": "address", "name": "", "type": "address" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [ { "internalType": "uint8", "name": "signerBitmap", "type": "uint8" } ], "name": "signerCount", "outputs": [ { "internalType": "uint8", "name": "", "type": "uint8" } ], "stateMutability": "pure", "type": "function" },
+  { "inputs": [], "name": "status", "outputs": [ { "internalType": "enum EscrowVault.Status", "name": "", "type": "uint8" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [], "name": "timeoutDeadline", "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [ { "internalType": "address", "name": "rAddr", "type": "address" }, { "internalType": "bytes32", "name": "z", "type": "bytes32" }, { "internalType": "bytes32", "name": "e", "type": "bytes32" }, { "internalType": "bytes32", "name": "msgHash", "type": "bytes32" }, { "internalType": "uint8", "name": "signerBitmap", "type": "uint8" } ], "name": "timeoutRelease", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
+  { "inputs": [ { "internalType": "uint8", "name": "signerBitmap", "type": "uint8" } ], "name": "validateSignerBitmap", "outputs": [ { "internalType": "bool", "name": "", "type": "bool" } ], "stateMutability": "pure", "type": "function" }
 ];

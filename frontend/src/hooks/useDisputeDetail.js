@@ -48,12 +48,12 @@ export default function useDisputeDetail(disputeId) {
         
         // Cập nhật tally, dự phòng nếu backend trả về null/undefined
         setTally(data.currentTally || {
-          RELEASE_TO_BUYER: 0,
-          RETURN_TO_SELLER: 0,
+          RELEASE: 0,
+          REFUND: 0,
           SPLIT: 0,
           OTHER: 0,
           totalVotes: 0,
-          threshold: 5
+          threshold: 4
         });
       } catch (err) {
         console.error('Lỗi khi fetch dữ liệu Dispute từ Backend:', err);

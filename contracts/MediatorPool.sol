@@ -31,8 +31,9 @@ contract MediatorPool is
     
     bool public isTestnet;
     
-    // Sybil detection events
+    // Risk detection events
     event SybilDetected(address indexed mediator, string reason);
+    event RiskDetected(address indexed mediator, string reason);
     event ReputationUpdated(address indexed mediator, uint256 oldScore, uint256 newScore);
 
     /* ========== CẤU HÌNH CHAINLINK VRF ========== */
@@ -66,13 +67,15 @@ contract MediatorPool is
         address seller;
     }
     mapping(uint256 requestId => RequestDetails) public vrfRequests;
+    uint256 public upgradeNonce;
 
     /* ========== EVENTS ========== */
     event MediatorRegistered(address indexed mediator, uint256 amount);
     event MediatorUnregistered(address indexed mediator, uint256 amount);
     event RandomnessRequested(uint256 requestId, bytes32 indexed escrowId);
     event RandomMediatorSelected(bytes32 indexed escrowId, address[] mediators);
-    event MediatorSlashed(address indexed mediator, uint256 amount);
+    event MediatorSlashed(address indexed mediator, uint256 slashAmount, address buyer, address seller, uint256 timeoutCount);
+    event MediatorDeactivated(address indexed mediator, uint256 timeoutCount);
 
     /* ========== KHAI BÁO ========== */
     constructor(address _vrfCoordinator)
@@ -111,6 +114,10 @@ contract MediatorPool is
         emit CoordinatorSet(_vrfCoordinator);
     }
     
+    function updateCallbackGasLimit(uint32 _callbackGasLimit) external onlyRole(ADMIN_ROLE) {
+        s_callbackGasLimit = _callbackGasLimit;
+    }
+
     function _authorizeUpgrade(address newImplementation) internal override onlyRole(ADMIN_ROLE) {}
     
     function getRequiredStake() public view returns (uint256) {
@@ -228,7 +235,7 @@ contract MediatorPool is
             
             // Optional: Detect low reputation for monitoring
             if (mediators[selectedMediators[i]].reputationScore < 30) {
-                emit SybilDetected(selectedMediators[i], "Low reputation");
+                emit RiskDetected(selectedMediators[i], "Low reputation");
             }
         }
 
@@ -247,21 +254,38 @@ contract MediatorPool is
     }
 
     /* ========== XỬ LÝ TIMEOUT ========== */
-    function slashForTimeout(address _mediator) external onlyRole(ADMIN_ROLE) nonReentrant {
+    /**
+     * @dev Slash 30% stake của mediator vi phạm timeout, chia đều cho buyer/seller.
+     *      Sau MAX_TIMEOUTS vi phạm: deactivate mediator, hệ thống giữ 10% còn lại.
+     */
+    function slashForTimeout(address _mediator, address _buyer, address _seller) external onlyRole(ADMIN_ROLE) nonReentrant {
         require(mediators[_mediator].isActive, "Not active");
+        require(_buyer != address(0) && _seller != address(0), "Invalid parties");
 
         Mediator storage m = mediators[_mediator];
+        uint256 slashAmount = m.stakeAmount * 30 / 100;
+        uint256 half = slashAmount / 2;
+
         m.timeoutCount += 1;
+
+        (bool ok1, ) = payable(_buyer).call{value: half}("");
+        (bool ok2, ) = payable(_seller).call{value: slashAmount - half}("");
+        require(ok1 && ok2, "Slash transfer failed");
+
+        emit MediatorSlashed(_mediator, slashAmount, _buyer, _seller, m.timeoutCount);
 
         if (m.timeoutCount >= MAX_TIMEOUTS) {
             _removeFromArray(_mediator);
-            uint256 penalty = m.stakeAmount;
+            uint256 totalSlashed = slashAmount * MAX_TIMEOUTS;
+            uint256 remaining = m.stakeAmount > totalSlashed ? m.stakeAmount - totalSlashed : 0;
             delete mediators[_mediator];
 
-            (bool success, ) = msg.sender.call{value: penalty}("");
-            require(success, "Slash failed");
+            if (remaining > 0) {
+                (bool ok3, ) = payable(msg.sender).call{value: remaining}("");
+                require(ok3, "Remaining transfer failed");
+            }
 
-            emit MediatorSlashed(_mediator, penalty);
+            emit MediatorDeactivated(_mediator, MAX_TIMEOUTS);
         }
     }
 

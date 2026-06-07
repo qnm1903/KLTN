@@ -25,7 +25,7 @@ async function main() {
   }
 
   const MediatorPool = await hre.ethers.getContractFactory("MediatorPool");
-  
+
   console.log("⏳ Importing existing proxy into OpenZeppelin tracking...");
   try {
     await hre.upgrades.forceImport(MEDIATOR_POOL_ADDRESS, MediatorPool, {
@@ -37,13 +37,13 @@ async function main() {
   } catch (error) {
     console.log("ℹ️  Proxy already tracked or error:", error.message);
   }
-  
+
   console.log("⏳ Uploading new implementation...");
   const upgraded = await hre.upgrades.upgradeProxy(MEDIATOR_POOL_ADDRESS, MediatorPool, {
     constructorArgs: [vrfCoordinator],
     unsafeAllow: ["constructor", "state-variable-immutable"],
   });
-  
+
   const upgradeTx = upgraded.deploymentTransaction();
   const receipt = upgradeTx ? await upgradeTx.wait() : null;
 
@@ -56,7 +56,7 @@ async function main() {
 
   const deploymentsPath = path.join(__dirname, "../deployments/sepolia.json");
   const deployments = JSON.parse(fs.readFileSync(deploymentsPath, "utf8"));
-  
+
   deployments.contracts.MediatorPool = {
     address: MEDIATOR_POOL_ADDRESS,
     proxyType: "UUPS",

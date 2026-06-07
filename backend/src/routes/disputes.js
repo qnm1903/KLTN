@@ -13,7 +13,9 @@ import {
   queueDisputeEvent
 } from '../lib/dispute-outbox.js';
 import { finalizeDisputeVotes } from '../services/dispute-finalize.js';
-import { executeDisputeOutcome } from '../services/dispute-contract-executor.js';
+import { getSession } from '../store/session.js';
+import { emitToEscrow } from '../lib/socket-emitter.js';
+//import { executeDisputeOutcome } from '../services/dispute-contract-executor.js';
 
 const router = express.Router();
 
@@ -33,6 +35,22 @@ function assertMessageObject(message) {
   if (!message || typeof message !== 'object' || Array.isArray(message)) {
     throw new Error('message must be an object');
   }
+}
+
+// Canonical vote values are action-aligned:
+//   RELEASE = release() = funds to seller (seller wins)
+//   REFUND  = refund()  = funds to buyer  (buyer wins)
+//   SPLIT   = split()   = 50/50 (only auto-derived on a 3-2 deadlock, not a manual choice)
+// Legacy values (RELEASE_TO_BUYER/RETURN_TO_SELLER) are mapped for backward compat.
+function normalizeVote(raw) {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (!v) return null;
+  // funds to seller
+  if (v === 'release' || v === 'release_to_seller' || v === 'return_to_seller' || v === 'return' || v === '0') return 'RELEASE';
+  // funds to buyer
+  if (v === 'refund' || v === 'refund_to_buyer' || v === 'release_to_buyer' || v === '1') return 'REFUND';
+  if (v === 'split' || v === '2') return 'SPLIT';
+  return 'OTHER';
 }
 
 function assertDeadlineNotExpired(rawDeadline) {
@@ -149,18 +167,20 @@ function buildEvidenceResponse(evidence) {
   };
 }
 
+// Map any stored vote value (incl. legacy) to canonical RELEASE/REFUND/SPLIT.
+function canonicalizeVoteValue(raw) {
+  const v = String(raw ?? '').trim().toUpperCase();
+  if (v === 'RELEASE' || v === 'RELEASE_TO_SELLER' || v === 'RETURN_TO_SELLER' || v === 'RETURN') return 'RELEASE';
+  if (v === 'REFUND' || v === 'REFUND_TO_BUYER' || v === 'RELEASE_TO_BUYER') return 'REFUND';
+  if (v === 'SPLIT') return 'SPLIT';
+  return 'OTHER';
+}
+
 function buildCurrentTallyFromVotes(votes = []) {
-  const tally = {
-    RELEASE_TO_BUYER: 0,
-    RETURN_TO_SELLER: 0,
-    SPLIT: 0,
-    OTHER: 0
-  };
+  const tally = { RELEASE: 0, REFUND: 0, SPLIT: 0, OTHER: 0 };
 
   for (const vote of votes) {
-    const key = vote?.vote;
-    if (Object.prototype.hasOwnProperty.call(tally, key)) tally[key] += 1;
-    else tally.OTHER += 1;
+    tally[canonicalizeVoteValue(vote?.vote)] += 1;
   }
 
   const totalVotes = Object.values(tally).reduce((sum, value) => sum + Number(value || 0), 0);
@@ -168,7 +188,7 @@ function buildCurrentTallyFromVotes(votes = []) {
   return {
     ...tally,
     totalVotes,
-    threshold: 5
+    threshold: 4
   };
 }
 
@@ -225,10 +245,14 @@ function buildVoteResponse(finalizeResult) {
 
 router.post('/', authMiddleware, async (req, res) => {
   try {
-    const { escrowId, reason, description } = req.body;
-    if (!escrowId || !reason) {
-      return res.status(400).json({ error: 'escrowId and reason are required' });
-    }
+    const escrowId = req.body.escrowId || req.query.escrowId;
+    const reason = req.body.reason || req.query.reason || 'No reason specified';
+    const description = req.body.description || req.query.description || '';
+
+    console.log(`\n--- [DISPUTE API] BẮT ĐẦU TẠO TRANH CHẤP ---`);
+    console.log(`=> 1. Đang xử lý cho Escrow ID: ${escrowId}`);
+
+    if (!escrowId) return res.status(400).json({ error: 'escrowId is required' });
 
     const escrow = await prisma.escrow.findUnique({
       where: { id: escrowId },
@@ -236,24 +260,25 @@ router.post('/', authMiddleware, async (req, res) => {
     });
 
     if (!escrow) return res.status(404).json({ error: 'Escrow not found' });
-    if (!isEscrowParticipant(escrow, req.user.id)) {
-      return res.status(403).json({ error: 'Only escrow participants can create disputes' });
+    if (!isEscrowParticipant(escrow, req.user.id)) return res.status(403).json({ error: 'Only escrow participants can create disputes' });
+
+    const finalMediators = escrow.escrowMediators || [];
+    console.log(`=> 2. Số lượng Trọng tài hiện có trong DB: ${finalMediators.length}`);
+    
+   if (finalMediators.length !== 5) {
+      const errMsg = `Lỗi Dữ Liệu: Escrow này chỉ có ${finalMediators.length}/5 Trọng tài. Vui lòng TẠO ESCROW MỚI vì event VRF của Escrow cũ này đã bị mất trước đó.`;
+      console.log(`=> LỖI 409 (Conflict): ${errMsg}`);
+      return res.status(409).json({ error: errMsg });
     }
 
     const existingActiveDispute = await prisma.dispute.findFirst({
-      where: {
-        escrowId,
-        status: { not: 'RESOLVED' }
-      },
+      where: { escrowId, status: { not: 'RESOLVED' } },
       select: { id: true, status: true }
     });
-    if (existingActiveDispute) {
-      return res.status(409).json({
-        error: 'This escrow already has an active dispute',
-        disputeId: existingActiveDispute.id,
-        status: existingActiveDispute.status
-      });
-    }
+
+    if (existingActiveDispute) return res.status(409).json({ error: 'This escrow already has an active dispute' });
+
+    console.log(`=> 3. Bắt đầu Transaction ghi nhận Dispute xuống DB...`);
 
     const dispute = await prisma.$transaction(async (tx) => {
       const created = await tx.dispute.create({
@@ -261,20 +286,20 @@ router.post('/', authMiddleware, async (req, res) => {
           escrowId,
           initiatorAddress: normalizeAddress(req.user.walletAddress),
           reason,
-          description: description || '',
-          status: 'MEDIATORS_ASSIGNED',
+          description,
+          // Auto-accept all mediators on dispute creation → jump to VOTING immediately
+          status: 'VOTING',
           assignedAt: new Date(),
           mediators: {
-            create: escrow.escrowMediators.map((row) => ({
+            create: finalMediators.map((row) => ({
               mediatorId: row.mediatorId,
               slot: row.slot,
-              status: 'assigned'
+              status: 'accepted',
+              acceptedAt: new Date()
             }))
           }
         },
-        include: {
-          mediators: true
-        }
+        include: { mediators: true }
       });
 
       await queueDisputeEvent(tx, {
@@ -289,22 +314,18 @@ router.post('/', authMiddleware, async (req, res) => {
           disputeId: created.id,
           escrowId,
           type: DISPUTE_EVENT_TYPES.MEDIATOR_ASSIGNED,
-          payload: {
-            disputeId: created.id,
-            escrowId,
-            mediatorId: mediator.mediatorId,
-            slot: mediator.slot,
-            status: mediator.status
-          }
+          payload: { disputeId: created.id, escrowId, mediatorId: mediator.mediatorId, slot: mediator.slot, status: mediator.status }
         });
       }
 
       return created;
     });
 
+    console.log(`=> THÀNH CÔNG: Đã tạo Dispute ID: ${dispute.id}`);
     res.status(201).json(buildCreateDisputeResponse(dispute));
+
   } catch (error) {
-    console.error('Error in POST /disputes:', error.message);
+    console.error('=> LỖI HỆ THỐNG (500) TRONG POST /disputes:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -517,11 +538,12 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
     // Store vote in transaction
     const createdVote = await prisma.$transaction(async (tx) => {
       await consumeMediatorNonce(tx, req.user.walletAddress, message.nonce);
+      const normalizedVoteDecision = normalizeVote(vote);
       const insertedVote = await tx.disputeVote.create({
         data: {
           disputeId: req.params.id,
           mediatorId: req.user.id,
-          vote,
+          vote: normalizedVoteDecision, 
           justification: justification || '',
           evidenceRefs: Array.isArray(evidenceRefs) ? evidenceRefs : [],
           signature,
@@ -561,12 +583,31 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
     // Finalize and return current tally
     const finalizeResult = await finalizeDisputeVotes(req.params.id);
     
-    // Trigger execution asynchronously if dispute finalized
-    if (finalizeResult.finalized === true) {
-      executeDisputeOutcome(req.params.id).catch((error) => {
-        console.error(`Failed to execute dispute ${req.params.id}:`, error.message);
-      });
-    }
+      // Trigger execution asynchronously if dispute finalized
+      if (finalizeResult.finalized === true) {
+        // Outcome is action-aligned: RELEASE → release() (funds to seller),
+        // REFUND → refund() (funds to buyer), SPLIT → split() (50/50).
+        const tssAction = finalizeResult.tssAction || (finalizeResult.outcome === 'RELEASE' ? 'release' : (finalizeResult.outcome === 'REFUND' ? 'refund' : (finalizeResult.outcome === 'SPLIT' ? 'split' : 'timeout')));
+
+        // Use signer roles from the active signing session as the single source of truth.
+        let signerRoles = null;
+        try {
+          const session = await getSession(finalizeResult.escrowId, { allowExpired: true });
+          if (session && Array.isArray(session.signingRoles) && session.signingRoles.length > 0) {
+            signerRoles = session.signingRoles;
+          }
+        } catch (e) {
+          // ignore and fail below with a clear error
+        }
+
+        emitToEscrow(finalizeResult.escrowId, 'dispute_tss_needed', {
+          escrowId:    finalizeResult.escrowId,
+          disputeId:   req.params.id,
+          outcome:     finalizeResult.outcome,
+          tssAction,
+          signerRoles
+        });
+      }
     
     res.status(201).json(buildVoteResponse(finalizeResult));
   } catch (error) {
@@ -681,16 +722,7 @@ router.get('/:id/evidence', authMiddleware, async (req, res) => {
 });
 
 router.post('/:id/execute-outcome', authMiddleware, async (req, res) => {
-  try {
-    const access = await getDisputeWithAccess(req.params.id, req.user.id);
-    if (access.error) return res.status(access.code).json({ error: access.error });
-
-    const result = await executeDisputeOutcome(req.params.id);
-    res.json(result);
-  } catch (error) {
-    console.error('Error in POST /disputes/:id/execute-outcome:', error.message);
-    res.status(500).json({ error: error.message });
-  }
+  return res.status(501).json({ error: 'Dispute outcome is executed via TSS signing flow, not this endpoint.' });
 });
 
 export default router;

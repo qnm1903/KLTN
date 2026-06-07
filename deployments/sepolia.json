@@ -13,7 +13,7 @@
     "MediatorPool": {
       "address": "0xb3585dD66a67081f0558e3858ca8925a9e88036C",
       "proxyType": "UUPS",
-      "upgradedAt": "2026-05-11T04:02:52.034Z",
+      "upgradedAt": "2026-06-04T20:25:14.369Z",
       "txHash": null,
       "blockNumber": null
     }

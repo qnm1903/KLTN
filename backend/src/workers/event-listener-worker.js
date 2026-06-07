@@ -2,13 +2,14 @@ import { ethers } from 'ethers';
 import { canTransitionStatus } from '../lib/escrow-status.js';
 
 const FACTORY_ABI = [
-  'event EscrowCreatedEvent(address indexed escrowAddress, bytes32 indexed escrowId, address indexed buyer, address seller)'
+  'event EscrowCreatedEvent(address escrowAddress, bytes32 escrowId, address buyer, address seller, address[5] mediators)'
 ];
 
 const VAULT_ABI = [
   'event EscrowCreated(bytes32 indexed escrowId, address indexed buyer, address indexed seller, uint256 amount)',
   'event FundsLocked(bytes32 indexed escrowId, uint256 amount)',
   'event FundsReleased(bytes32 indexed escrowId, address indexed recipient, uint8 signerBitmap, string action)',
+  'event FundsSplit(bytes32 indexed escrowId, address indexed buyer, address indexed seller, uint256 buyerAmount, uint256 sellerAmount, uint8 signerBitmap)',
   'event DisputeOpened(bytes32 indexed escrowId)'
 ];
 
@@ -189,10 +190,11 @@ async function handleFactoryCreated({ prisma, args, contractAddress, logger }) {
   if (!escrow) {
     escrow = await prisma.escrow.findFirst({
       where: {
-        chainEscrowId: null,
+        //chainEscrowId: null,
         contractAddress: null,
         buyer: { walletAddress: buyer },
-        seller: { walletAddress: seller }
+        seller: { walletAddress: seller },
+        status: { in: ['DRAFT', 'MEDIATORS_ASSIGNED'] }
       },
       include: {
         buyer: { select: { walletAddress: true } },
@@ -252,6 +254,11 @@ async function handleVaultEvent({ prisma, parsedLog, contractAddress }) {
     const isRefund = recipient === normalizeAddress(escrow.buyer.walletAddress);
     const nextStatus = isRefund ? 'REFUNDED' : 'RELEASED';
     await updateEscrowStatus(prisma, escrow, nextStatus);
+    return;
+  }
+
+  if (eventName === 'FundsSplit') {
+    await updateEscrowStatus(prisma, escrow, 'RELEASED');
   }
 }
 

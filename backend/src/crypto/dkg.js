@@ -1,8 +1,9 @@
-import { aggregatePublicKeys } from './schnorr.js';
+import { aggregatePublicKeys, aggregatePubKeysWithLagrange } from './schnorr.js';
 
 export const SESSION_TTL_MS = 30 * 60 * 1000; // 30 phút (DKG phase)
 export const SIGNING_TTL_MS = 6 * 60 * 60 * 1000; // 6 giờ (signing phase)
 
+// Production default: 5-of-7 (buyer + seller + 5 mediators)
 export const PARTICIPANT_ROLES = [
   'buyer',
   'seller',
@@ -13,11 +14,45 @@ export const PARTICIPANT_ROLES = [
   'mediator5'
 ];
 
-export const ACTION_SIGNER_SETS = {
-  release: ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3'],
-  refund: ['buyer', 'mediator1', 'mediator2', 'mediator3', 'mediator4'],
-  timeout: ['seller', 'mediator2', 'mediator3', 'mediator4', 'mediator5']
+/**
+ * Mapping từ Role sang ID cho Shamir Secret Sharing (SSS).
+ * Mỗi role có một số ID cố định để tính Lagrange coefficients.
+ */
+export const ROLE_TO_ID = {
+  'buyer': 1,
+  'seller': 2,
+  'mediator1': 3,
+  'mediator2': 4,
+  'mediator3': 5,
+  'mediator4': 6,
+  'mediator5': 7
 };
+
+/**
+ * Sinh danh sách roles cho cấu hình t-of-n tổng quát.
+ * n parties = buyer + seller + (n-2) mediators.
+ * @param {number} n - tổng số parties
+ * @returns {string[]}
+ */
+export function generateRoles(n) {
+  const roles = ['buyer', 'seller'];
+  for (let i = 1; i <= n - 2; i++) roles.push(`mediator${i}`);
+  return roles;
+}
+
+/**
+ * Sinh ROLE_TO_ID cho cấu hình t-of-n tổng quát.
+ * buyer=1, seller=2, mediator1=3, ..., mediator(n-2)=n
+ * @param {number} n - tổng số parties
+ * @returns {Object}
+ */
+export function generateRoleToId(n) {
+  const map = { buyer: 1, seller: 2 };
+  for (let i = 1; i <= n - 2; i++) map[`mediator${i}`] = i + 2;
+  return map;
+}
+
+
 
 const ROLE_BIT_POSITIONS = new Map(PARTICIPANT_ROLES.map((role, index) => [role, index]));
 
@@ -34,17 +69,23 @@ function assertRole(role) {
   }
 }
 
+/**
+ * Lấy mảng ID từ mảng roles.
+ * @param {string[]} roles - mảng role
+ * @returns {number[]} mảng ID tương ứng
+ */
+export function getRoleIds(roles) {
+  return roles.map(role => {
+    const id = ROLE_TO_ID[role];
+    if (id === undefined) throw new Error(`Unknown role: ${role}`);
+    return id;
+  });
+}
+
 function normalizeRoles(roles) {
   return [...new Set(roles)].sort((left, right) => ROLE_BIT_POSITIONS.get(left) - ROLE_BIT_POSITIONS.get(right));
 }
 
-export function getActionSigners(action) {
-  const roles = ACTION_SIGNER_SETS[action];
-  if (!roles) {
-    throw new Error(`Unsupported action: ${action}`);
-  }
-  return [...roles];
-}
 
 function normalizePubKeyMap(session) {
   const normalized = createEmptyPubKeyMap();
@@ -129,16 +170,8 @@ export function aggregatePubKeysForRoles(pubKeysByRole, roles) {
   }
 
   const orderedRoles = normalizeRoles(roles);
-  const pubKeys = orderedRoles.map((role) => {
-    assertRole(role);
-    const pubKey = pubKeysByRole[role];
-    if (!pubKey) {
-      throw new Error(`Missing public key for role: ${role}`);
-    }
-    return pubKey;
-  });
-
-  const aggregate = aggregatePublicKeys(pubKeys);
+  // Use Lagrange-weighted aggregation by default (SSS)
+  const aggregate = aggregatePubKeysWithLagrange(pubKeysByRole, orderedRoles, ROLE_TO_ID);
   return { x: aggregate.x, y: aggregate.y };
 }
 
@@ -233,16 +266,6 @@ export function initIncrementalDKG(
   return { session };
 }
 
-export function aggregateWhenReady(session) {
-  if (!isPubKeySetComplete(session)) {
-    return null;
-  }
-
-  return Object.entries(ACTION_SIGNER_SETS).reduce((accumulator, [action, roles]) => {
-    accumulator[action] = aggregatePubKeysForRoles(session.pubKeys, roles);
-    return accumulator;
-  }, {});
-}
 
 /**
  * Lấy PKagg phù hợp cho các bên đang ký.
@@ -254,9 +277,4 @@ export function getPkAggForRoles(session, roles) {
 
   return aggregatePubKeysForRoles(session.pubKeys, roles);
 }
-
-export function hasExactActionSigners(action, roles) {
-  const expected = getActionSigners(action).sort();
-  const actual = normalizeRoles(roles);
-  return expected.length === actual.length && expected.every((role, index) => role === actual[index]);
-}
+

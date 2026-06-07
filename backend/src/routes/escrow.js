@@ -305,7 +305,8 @@ async function checkSession(escrowId, res) {
 
 function buildMsgHash(escrowId, action, signerBitmap, contractAddress, chainId) {
   const id = escrowId.startsWith('0x') ? escrowId : ethers.id(escrowId);
-  return ethers.solidityPackedKeccak256(['uint256', 'address', 'bytes32', 'string', 'uint8'], [BigInt(chainId).toString(), contractAddress, id, action, signerBitmap]);
+  // Contract uses abi.encodePacked(uint256 signerBitmap) → 32 bytes; uint8 would only be 1 byte → hash mismatch
+  return ethers.solidityPackedKeccak256(['uint256', 'address', 'bytes32', 'string', 'uint256'], [BigInt(chainId).toString(), contractAddress, id, action, signerBitmap]);
 }
 
 function normalizeUint256Hex(value) {
@@ -553,7 +554,8 @@ function calculateSignerBitmap(roles) {
       if (slot >= 1) bitmap |= (1n << BigInt(slot + 1)); // bit (slot+1)
     }
   }
-  return bitmap;
+  // numParties max=7 → bitmap max=127, safe to convert to Number for JSON serialization
+  return Number(bitmap);
 }
 
 // Helper: Validate signerBitmap theo session config (t-of-n aware)

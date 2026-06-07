@@ -205,9 +205,21 @@ router.post('/request-random', authMiddleware, async (req, res) => {
 
     console.log(`[VRF Request] Đang gọi VRF cho Hợp đồng thực tế: ${trueChainEscrowId}`);
 
+    // Use fee data with 1.5x multiplier to avoid stuck-in-mempool
+    const feeData = await provider.getFeeData();
+    const overrides = {};
+    if (feeData.maxFeePerGas) {
+      overrides.maxFeePerGas = feeData.maxFeePerGas * 3n / 2n;
+      overrides.maxPriorityFeePerGas = (feeData.maxPriorityFeePerGas ?? feeData.maxFeePerGas / 10n) * 3n / 2n;
+    }
+
     // 4. Request random mediators với ĐÚNG mã ID
-    const tx = await mediatorPool.requestRandomMediator(trueChainEscrowId, buyer, seller);
-    const receipt = await tx.wait();
+    const tx = await mediatorPool.requestRandomMediator(trueChainEscrowId, buyer, seller, overrides);
+    // Timeout at 120s to avoid hanging indefinitely on slow Sepolia blocks
+    const receipt = await Promise.race([
+      tx.wait(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('VRF tx wait timeout (120s). Check Sepolia mempool.')), 120_000))
+    ]);
 
     // Parse requestId from event
     const event = receipt.logs.find(log => {

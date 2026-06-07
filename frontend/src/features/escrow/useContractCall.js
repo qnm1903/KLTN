@@ -88,8 +88,10 @@ export const useContractCall = () => {
         pkAggCoords,
         parseEther(amountEth.toString()),
         BigInt(7),
-        BigInt(14)
-      ]
+        BigInt(14),
+        // threshold: 5-of-7 signing scheme (buyer + seller + 5 mediators = 7 parties)
+        BigInt(5)
+      ],
     });
   };
 

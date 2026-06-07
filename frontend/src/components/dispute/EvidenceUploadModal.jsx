@@ -118,7 +118,8 @@ export default function EvidenceUploadModal({ isOpen, onClose, onUpload, dispute
       }
     } catch (err) {
       console.error('Upload error', err);
-      alert('Upload thất bại. Kiểm tra console.');
+      const msg = err?.response?.data?.error || err?.message || 'Upload thất bại';
+      alert(`Upload thất bại: ${msg}`);
     } finally {
       setUploading(false);
       setFile(null);

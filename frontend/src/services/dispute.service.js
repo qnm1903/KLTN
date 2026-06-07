@@ -40,8 +40,15 @@ export async function uploadEvidence(disputeId, formData) {
     throw new Error('Cannot determine escrowId from dispute');
   }
 
-  // Do NOT set Content-Type manually — axios sets it with the correct multipart boundary for FormData
-  const res = await api.post(`/escrows/${encodeURIComponent(dispute.escrowId)}/evidence`, formData);
+  // The shared axios instance defaults Content-Type to application/json. For FormData that
+  // makes axios JSON-serialize the body (dropping the File) instead of sending multipart.
+  // Set to undefined (not the string) so axios deletes the header and the browser auto-sets
+  // multipart/form-data with the correct boundary.
+  const res = await api.post(
+    `/escrows/${encodeURIComponent(dispute.escrowId)}/evidence`,
+    formData,
+    { headers: { 'Content-Type': undefined } }
+  );
   // Add escrowId + disputeId to response for FE convenience
   return { ...res.data, escrowId: dispute.escrowId, disputeId };
 }

@@ -2,7 +2,7 @@ import { ethers } from 'ethers';
 import { canTransitionStatus } from '../lib/escrow-status.js';
 
 const FACTORY_ABI = [
-  'event EscrowCreatedEvent(address escrowAddress, bytes32 escrowId, address buyer, address seller, address[5] mediators)'
+  'event EscrowCreatedEvent(address escrowAddress, bytes32 escrowId, address buyer, address seller, address[] mediators, uint256 threshold, uint256 numParties)'
 ];
 
 const VAULT_ABI = [

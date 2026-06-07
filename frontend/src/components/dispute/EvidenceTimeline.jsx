@@ -32,7 +32,11 @@ const EvidenceTimeline = () => {
               <div>
                 <div className="text-sm font-semibold text-gray-800">{ev.description || 'No description'}</div>
                 <div className="text-xs text-gray-500 mt-1">
-                  Uploaded by <span className="font-mono text-gray-700">{truncateAddr(ev.uploader)}</span> • {formatDate(ev.uploadedAt)}
+                  Uploaded by <span className="font-semibold text-slate-700">{ev.uploaderRole || truncateAddr(ev.uploader)}</span>
+                  {ev.uploaderRole && ev.uploader && (
+                    <span className="font-mono ml-1 text-gray-400">({truncateAddr(ev.uploader)})</span>
+                  )}
+                  {' '}• {formatDate(ev.uploadedAt)}
                 </div>
               </div>
 

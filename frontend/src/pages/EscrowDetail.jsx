@@ -514,8 +514,10 @@ export default function EscrowDetail() {
 
         const receipt = await waitForTx(txHash);
 
-        if (receipt && receipt.status === 0) {
-          throw new Error('Transaction reverted on the blockchain.');
+        // viem returns receipt.status as 'success' | 'reverted' (string), not 1/0.
+        // Treat both the string and any legacy numeric form as a revert.
+        if (receipt && (receipt.status === 'reverted' || receipt.status === 0)) {
+          throw new Error('Transaction reverted on-chain. Deploy did not succeed (check gas limit / contract requirements).');
         }
 
         addLog({ message: `✅ Block mined (Block #${receipt.blockNumber}). Syncing with database...`, type: 'success' });
@@ -1379,11 +1381,11 @@ export default function EscrowDetail() {
                   )}
                   <button
                     onClick={() => handleStartSigning(determinedAction)}
-                    disabled={dkgCommitmentCount < 7}
+                    disabled={dkgCommitmentCount < 7 || ['nonce', 'z-share', 'ready'].includes(signingPhase)}
                     className={`w-full md:w-auto px-8 py-3 rounded-xl text-white font-bold shadow-lg transform transition
-                      ${dkgCommitmentCount < 7 ? `${cfg.disabledColor} cursor-not-allowed opacity-50` : `${cfg.color} hover:-translate-y-1`}`}
+                      ${dkgCommitmentCount < 7 || ['nonce', 'z-share', 'ready'].includes(signingPhase) ? `${cfg.disabledColor} cursor-not-allowed opacity-50` : `${cfg.color} hover:-translate-y-1`}`}
                   >
-                    {cfg.label}
+                    {['nonce', 'z-share', 'ready'].includes(signingPhase) ? 'Signing in progress...' : cfg.label}
                   </button>
                 </>
               )}

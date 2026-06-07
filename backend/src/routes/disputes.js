@@ -101,6 +101,8 @@ async function getDisputeWithAccess(disputeId, userId) {
           id: true,
           buyerId: true,
           sellerId: true,
+          buyer: { select: { walletAddress: true } },
+          seller: { select: { walletAddress: true } },
           escrowMediators: { select: { mediatorId: true } }
         }
       },
@@ -150,11 +152,21 @@ function buildMediatorResponse(mediator) {
   };
 }
 
-function buildEvidenceResponse(evidence) {
+function resolveUploaderRole(uploaderWallet, buyerWallet, sellerWallet) {
+  if (!uploaderWallet) return 'unknown';
+  const addr = uploaderWallet.toLowerCase();
+  if (buyerWallet && addr === buyerWallet.toLowerCase()) return 'BUYER';
+  if (sellerWallet && addr === sellerWallet.toLowerCase()) return 'SELLER';
+  return 'MEDIATOR';
+}
+
+function buildEvidenceResponse(evidence, buyerWallet, sellerWallet) {
+  const uploaderWallet = normalizeAddress(evidence.uploader?.walletAddress || 'unknown');
   return {
     id: evidence.id,
     ipfsHash: evidence.fileUrl || 'ipfs://unknown',
-    uploader: normalizeAddress(evidence.uploader?.walletAddress || 'unknown'),
+    uploader: uploaderWallet,
+    uploaderRole: resolveUploaderRole(uploaderWallet, buyerWallet, sellerWallet),
     description: evidence.description || '',
     metadata: {
       mime: 'application/octet-stream',
@@ -194,6 +206,8 @@ function buildCurrentTallyFromVotes(votes = []) {
 
 function buildDisputeDetailResponse(dispute, evidences = [], viewerRole = 'unknown') {
   const currentTally = buildCurrentTallyFromVotes(dispute.votes || []);
+  const buyerWallet = dispute.escrow?.buyer?.walletAddress || null;
+  const sellerWallet = dispute.escrow?.seller?.walletAddress || null;
 
   return {
     disputeId: dispute.id,
@@ -202,7 +216,7 @@ function buildDisputeDetailResponse(dispute, evidences = [], viewerRole = 'unkno
     viewerRole,
     initiatorAddress: normalizeAddress(dispute.initiatorAddress),
     mediators: (dispute.mediators || []).map(buildMediatorResponse),
-    evidence: (evidences || []).map(buildEvidenceResponse),
+    evidence: (evidences || []).map(ev => buildEvidenceResponse(ev, buyerWallet, sellerWallet)),
     currentTally,
     createdAt: dispute.createdAt?.toISOString() || null,
     assignedAt: dispute.assignedAt?.toISOString() || null,

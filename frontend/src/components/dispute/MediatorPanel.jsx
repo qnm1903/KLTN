@@ -3,7 +3,7 @@ import { useAccount, useWalletClient } from 'wagmi';
 import { useAtomValue, useSetAtom } from 'jotai';
 import { mediatorsListAtom, voteTallyAtom, currentDisputeAtom } from '../../store/disputeAtoms.js';
 import { MEDIATOR_STATUS, DISPUTE_STATUS, VOTE_CHOICE } from '../../constants/dispute.constants.js';
-import { acceptMediator, getCurrentMediatorNonce, getDispute, submitVote } from '../../services/dispute.service.js';
+import { getCurrentMediatorNonce, getDispute, submitVote } from '../../services/dispute.service.js';
 
 /**
  * MediatorPanel
@@ -23,112 +23,13 @@ const MediatorPanel = () => {
   const [processingMediator, setProcessingMediator] = React.useState(null);
   const mediators = useAtomValue(mediatorsListAtom) || [];
   const tally = useAtomValue(voteTallyAtom) || {
-    RELEASE_TO_BUYER: 0,
-    RETURN_TO_SELLER: 0,
+    RELEASE: 0,
+    REFUND: 0,
     SPLIT: 0,
     OTHER: 0,
     totalVotes: 0,
-    threshold: 5
+    threshold: 4
   };
-
-const handleMediatorDecision = async (mediatorAddr, action) => {
-  if (!mediatorAddr || !walletClient || !address || !currentDispute) return;
-  setProcessingMediator(mediatorAddr);
-
-  try {
-    // Normalize decision as backend expects 'accept' or 'decline'
-    const decision = String(action || '').toLowerCase() === 'accept' ? 'accept' : 'decline';
-
-    // Build EIP-712 message matching backend's ACCEPT_MEDIATOR_TYPE
-    const nonceRes = await getCurrentMediatorNonce();
-    const nonce = Number(nonceRes?.currentNonce ?? 0); // first-time mediator nonce; backend will verify/consume
-    const deadline = Math.floor(Date.now() / 1000) + 300; // 5 minutes into the future
-
-    const message = {
-      disputeId: currentDispute?.disputeId || currentDispute?.id || '',
-      escrowId: currentDispute?.escrowId || '',
-      mediator: mediatorAddr,
-      decision,
-      nonce,
-      deadline
-    };
-
-    // Domain + Types must match backend/src/types/dispute-typed-data.js: ACCEPT_MEDIATOR_TYPE
-    const domain = {
-      name: 'KLTNDisputeVoting',
-      version: '1',
-      chainId: 11155111,
-      verifyingContract: '0x0000000000000000000000000000000000000000'
-    };
-
-    const types = {
-      AcceptMediator: [
-        { name: 'disputeId', type: 'string' },
-        { name: 'escrowId', type: 'string' },
-        { name: 'mediator', type: 'address' },
-        { name: 'decision', type: 'string' },
-        { name: 'nonce', type: 'uint256' },
-        { name: 'deadline', type: 'uint256' }
-      ]
-    };
-
-    // Sign typed data with wallet client (MetaMask)
-    const signature = await walletClient.signTypedData({
-      domain,
-      types,
-      primaryType: 'AcceptMediator',
-      message,
-      account: address
-    });
-  // --- 1. LOG DỮ LIỆU GỬI ĐI ---
-    console.log('🚀 [Accept] Đang gửi payload lên Backend:', { decision, disputeId: message.disputeId });
-
-    // --- 2. GỌI BACKEND ---
-    const acceptRes = await acceptMediator(message.disputeId, {
-      decision,
-      signature,
-      message
-    });
-    console.log('✅ [Accept] Backend đã xử lý thành công (DB Update):', acceptRes);
-
-    // --- 3. KÉO DỮ LIỆU MỚI NHẤT VỀ ---
-    try {
-      const fresh = await getDispute(message.disputeId);
-      console.log('🔄 [Refresh] Dữ liệu Dispute mới từ DB:', fresh);
-
-      if (fresh && fresh.mediators && fresh.mediators.length > 0) {
-        setCurrentDispute(fresh);
-        setMediators(fresh.mediators);
-        console.log('✨ [4] Đã cập nhật giao diện thành công từ Backend!');
-      } else {
-        console.warn('⚠️ [4] Backend trả về rỗng, dùng fallback Optimistic Update');
-        // Bản vá Copilot: Dùng MEDIATOR_STATUS.ACCEPTED ('accepted' chữ thường) để tránh lỗi Component không nhận diện được
-        setMediators((prev) => prev.map((m) =>
-          (m.address || (m.mediator && m.mediator.walletAddress) || m.mediatorId || '').toLowerCase() === mediatorAddr.toLowerCase()
-            ? {
-                ...m,
-                status: decision === 'accept' ? MEDIATOR_STATUS.ACCEPTED : MEDIATOR_STATUS.DECLINED,
-                acceptedAt: decision === 'accept' ? new Date().toISOString() : null,
-                declinedAt: decision === 'decline' ? new Date().toISOString() : null
-              }
-            : m
-        ));
-      }
-    } catch (refreshErr) {
-      console.error('❌ [Refresh] Lỗi khi kéo dữ liệu mới:', refreshErr);
-    }
-  } catch (err) {
-      // Bóc trần sự thật từ Axios
-      const backendMsg = err.response?.data?.error || err.message || 'Lỗi không xác định';
-      console.error('❌❌❌ Lỗi Ký/Gửi Decision (CHI TIẾT):', backendMsg);
-      
-      // Bắn popup đập thẳng vào mắt để không phải F12 nữa
-      alert(`GIAO DỊCH BỊ TỪ CHỐI BỞI BACKEND:\n\n${backendMsg}`);
-      
-    } finally {
-      setProcessingMediator(null);
-    }
-};
 
 const handleSubmitVote = async (mediatorAddr, choice) => {
   if (!mediatorAddr || !walletClient || !address || !currentDispute) return;
@@ -196,31 +97,23 @@ const handleSubmitVote = async (mediatorAddr, choice) => {
       schnorrSigRelease: preSignedOutcomeSignatures.schnorrSigRelease
     });
 
-    if (res?.currentTally) {
-      setVoteTally({
-        RELEASE_TO_BUYER: Number(res.currentTally.RELEASE_TO_BUYER || 0),
-        RETURN_TO_SELLER: Number(res.currentTally.RETURN_TO_SELLER || 0),
-        SPLIT: Number(res.currentTally.SPLIT || 0),
-        OTHER: Number(res.currentTally.OTHER || 0),
-        totalVotes: Number(res.currentTally.totalVotes ?? 0),
-        threshold: Number(res.currentTally.threshold ?? 5)
-      });
-    }
-
-    // Refresh dispute state
+    // Refresh dispute state 
     try {
       const fresh = await getDispute(message.disputeId);
       if (fresh) {
         setCurrentDispute(fresh);
         setMediators(fresh.mediators);
-        if (fresh.currentTally) {
+        
+        const backendTally = fresh.tally || fresh.voteTally || fresh.currentTally || res?.tally || res?.currentTally;
+        
+        if (backendTally) {
           setVoteTally({
-            RELEASE_TO_BUYER: Number(fresh.currentTally.RELEASE_TO_BUYER || 0),
-            RETURN_TO_SELLER: Number(fresh.currentTally.RETURN_TO_SELLER || 0),
-            SPLIT: Number(fresh.currentTally.SPLIT || 0),
-            OTHER: Number(fresh.currentTally.OTHER || 0),
-            totalVotes: Number(fresh.currentTally.totalVotes ?? 0),
-            threshold: Number(fresh.currentTally.threshold ?? 5)
+            RELEASE: Number(backendTally.RELEASE || 0),
+            REFUND: Number(backendTally.REFUND || 0),
+            SPLIT: Number(backendTally.SPLIT || 0),
+            OTHER: Number(backendTally.OTHER || 0),
+            totalVotes: Number(backendTally.totalVotes ?? 0),
+            threshold: Number(backendTally.threshold ?? 4)
           });
         }
       }
@@ -275,7 +168,7 @@ const padded = Array.from({ length: COMMITTEE_SIZE }).map((_, i) => {
     <div className="bg-slate-800/50 backdrop-blur-md border border-slate-700/50 rounded-xl shadow-xl shadow-black/40 p-4 space-y-4">
       <div className="flex items-center justify-between">
         <h4 className="text-sm font-semibold text-slate-200">Assigned Mediators ({COMMITTEE_SIZE})</h4>
-        <div className="text-xs text-slate-400">Threshold: {tally.threshold || 5}</div>
+        <div className="text-xs text-slate-400">Threshold: {tally.threshold || 4}</div>
       </div>
 
       {/* Mediator list */}
@@ -293,32 +186,11 @@ const padded = Array.from({ length: COMMITTEE_SIZE }).map((_, i) => {
             </div>
 
             <div className="flex items-center space-x-3">
-              {/**
-               * If current dispute is in VOTING state and this user is the mediator and accepted,
-               * show voting options. Otherwise show accept/decline when assigned, or status badge.
-               */}
-              {address && m.address && address.toLowerCase() === m.address.toLowerCase() && currentDispute?.status === DISPUTE_STATUS.VOTING && m.status === MEDIATOR_STATUS.ACCEPTED && !m.votedAt ? (
+              {/* All mediators auto-accepted on dispute creation → show vote buttons if in VOTING and not voted yet */}
+              {address && m.address && address.toLowerCase() === m.address.toLowerCase() && currentDispute?.status === DISPUTE_STATUS.VOTING && !m.votedAt ? (
                 <div className="flex items-center space-x-2">
-                  <button onClick={() => handleSubmitVote(m.address, VOTE_CHOICE.RELEASE_TO_BUYER)} disabled={processingMediator === m.address} className="px-3 py-1 rounded-md bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 text-sm hover:bg-emerald-500/40 disabled:opacity-50">{processingMediator === m.address ? '...' : 'Release'}</button>
-                  <button onClick={() => handleSubmitVote(m.address, VOTE_CHOICE.RETURN_TO_SELLER)} disabled={processingMediator === m.address} className="px-3 py-1 rounded-md bg-rose-500/20 text-rose-400 border border-rose-500/50 text-sm hover:bg-rose-500/40 disabled:opacity-50">{processingMediator === m.address ? '...' : 'Return'}</button>
-                  <button onClick={() => handleSubmitVote(m.address, VOTE_CHOICE.SPLIT)} disabled={processingMediator === m.address} className="px-3 py-1 rounded-md bg-amber-500/20 text-amber-400 border border-amber-500/50 text-sm hover:bg-amber-500/40 disabled:opacity-50">{processingMediator === m.address ? '...' : 'Split'}</button>
-                </div>
-              ) : address && m.address && address.toLowerCase() === m.address.toLowerCase() && m.status === MEDIATOR_STATUS.ASSIGNED ? (
-                <div className="flex items-center space-x-2">
-                  <button
-                    onClick={() => handleMediatorDecision(m.address, 'ACCEPT')}
-                    disabled={processingMediator === m.address}
-                    className="px-3 py-1 rounded-md bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 text-sm hover:bg-emerald-500/40 disabled:opacity-50"
-                  >
-                    {processingMediator === m.address ? '...' : 'Accept'}
-                  </button>
-                  <button
-                    onClick={() => handleMediatorDecision(m.address, 'DECLINE')}
-                    disabled={processingMediator === m.address}
-                    className="px-3 py-1 rounded-md bg-rose-500/20 text-rose-400 border border-rose-500/50 text-sm hover:bg-rose-500/40 disabled:opacity-50"
-                  >
-                    {processingMediator === m.address ? '...' : 'Decline'}
-                  </button>
+                  <button onClick={() => handleSubmitVote(m.address, VOTE_CHOICE.RELEASE)} disabled={processingMediator === m.address} title="release() — chuyển tiền cho Seller" className="px-3 py-1 rounded-md bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 text-sm hover:bg-emerald-500/40 disabled:opacity-50">{processingMediator === m.address ? '...' : 'Release → Seller'}</button>
+                  <button onClick={() => handleSubmitVote(m.address, VOTE_CHOICE.REFUND)} disabled={processingMediator === m.address} title="refund() — hoàn tiền cho Buyer" className="px-3 py-1 rounded-md bg-rose-500/20 text-rose-400 border border-rose-500/50 text-sm hover:bg-rose-500/40 disabled:opacity-50">{processingMediator === m.address ? '...' : 'Refund → Buyer'}</button>
                 </div>
               ) : (
                 <>
@@ -355,7 +227,7 @@ const StatusBadge = ({ status }) => {
 /* VotingProgressBar inline */
 const VotingProgressBar = ({ tally, total = 5 }) => {
   const TOTAL = total;
-  const order = ['RELEASE_TO_BUYER', 'RETURN_TO_SELLER', 'SPLIT', 'OTHER'];
+  const order = ['RELEASE', 'REFUND', 'SPLIT', 'OTHER'];
   const filled = [];
 
   order.forEach((k) => {
@@ -368,9 +240,9 @@ const VotingProgressBar = ({ tally, total = 5 }) => {
   const slots = Array.from({ length: TOTAL }).map((_, i) => {
     const outcome = filled[i] || null;
     const color =
-      outcome === 'RELEASE_TO_BUYER'
+      outcome === 'RELEASE'
         ? 'bg-emerald-500'
-        : outcome === 'RETURN_TO_SELLER'
+        : outcome === 'REFUND'
         ? 'bg-rose-500'
         : outcome === 'SPLIT'
         ? 'bg-amber-500'
@@ -379,7 +251,7 @@ const VotingProgressBar = ({ tally, total = 5 }) => {
     return { color, filled: filledFlag };
   });
 
-  const threshold = tally.threshold || 5;
+  const threshold = tally.threshold || 4;
   const thresholdPosPercent = ((threshold - 1) / (TOTAL - 1)) * 100; // threshold tick position
 
   return (
@@ -417,9 +289,9 @@ const VotingProgressBar = ({ tally, total = 5 }) => {
 
       {/* Legend */}
       <div className="mt-3 flex items-center space-x-4">
-        <Legend color="bg-emerald-500" label="Release to Buyer" />
-        <Legend color="bg-rose-500" label="Return to Seller" />
-        <Legend color="bg-amber-500" label="Split" />
+        <Legend color="bg-emerald-500" label="Release → Seller" />
+        <Legend color="bg-rose-500" label="Refund → Buyer" />
+        <Legend color="bg-amber-500" label="Split (3-2 tie)" />
         <Legend color="bg-slate-600" label="Other" />
         <div className="ml-auto text-sm text-slate-400">Threshold: {threshold} votes</div>
       </div>

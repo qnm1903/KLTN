@@ -45,8 +45,12 @@ export const useContractCall = () => {
 
   const { writeContractAsync, data: hash, isPending, error: writeError } = useWriteContract();
 
+  // Giảm tần suất tự động quét block của Wagmi xuống 5s (tránh Rate Limit và rác stream)
   const { isLoading: isConfirming, isSuccess: isConfirmed, error: receiptError } = useWaitForTransactionReceipt({
-    hash
+    hash,
+    query: {
+      refetchInterval: 5000, 
+    }
   });
 
   useEffect(() => {
@@ -74,7 +78,7 @@ export const useContractCall = () => {
 
     addLog({ message: 'Requesting MetaMask to deploy new Vault Contract...', type: 'warning' });
 
-    await writeContractAsync({
+    return await writeContractAsync({
       address: factoryAddress,
       abi: factoryAbi,
       functionName: 'createEscrow',
@@ -183,7 +187,7 @@ export const useContractCall = () => {
 
     // addLog({ message: `Requesting MetaMask to lock ${amountEth} ETH on-chain...`, type: 'warning' });
 
-    await writeContractAsync({
+    return await writeContractAsync({
       address: vaultContractAddress,
       abi: vaultAbi,
       functionName: 'lockFunds',
@@ -192,7 +196,7 @@ export const useContractCall = () => {
   };
 
   const executeTssAction = async (actionType, signatureData, fallbackAddress) => {
-    if (!['release', 'refund'].includes(actionType)) {
+    if (!['release', 'refund', 'split'].includes(actionType)) {
       const invalidActionMessage = `Code error: invalid actionType ${actionType}`;
       addLog({ message: invalidActionMessage, type: 'error' });
       throw new Error(invalidActionMessage);
@@ -220,7 +224,7 @@ export const useContractCall = () => {
         throw new Error(`Preflight failed: ${simulatedReason}`);
       }
 
-      await writeContractAsync({
+       return await writeContractAsync({
         address: targetAddress,
         abi: vaultAbi,
         functionName: actionType,
@@ -251,11 +255,32 @@ export const useContractCall = () => {
     }
   };
 
+  // ==========================================
+  // BẮT ĐẦU THÊM MỚI: TX WAITER ĐỂ FIX MEMORY LEAK
+  // ==========================================
+  // Chỉnh thời gian nới lỏng vòng lặp thành 5 giây để đồng bộ với block time thực tế
+  const waitForTx = useCallback(async (txHash, timeoutMs = 180000, pollInterval = 5000) => {
+    if (!publicClient) throw new Error('publicClient is required to wait for tx');
+    
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+        if (receipt) return receipt;
+      } catch (e) {
+        // Ignore transient RPC read errors and keep polling
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    }
+    throw new Error('Timeout waiting for transaction confirmation (180s exceeded)');
+  }, [publicClient]);
+
   return {
     deployEscrowVault,
     fundEscrow,
     getVaultStatus,
     executeTssAction,
+    waitForTx,
     isPending,
     isConfirming,
     isConfirmed,

@@ -25,10 +25,10 @@ export const mediatorsListAtom = atom([]);
  * @type {import('jotai').Atom<import('../constants/dispute.constants.js').VoteTally>}
  */
 export const voteTallyAtom = atom({
-  RELEASE_TO_BUYER: 0,
-  RETURN_TO_SELLER: 0,
+  RELEASE: 0,
+  REFUND: 0,
   SPLIT: 0,
   OTHER: 0,
   totalVotes: 0,
-  threshold: DISPUTE_THRESHOLD || 5
+  threshold: DISPUTE_THRESHOLD || 4
 });

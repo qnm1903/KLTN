@@ -9,6 +9,18 @@ const api = axios.create({
   },
 });
 
+const pendingRequests = new Map();
+const _originalGet = api.get.bind(api);
+api.get = (url, config) => {
+  const key = `GET:${url}:${JSON.stringify(config?.params || {})}`;
+  if (pendingRequests.has(key)) {
+    return pendingRequests.get(key); // Trả về Promise đang chờ thay vì gọi lại
+  }
+  const promise = _originalGet(url, config).finally(() => pendingRequests.delete(key));
+  pendingRequests.set(key, promise);
+  return promise;
+};
+
 // REQUEST INTERCEPTOR: Tiêm JWT Token tự động (Implicit Token Injection)
 api.interceptors.request.use((config) => {
   const token = getStoredAccessToken();

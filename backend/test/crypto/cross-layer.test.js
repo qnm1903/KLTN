@@ -1,9 +1,9 @@
-import { deriveSignerBitmap, getActionSigners, getPkAggForRoles, initDKG } from '../../src/crypto/dkg.js';
+import { ROLE_TO_ID, deriveSignerBitmap, getActionSigners, getPkAggForRoles, initDKG } from '../../src/crypto/dkg.js';
 import {
-  aggregateNonces,
+  aggregateNoncesWithLagrange,
   computeChallenge,
   computeSignatureShare,
-  aggregateZShares,
+  aggregateZSharesWithLagrange,
   verifySchnorr
 } from '../../src/crypto/schnorr.js';
 import { generateKeyPair } from '../../src/crypto/ecc.js';
@@ -67,14 +67,16 @@ describe('Cross-layer: Schnorr signing flow', () => {
       return { role, nonce, share };
     });
 
-    const { R_addr } = aggregateNonces(
-      round1Shares.map((row) => ({ R_x: row.share.R_x, R_y: row.share.R_y }))
+    const noncesByRole = Object.fromEntries(
+      round1Shares.map((row) => [row.role, { R_x: row.share.R_x, R_y: row.share.R_y }])
     );
+    const { R_addr } = aggregateNoncesWithLagrange(noncesByRole, ROLE_TO_ID);
 
     const e = computeChallenge(R_addr, pkAgg.x, pkAgg.y, msgHash);
-    const z = aggregateZShares(
-      round1Shares.map((row) => computeSignatureShare(keys[row.role].privKey, row.nonce, e).z)
+    const zSharesByRole = Object.fromEntries(
+      round1Shares.map((row) => [row.role, computeSignatureShare(keys[row.role].privKey, row.nonce, e).z])
     );
+    const z = aggregateZSharesWithLagrange(zSharesByRole, ROLE_TO_ID);
 
     return { pkAgg, msgHash, R_addr, z, e };
   }

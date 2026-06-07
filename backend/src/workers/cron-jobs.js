@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { buildDisputeLifecycleData, DISPUTE_PHASES, resolveNextDisputePhase } from '../lib/dispute-lifecycle.js';
-import { retryStuckExecutions } from '../services/dispute-contract-executor.js';
+//import { retryStuckExecutions } from '../services/dispute-contract-executor.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_UPLOADS_DIR = path.join(__dirname, '../../uploads');
@@ -414,38 +414,38 @@ export function startCronJobs(prisma, options = {}) {
     logMetric(logger, 'cron.job.scheduled', { job: 'nonce_cleanup', pattern: nonceCleanupPattern }, 0);
   }
 
-  // Phase 4: Retry stuck dispute executions every 5 minutes
-  const disputeRetryPattern = options.disputeRetryPattern ?? '*/5 * * * *';
-  if (!validate(disputeRetryPattern)) {
-    throw new Error(`Invalid dispute retry cron pattern: ${disputeRetryPattern}`);
-  }
+  // // Phase 4: Retry stuck dispute executions every 5 minutes
+  // const disputeRetryPattern = options.disputeRetryPattern ?? '*/5 * * * *';
+  // if (!validate(disputeRetryPattern)) {
+  //   throw new Error(`Invalid dispute retry cron pattern: ${disputeRetryPattern}`);
+  // }
 
-  if (!disputeExecutionRetryJob) {
-    disputeExecutionRetryJob = schedule(disputeRetryPattern, async () => {
-      if (disputeExecutionRetryInProgress) {
-        logMetric(logger, 'cron.dispute_retry.skipped', { reason: 'already_running' }, 0);
-        return;
-      }
+  // if (!disputeExecutionRetryJob) {
+  //   disputeExecutionRetryJob = schedule(disputeRetryPattern, async () => {
+  //     if (disputeExecutionRetryInProgress) {
+  //       logMetric(logger, 'cron.dispute_retry.skipped', { reason: 'already_running' }, 0);
+  //       return;
+  //     }
 
-      disputeExecutionRetryInProgress = true;
-      const startTime = Date.now();
-      try {
-        const result = await retryStuckExecutions();
-        const duration = Date.now() - startTime;
-        logMetric(logger, 'cron.dispute_retry.completed', {
-          retried: result.retried,
-          failed: result.failed,
-          total: result.total
-        }, duration);
-      } catch (error) {
-        const duration = Date.now() - startTime;
-        logMetric(logger, 'cron.dispute_retry.failed', { error: error.message }, duration, 'failed');
-      } finally {
-        disputeExecutionRetryInProgress = false;
-      }
-    });
-    logMetric(logger, 'cron.job.scheduled', { job: 'dispute_execution_retry', pattern: disputeRetryPattern }, 0);
-  }
+  //     disputeExecutionRetryInProgress = true;
+  //     const startTime = Date.now();
+  //     try {
+  //       const result = await retryStuckExecutions();
+  //       const duration = Date.now() - startTime;
+  //       logMetric(logger, 'cron.dispute_retry.completed', {
+  //         retried: result.retried,
+  //         failed: result.failed,
+  //         total: result.total
+  //       }, duration);
+  //     } catch (error) {
+  //       const duration = Date.now() - startTime;
+  //       logMetric(logger, 'cron.dispute_retry.failed', { error: error.message }, duration, 'failed');
+  //     } finally {
+  //       disputeExecutionRetryInProgress = false;
+  //     }
+  //   });
+  //   logMetric(logger, 'cron.job.scheduled', { job: 'dispute_execution_retry', pattern: disputeRetryPattern }, 0);
+  // }
 
   logMetric(logger, 'cron.started', { totalJobs: 4 }, 0);
 }

@@ -22,13 +22,17 @@ export default function ResolvedBanner({ dispute: propDispute = null }) {
   const outcome = dispute.outcome || 'UNKNOWN';
 
   const outcomeMeta = (() => {
-    switch (outcome) {
-      case VOTE_CHOICE.RELEASE_TO_BUYER:
-        return { label: 'Release to Buyer', cls: 'bg-green-50 text-green-800' };
-      case VOTE_CHOICE.RETURN_TO_SELLER:
-        return { label: 'Return to Seller', cls: 'bg-red-50 text-red-800' };
+    const canonical =
+      (outcome === VOTE_CHOICE.RELEASE || outcome === 'RETURN_TO_SELLER') ? 'RELEASE'
+      : (outcome === VOTE_CHOICE.REFUND || outcome === 'RELEASE_TO_BUYER') ? 'REFUND'
+      : outcome;
+    switch (canonical) {
+      case 'RELEASE':
+        return { label: 'Release → Seller', cls: 'bg-green-50 text-green-800' };
+      case 'REFUND':
+        return { label: 'Refund → Buyer', cls: 'bg-red-50 text-red-800' };
       case VOTE_CHOICE.SPLIT:
-        return { label: 'Split', cls: 'bg-amber-50 text-amber-800' };
+        return { label: 'Split (50/50)', cls: 'bg-amber-50 text-amber-800' };
       default:
         return { label: outcome, cls: 'bg-gray-100 text-gray-800' };
     }
@@ -78,6 +82,18 @@ export default function ResolvedBanner({ dispute: propDispute = null }) {
             <div className="text-xs text-gray-400">No mediator list available</div>
           )}
         </div>
+      </div>
+      {/* FIXED: Add CTA to redirect users back to the TSS Execution Workspace */}
+      <div className="mt-5 pt-4 border-t border-indigo-100/50 flex justify-end">
+        <button
+          onClick={() => window.location.href = `/escrow/${dispute.escrowId}`}
+          className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow-md transition-all flex items-center hover:scale-105"
+        >
+          Proceed to TSS Execution Workspace
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 ml-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
+          </svg>
+        </button>
       </div>
     </div>
   );

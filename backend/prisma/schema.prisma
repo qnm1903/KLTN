@@ -48,7 +48,6 @@ model Escrow {
   disputePhase    String?  // OPENED | EVIDENCE_WINDOW | REVIEW_WINDOW | DECISION_PENDING | RESOLVED
 
   // Mediator Pool fields
-  mediatorPoolUsed     Boolean   @default(false)
   mediatorsSelectedAt  DateTime?
   
   // Deadlines cho timeout check
@@ -75,6 +74,9 @@ model Escrow {
   pkAggSmX String?
   pkAggSmY String?
 
+  // DKG phase deadline (Pedersen VSS)
+  dkgDueAt           DateTime?
+
   evidences          Evidence[]
   statusHistory      EscrowStatusHistory[]
   pubKeySubmissions  PubKeySubmission[]
@@ -82,6 +84,8 @@ model Escrow {
   nonceSubmissions   NonceSubmission[]
   signingSessions    SigningSession[]
   disputes           Dispute[]
+  dkgCommitments     DkgCommitment[]
+  dkgShares          DkgShare[]
   createdAt          DateTime   @default(now())
   updatedAt          DateTime   @updatedAt
 
@@ -325,10 +329,13 @@ model Approval {
 model NonceSubmission {
   id          String   @id @default(uuid())
   escrowId    String
-  action      String   // release | refund
+  action      String   // release | refund | timeout
   role        String   // buyer | seller | mediator1-5
-  nonceR_x    String   // R_x coordinate
-  nonceR_y    String   // R_y coordinate
+  nonceR_x    String   // R_x coordinate (legacy single-nonce / FROST R1_x)
+  nonceR_y    String   // R_y coordinate (legacy single-nonce / FROST R1_y)
+  // FROST dual-nonce fields (null = legacy single-nonce mode)
+  nonceR2_x   String?  // FROST R2_x
+  nonceR2_y   String?  // FROST R2_y
   submittedAt DateTime @default(now())
   expiresAt   DateTime // TTL for nonce (timeout phase)
 
@@ -337,6 +344,39 @@ model NonceSubmission {
   @@unique([escrowId, action, role])
   @@index([escrowId, action])
   @@index([expiresAt])
+}
+
+// Pedersen VSS DKG Phase — Feldman commitments từ mỗi party
+model DkgCommitment {
+  id          String   @id @default(uuid())
+  escrowId    String
+  role        String   // buyer | seller | mediator1-5
+  // JSON array of 5 EC points: [{x, y}, {x, y}, {x, y}, {x, y}, {x, y}]
+  commitments String   // JSON serialized
+  // Identity pubkey (privKey*G) for ECDH share encryption. Stored here — not in
+  // PubKeySubmission — so the later signing-pubkey submission cannot overwrite it mid-DKG.
+  identityPubKey String?
+  submittedAt DateTime @default(now())
+
+  escrow Escrow @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+
+  @@unique([escrowId, role])
+  @@index([escrowId])
+}
+
+// Pedersen VSS DKG Phase — Encrypted share từ party i gửi cho party j
+model DkgShare {
+  id             String   @id @default(uuid())
+  escrowId       String
+  fromRole       String   // role của party gửi
+  toRole         String   // role của party nhận
+  encryptedBlob  String   // ECDH-AES-GCM encrypted VSS share (base64)
+  submittedAt    DateTime @default(now())
+
+  escrow Escrow @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+
+  @@unique([escrowId, fromRole, toRole])
+  @@index([escrowId, toRole])
 }
 
 model MediatorReputationHistory {

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { useConnect, useConnection } from 'wagmi';
-import { injected } from 'wagmi/connectors';
+import { useConnect, useAccount } from 'wagmi';
+import { injectedConnector } from '../lib/wagmi';
 import { useSIWE } from '../hooks/useSIWE';
 import api from '../lib/api';
 
@@ -34,7 +34,7 @@ function resolveRoleFromEscrow(escrow, walletAddress) {
 
 export default function Navbar() {
   const connect = useConnect();
-  const { address, isConnected } = useConnection();
+  const { address, isConnected } = useAccount();
   const { login, logout, auth } = useSIWE();
   
   // // Lấy Role từ URL để hỗ trợ hiển thị lúc test 3 tab local
@@ -82,7 +82,7 @@ export default function Navbar() {
       alert("⚠️ MetaMask not found! \n\nPlease make sure you are opening this link in a browser with the MetaMask extension INSTALLED.");
       return;
     }
-    connect.mutate({ connector: injected() });
+    connect.mutate({ connector: injectedConnector });
   };
 
   const truncateAddress = (addr) => {

@@ -13,6 +13,7 @@ const config = {
         runs: 200,
       },
       evmVersion: "prague",
+      viaIR: true,
     },
   },
   networks: {

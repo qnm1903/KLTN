@@ -56,8 +56,24 @@ function normalizeDisplayAmount(amount) {
   return String(amount);
 }
 
+// Helper: kiểm tra một role có nằm trong signerBitmap không.
+// Bit convention (khớp backend calculateSignerBitmap): buyer=bit0, seller=bit1, mediator{n}=bit(n+1).
+function roleInBitmap(role, bitmap) {
+  if (bitmap === undefined || bitmap === null) return false;
+  let bit;
+  if (role === 'buyer') bit = 0;
+  else if (role === 'seller') bit = 1;
+  else if (role?.startsWith('mediator')) {
+    const slot = Number(role.replace('mediator', ''));
+    if (!Number.isInteger(slot) || slot < 1 || slot > 5) return false;
+    bit = slot + 1;
+  } else return false;
+  return (Number(bitmap) & (1 << bit)) !== 0;
+}
+
 // Helper: Validate signerBitmap
-function validateSignerBitmap(bitmap, action) {
+// isDisputeResolution=true relaxes core-role check to AT LEAST ONE (mirrors contract logic)
+function validateSignerBitmap(bitmap, action, isDisputeResolution = false) {
   const ALLOWED_BITS_MASK = 0x7f;
   const CORE_ROLE_MASK = 0x03;
   const MIN_SIGNERS = 5;
@@ -69,10 +85,16 @@ function validateSignerBitmap(bitmap, action) {
   let count = 0;
   while (temp) { temp &= temp - 1; count++; }
   if (count < MIN_SIGNERS) return { valid: false, error: `Need at least ${MIN_SIGNERS} signers, got ${count}` };
-  
+
   if (action === 'release' || action === 'split') {
-    if ((b & CORE_ROLE_MASK) !== CORE_ROLE_MASK) {
-      return { valid: false, error: `Action '${action}' requires both buyer and seller to approve` };
+    if (isDisputeResolution) {
+      if ((b & CORE_ROLE_MASK) === 0) {
+        return { valid: false, error: `Action '${action}' requires at least one core party (buyer or seller)` };
+      }
+    } else {
+      if ((b & CORE_ROLE_MASK) !== CORE_ROLE_MASK) {
+        return { valid: false, error: `Action '${action}' requires both buyer and seller to approve` };
+      }
     }
   }
 
@@ -88,17 +110,19 @@ export default function EscrowDetail() {
   const [isEscrowLoading, setIsEscrowLoading] = useState(true);
   const [onChainVaultStatus, setOnChainVaultStatus] = useState(null);
   const [approvalStatus, setApprovalStatus] = useState(null);
+  const [finalTxHash, setFinalTxHash] = useState(null); // hash tx execute on-chain để hiện link ở banner
   const [isLoadingApprovals, setIsLoadingApprovals] = useState(false);
   const [isDkgComplete, setIsDkgComplete] = useState(null); // null=unknown, true=done, false=needed
+  const [dkgCommitmentCount, setDkgCommitmentCount] = useState(0); // 0-7: số parties đã xong B1
   const addLog = useSetAtom(addSystemLogAtom);
   const setNonceRound1 = useSetAtom(nonceRound1Atom);
   const setSigningPhase = useSetAtom(signingPhaseAtom);
 
   // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm deployEscrowVault)
   const { isRecovering } = useSessionRecovery(escrowId, address);
-  const { submitNonce, submitZShare, resetSigning } = useEscrowSync(escrowId, escrow?.status);
+  const { submitPubKey, submitNonce, submitZShare, resetSigning } = useEscrowSync(escrowId, escrow?.status);
   const { executeTssAction, fundEscrow, getVaultStatus, isPending, isConfirming, isConfirmed, deployEscrowVault, waitForTx, hash: hookTxHash } = useContractCall();
-  const { computeNonceFrost, computeZShare, hasNonce, executeWorkerTask } = useTssWorker(); // Khởi tạo Web Worker Hook
+  const { computeNonceFrost, computeZShare, hasNonce, executeWorkerTask, clearNonce } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
   const status = useAtomValue(escrowStatusAtom);
@@ -133,6 +157,23 @@ export default function EscrowDetail() {
 
   const ALLOWED_SIGNERS = ['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5'];
   const isAllowedSigner = ALLOWED_SIGNERS.includes(activeRole);
+
+  // Single source-of-truth: which TSS action to execute.
+  // Happy path default is 'release'. Dispute outcome is action-aligned (incl. legacy values):
+  //   RELEASE → release() funds to seller
+  //   REFUND  → refund()  funds to buyer
+  //   SPLIT   → split() 50/50
+  const determinedAction = useMemo(() => {
+    const resolvedDispute = Array.isArray(escrow?.disputes)
+      ? escrow.disputes.find(d => d.status === 'RESOLVED')
+      : null;
+    if (!resolvedDispute) return 'release';
+    const outcome = String(resolvedDispute.outcome || '').toUpperCase();
+    if (outcome === 'RELEASE' || outcome === 'RETURN_TO_SELLER') return 'release';
+    if (outcome === 'REFUND' || outcome === 'RELEASE_TO_BUYER') return 'refund';
+    if (outcome === 'SPLIT') return 'split';
+    return 'release';
+  }, [escrow?.disputes]);
 
   // Check nonce state on mount to update UI
   useEffect(() => {
@@ -170,7 +211,7 @@ export default function EscrowDetail() {
     const check = async () => {
       try {
         await api.get(`/escrow/${escrowId}/dkg/master-pubkey`);
-        if (active) setIsDkgComplete(true);
+        if (active) { setIsDkgComplete(true); setDkgCommitmentCount(7); }
       } catch { /* keep polling */ }
     };
     const interval = setInterval(check, 5000);
@@ -181,7 +222,7 @@ export default function EscrowDetail() {
   const localPubKey = getPubKey(address);
   const isVaultLockedOnChain = onChainVaultStatus !== null && Number(onChainVaultStatus) >= 1;
   const isVaultTerminalOnChain = onChainVaultStatus !== null && [2, 3].includes(Number(onChainVaultStatus));
-  const isEscrowTerminal = ['RELEASED', 'REFUNDED'].includes(String(escrow?.status || '').toUpperCase());
+  const isEscrowTerminal = ['RELEASED', 'REFUNDED', 'COMPLETED'].includes(String(escrow?.status || '').toUpperCase());
   const isSigningFlowClosed = isVaultTerminalOnChain || isEscrowTerminal;
 
   // Auto-scroll Terminal
@@ -238,6 +279,8 @@ export default function EscrowDetail() {
         setEscrow(data);
         if (data?.pkAggBsX && data?.pkAggBsY) {
           setProgress(7);
+          setDkgCommitmentCount(7);
+          setIsDkgComplete(true);
           setSignedNodes(['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5']);
         }
       } catch {
@@ -277,9 +320,8 @@ export default function EscrowDetail() {
   }, [escrow?.contractAddress, escrow?.vaultAddress]);
 
   // --- DKG COMPLETION: lưu signing private key cục bộ ---
-  // Backend tự suy signing pubkeys (Pⱼ) từ Feldman commitments nên KHÔNG cần submit pubkey
-  // lên backend nữa. Chỉ cần lưu private share sⱼ cục bộ để party này dùng khi ký (z-share).
-  // (Không ghi đè PubKeySubmission trên backend vì nó là nguồn identity-key cho ECDH của shares.)
+  // B4 hoàn tất: lưu signing share cục bộ.
+  // Backend derive signing pubkeys từ Feldman commitments (không cần submit riêng).
   useEffect(() => {
     if (dkgState !== DKG_STATE.COMPLETE || !dkgResult || !activeRole || activeRole === 'Unknown' || !address) return;
 
@@ -300,6 +342,17 @@ export default function EscrowDetail() {
     api.get(`/escrow/${escrowId}/status`)
       .then(({ data }) => {
         if (!active) return;
+        // Khởi tạo DKG gate ngay khi load: không phụ thuộc vào dkgState của session hiện tại
+        if (typeof data?.dkgCommitmentCount === 'number') {
+          setDkgCommitmentCount(data.dkgCommitmentCount);
+          if (data.dkgCommitmentCount >= 7) setIsDkgComplete(true);
+        }
+        // Restore pubkey collection state: nếu tất cả 7 signing pubkeys đã submit
+        // (có thể từ session trước), set progress = 7 để unlock signing button ngay.
+        if (data?.pubkeyCollection?.received >= 7) {
+          setProgress(7);
+          setSignedNodes(['buyer', 'seller', 'mediator1', 'mediator2', 'mediator3', 'mediator4', 'mediator5']);
+        }
         if (data?.signingState === 'round2_ready' && data?.round2Context) {
           if (data.signingAction) setSelectedAction(data.signingAction);
           setNonceRound1(data.round2Context);
@@ -618,23 +671,37 @@ export default function EscrowDetail() {
     }
   }, [escrowId]);
 
-  // Fetch approval status when selected action changes
+  // Fetch approval status khi đổi action HOẶC khi có nonce/z-share mới (signingProgress đổi).
+  // Đảm bảo chip signer hiển thị khớp bitmap thật theo thời gian thực trong Round 1/2.
   useEffect(() => {
     if (selectedAction) {
       fetchApprovalStatus(selectedAction);
     }
-  }, [selectedAction, fetchApprovalStatus]);
+  }, [selectedAction, fetchApprovalStatus, signingProgress?.submitted, signingProgress?.round]);
 
-  const handleStartRelease = async () => {
+  const handleStartSigning = async (action) => {
     if (isSigningFlowClosed) {
-      addLog({ message: 'Release flow is closed because this vault is already finalized.', type: 'warning' });
+      addLog({ message: 'Signing flow is closed because this vault is already finalized.', type: 'warning' });
       return;
     }
-    if (progress < 7) {
-      addLog({ message: `⚠️ Cannot sign: chỉ có ${progress}/7 signing keys đã được submit. Chờ tất cả parties hoàn thành DKG.`, type: 'warning' });
+    if (dkgCommitmentCount < 7) {
+      addLog({ message: `⚠️ Cannot sign: chỉ có ${dkgCommitmentCount}/7 parties hoàn thành DKG. Chờ tất cả parties chạy xong Pedersen VSS DKG.`, type: 'warning' });
       return;
     }
-    const action = 'release';
+
+    // If a stale session exists for a DIFFERENT action (e.g., 'release' started before dispute
+    // resolved to 'refund'), reset it first so the new action gets a clean Round 1.
+    if (selectedAction && selectedAction !== action) {
+      addLog({ message: `Resetting stale signing session (${selectedAction} → ${action})...`, type: 'warning' });
+      try {
+        await resetSigning(selectedAction, 'action_mismatch_dispute_outcome');
+        const staleNonceKey = `${escrowId}:${selectedAction}:${activeRole}`;
+        await clearNonce(staleNonceKey);
+      } catch (e) {
+        console.warn('[handleStartSigning] Reset stale session failed:', e?.message);
+      }
+    }
+
     setSelectedAction(action);
 
     try {
@@ -649,13 +716,33 @@ export default function EscrowDetail() {
       const safe_R2_y = extractTrueHex(frostResult.R2_y);
 
       addLog({ message: `Submitting FROST dual nonce for action: ${action}...`, type: 'info' });
-      const nonceResponse = await submitNonce(escrowId, activeRole, action, 0, safe_R_x, safe_R_y, safe_R2_x, safe_R2_y);
+      let nonceResponse;
+      try {
+        nonceResponse = await submitNonce(escrowId, activeRole, action, 0, safe_R_x, safe_R_y, safe_R2_x, safe_R2_y);
+      } catch (nonceError) {
+        // Backend has a different action in progress (another party started a different action).
+        // Auto-reset and retry once with the correct action.
+        if (nonceError.response?.status === 409 && nonceError.response?.data?.error?.includes('Different action')) {
+          addLog({ message: `Backend session mismatch — resetting and retrying with action '${action}'...`, type: 'warning' });
+          await resetSigning(action, 'action_mismatch_retry');
+          const staleKey = `${escrowId}:${action}:${activeRole}`;
+          await clearNonce(staleKey);
+          // Re-compute fresh nonce after reset
+          const freshFrost = await computeNonceFrost(nonceKey);
+          nonceResponse = await submitNonce(
+            escrowId, activeRole, action, 0,
+            extractTrueHex(freshFrost.R1_x), extractTrueHex(freshFrost.R1_y),
+            extractTrueHex(freshFrost.R2_x), extractTrueHex(freshFrost.R2_y)
+          );
+        } else {
+          throw nonceError;
+        }
+      }
 
       const actualSignerBitmap = nonceResponse.signerBitmap;
       addLog({ message: `Backend confirmed signerBitmap: ${actualSignerBitmap}`, type: 'info' });
 
-      // ƯU TIÊN round2_ready: Round 1 đã chốt → vào thẳng Round 2 với challenge đã khoá.
-      // KHÔNG auto-reset (đổi challenge giữa chừng = InvalidSignature).
+      // Round 1 đã chốt → vào thẳng Round 2 với challenge đã khoá.
       if (nonceResponse.state === 'round2_ready' && nonceResponse.round2Context) {
         setNonceRound1(nonceResponse.round2Context);
         setSigningPhase('z-share');
@@ -667,58 +754,6 @@ export default function EscrowDetail() {
     } catch (error) {
       const status = error.response?.status;
       const exactError = error.response?.data?.error || error.message;
-
-      if (status === 409) {
-        addLog({ message: `⚠️ ${exactError}`, type: 'warning' });
-      } else {
-        addLog({ message: `[Lỗi Backend]: ${exactError}`, type: 'error' });
-      }
-    }
-  };
-
-  const handleStartRefund = async () => {
-    if (isSigningFlowClosed) {
-      addLog({ message: 'Refund flow is closed because this vault is already finalized.', type: 'warning' });
-      return;
-    }
-    if (progress < 7) {
-      addLog({ message: `⚠️ Cannot sign: chỉ có ${progress}/7 signing keys đã được submit. Chờ tất cả parties hoàn thành DKG.`, type: 'warning' });
-      return;
-    }
-    const action = 'refund';
-    setSelectedAction(action);
-
-    try {
-      const nonceKey = buildNonceKey(action);
-      if (!nonceKey) throw new Error('Cannot start Round 1: unresolved escrow/action/role context');
-
-      // FROST: sinh dual nonce k1, k2 → R1, R2
-      const frostResult = await computeNonceFrost(nonceKey);
-      const safe_R_x = extractTrueHex(frostResult.R1_x);
-      const safe_R_y = extractTrueHex(frostResult.R1_y);
-      const safe_R2_x = extractTrueHex(frostResult.R2_x);
-      const safe_R2_y = extractTrueHex(frostResult.R2_y);
-
-      addLog({ message: `Submitting FROST dual nonce for action: ${action}...`, type: 'info' });
-      const nonceResponse = await submitNonce(escrowId, activeRole, action, 0, safe_R_x, safe_R_y, safe_R2_x, safe_R2_y);
-
-      const actualSignerBitmap = nonceResponse.signerBitmap;
-      addLog({ message: `Backend confirmed signerBitmap: ${actualSignerBitmap}`, type: 'info' });
-
-      // ƯU TIÊN round2_ready: Round 1 đã chốt → vào thẳng Round 2 với challenge đã khoá.
-      // KHÔNG auto-reset (đổi challenge giữa chừng = InvalidSignature).
-      if (nonceResponse.state === 'round2_ready' && nonceResponse.round2Context) {
-        setNonceRound1(nonceResponse.round2Context);
-        setSigningPhase('z-share');
-        addLog({ message: `Round 1 đã hoàn tất. Chuyển sang Round 2 (Z-Share).`, type: 'success' });
-        return;
-      }
-
-      addLog({ message: `Round 1 đang tiến hành. Chờ đủ 5 nonce...`, type: 'info' });
-    } catch (error) {
-      const status = error.response?.status;
-      const exactError = error.response?.data?.error || error.message;
-
       if (status === 409) {
         addLog({ message: `⚠️ ${exactError}`, type: 'warning' });
       } else {
@@ -755,6 +790,14 @@ export default function EscrowDetail() {
 
       addLog({ message: '✅ Dispute raised successfully. Mediators are inherited.', type: 'success' });
 
+      // Update escrow status to DISPUTED so UI reflects the correct phase
+      try {
+        await api.patch(`/escrows/${safeEscrowId}/status`, { status: 'DISPUTED' });
+        setEscrow(prev => prev ? { ...prev, status: 'DISPUTED' } : prev);
+      } catch (patchErr) {
+        console.warn('[handleRaiseDispute] Could not update escrow status:', patchErr?.message);
+      }
+
       setTimeout(() => {
         window.location.href = `/disputes/${disputeId || safeEscrowId}`;
       }, 1500);
@@ -783,7 +826,8 @@ export default function EscrowDetail() {
       }
 
       // Validate signerBitmap before submitting
-      const validation = validateSignerBitmap(signerBitmap, selectedAction);
+      const hasResolvedDispute = Array.isArray(escrow?.disputes) && escrow.disputes.some(d => d.status === 'RESOLVED');
+      const validation = validateSignerBitmap(signerBitmap, selectedAction, hasResolvedDispute);
       if (!validation.valid) {
         throw new Error(`❌ Invalid signerBitmap: ${validation.error}`);
       }
@@ -839,8 +883,21 @@ export default function EscrowDetail() {
       const backupAddress = escrow?.contractAddress || escrow?.vaultAddress;
 
       // Truyền thêm backupAddress vào hàm gọi
-      await executeTssAction(selectedAction, aggregatedSignature, backupAddress);
+      const txHash = await executeTssAction(selectedAction, aggregatedSignature, backupAddress);
+      if (txHash) setFinalTxHash(txHash);
 
+      // Refresh trạng thái escrow + vault on-chain để UI nhận biết đã finalized (ẩn signing, hiện banner)
+      try {
+        const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+        setEscrow(fresh);
+        const vaultAddr = fresh?.contractAddress || fresh?.vaultAddress || backupAddress;
+        if (vaultAddr) {
+          const statusValue = await getVaultStatus(vaultAddr);
+          setOnChainVaultStatus(Number(statusValue));
+        }
+      } catch (refreshErr) {
+        console.warn('[Execute] Post-execute refresh failed:', refreshErr?.message || refreshErr);
+      }
     } catch (error) {
       addLog({ message: `On-chain execution failed: ${error.message}`, type: 'error' });
 
@@ -1017,6 +1074,28 @@ export default function EscrowDetail() {
           </div>
         </section>
 
+        {/* ACTIVE DISPUTE BANNER */}
+        {(() => {
+          const activeDsp = Array.isArray(escrow?.disputes)
+            ? escrow.disputes.find(d => !['RESOLVED', 'CLOSED', 'DISMISSED'].includes(String(d.status || '').toUpperCase()))
+            : null;
+          if (!activeDsp) return null;
+          return (
+            <div className="bg-rose-900/40 border border-rose-500/60 rounded-xl p-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-rose-300 font-bold text-sm">⚖️ Escrow này đang có Dispute ({String(activeDsp.status).toUpperCase()})</p>
+                <p className="text-rose-400/70 text-xs mt-1">Reason: {activeDsp.reason || 'N/A'}</p>
+              </div>
+              <a
+                href={`/disputes/${activeDsp.id}`}
+                className="shrink-0 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-sm font-bold transition-colors"
+              >
+                Xem Dispute →
+              </a>
+            </div>
+          );
+        })()}
+
         {/* KHỐI 2: THANH TIẾN TRÌNH DKG SIGNING KEY */}
         {mediationAssigned && (
           <section className="flex flex-col gap-4">
@@ -1131,8 +1210,12 @@ export default function EscrowDetail() {
             )}
 
             {/* Action button */}
-            {isDkgComplete ? (
+            {isDkgComplete && dkgProgress.sharesReceived >= 7 ? (
               <p className="text-center text-green-400 font-bold">✅ DKG hoàn tất — tất cả 7 parties đã đóng góp shares. Sẵn sàng Deploy.</p>
+            ) : isDkgComplete && dkgProgress.sharesReceived < 7 ? (
+              <p className="text-center text-yellow-400 text-sm">
+                ⏳ Commitments đã đủ. Đang chờ tất cả parties nộp encrypted shares ({dkgProgress.sharesReceived}/7)...
+              </p>
             ) : dkgState === DKG_STATE.IDLE || dkgState === DKG_STATE.ERROR ? (
               isAllowedSigner && dkgPrivKey ? (
                 <button
@@ -1169,8 +1252,14 @@ export default function EscrowDetail() {
           </section>
         )}
 
-        {/* KHỐI 4.1: DEPLOY VAULT (CHỈ HIỆN KHI ĐÃ CÓ DKG VÀ CHƯA CÓ CONTRACT) */}
-        {!hasVaultAddress && isDkgComplete && (
+        {/* KHỐI 4.1: DEPLOY VAULT (CHỈ HIỆN KHI ĐÃ CÓ DKG ĐẦY ĐỦ VÀ CHƯA CÓ CONTRACT) */}
+        {!hasVaultAddress && isDkgComplete && dkgProgress.sharesReceived < 7 && (
+          <section className="bg-slate-800 p-6 rounded-2xl border border-yellow-500/30 shadow-sm mt-6 text-center">
+            <p className="text-yellow-400 font-bold">⏳ Đang chờ tất cả parties nộp B2 shares ({dkgProgress.sharesReceived}/7)...</p>
+            <p className="text-sm text-slate-400 mt-1">Deploy sẽ được mở khoá sau khi đủ 7/7 shares.</p>
+          </section>
+        )}
+        {!hasVaultAddress && isDkgComplete && dkgProgress.sharesReceived >= 7 && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-yellow-500/30 shadow-sm mt-6">
             {activeRole === 'buyer' ? (
               <div className="flex flex-col items-center text-center gap-4">
@@ -1237,63 +1326,85 @@ export default function EscrowDetail() {
           const isCoreRole = activeRole === 'buyer' || activeRole === 'seller';
           const isMediator = activeRole?.startsWith('mediator');
 
-          const mediatorCanStartTss = isMediator && mediationAssigned && progress >= 5 && hasVaultAddress && !isSigningFlowClosed;
+          const mediatorCanStartTss = isMediator && mediationAssigned && dkgCommitmentCount >= 7 && hasVaultAddress && !isSigningFlowClosed;
           const isDisputePhase = ['DISPUTED', 'RESOLVED'].includes(normalizedStatus);
           const canSeeActions = (isCoreRole && isLocked) || (isCoreRole && isDisputePhase) || mediatorCanStartTss || (isMediator && isDisputePhase);
 
           if (!canSeeActions) return null;
 
+          // Label/color/hint for the single signing button based on determinedAction
+          const actionConfig = {
+            release: { label: 'Start Release (TSS)', color: 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20', disabledColor: 'bg-emerald-800/50', hint: null },
+            refund:  { label: 'Start Refund (TSS)',  color: 'bg-amber-600 hover:bg-amber-500 shadow-amber-500/20',   disabledColor: 'bg-amber-800/50',  hint: 'Dispute outcome: REFUND — refund() sends funds back to buyer' },
+            split:   { label: 'Start Split (TSS)',   color: 'bg-purple-600 hover:bg-purple-500 shadow-purple-500/20', disabledColor: 'bg-purple-800/50', hint: 'Dispute outcome: SPLIT — split() divides funds 50/50' },
+          };
+          const cfg = actionConfig[determinedAction] || actionConfig.release;
+          const resolvedDispute = Array.isArray(escrow?.disputes) ? escrow.disputes.find(d => d.status === 'RESOLVED') : null;
+          const disputeOutcome = resolvedDispute?.outcome ? String(resolvedDispute.outcome).toUpperCase() : null;
+          const activeDispute = Array.isArray(escrow?.disputes)
+            ? escrow.disputes.find(d => !['RESOLVED', 'CLOSED', 'DISMISSED'].includes(String(d.status || '').toUpperCase()))
+            : null;
+
           return (
-            <section className={`p-6 rounded-2xl border shadow-xl mt-6 flex flex-col md:flex-row gap-4 justify-center items-center transition-all ${isResolved ? 'bg-indigo-900/40 border-indigo-500/50' : 'bg-slate-800 border-slate-700'}`}>
+            <section className={`p-6 rounded-2xl border shadow-xl mt-6 flex flex-col gap-4 justify-center items-center transition-all ${isResolved ? 'bg-indigo-900/40 border-indigo-500/50' : 'bg-slate-800 border-slate-700'}`}>
 
               {/* UI Blocker cho Mediator 4 và 5 */}
               {isMediator && !isAllowedSigner && (
-                <div className="w-full md:w-auto md:mr-auto bg-yellow-900/30 border border-yellow-600 p-3 rounded mb-2">
+                <div className="w-full bg-yellow-900/30 border border-yellow-600 p-3 rounded">
                   <p className="text-yellow-300 text-sm">
                     ⚠️ Not required for Happy Path — only Mediator 1, 2, 3 can sign.
                   </p>
                 </div>
               )}
 
-              {/* Context Banner for Dispute Phase */}
-              {isResolved && (
-                <div className="w-full text-center md:w-auto md:mr-auto">
-                  <h3 className="text-indigo-400 font-bold text-lg mb-1">⚡ Dispute Finalized</h3>
-                  <p className="text-sm text-slate-300">Click the action matching the final outcome to begin TSS Signing.</p>
+              {/* Dispute outcome guidance banner */}
+              {isResolved && cfg.hint && (
+                <div className="w-full bg-indigo-900/60 border border-indigo-500/50 rounded-xl p-4">
+                  <h3 className="text-indigo-300 font-bold text-base mb-1">⚡ Dispute Finalized — {disputeOutcome?.replace(/_/g, ' ')}</h3>
+                  <p className="text-sm text-slate-300">{cfg.hint}</p>
                 </div>
               )}
 
-              {progress < 7 && (
-                <div className="w-full text-center bg-yellow-900/30 border border-yellow-600/50 px-4 py-2 rounded-lg">
-                  <p className="text-yellow-300 text-sm">⏳ Chờ tất cả 7 parties hoàn thành DKG và submit signing key ({progress}/7).</p>
+              {/* Signing button: ẩn khi dispute đang xử lý (chưa có kết quả) */}
+              {activeDispute && !resolvedDispute ? (
+                <div className="w-full text-center bg-orange-900/30 border border-orange-600/50 px-4 py-3 rounded-lg">
+                  <p className="text-orange-300 text-sm font-semibold">⚖️ Dispute đang được xử lý — không thể ký cho đến khi mediator ra quyết định.</p>
                 </div>
+              ) : (
+                <>
+                  {dkgCommitmentCount < 7 && (
+                    <div className="w-full text-center bg-yellow-900/30 border border-yellow-600/50 px-4 py-2 rounded-lg">
+                      <p className="text-yellow-300 text-sm">⏳ Chờ tất cả 7 parties hoàn thành Pedersen VSS DKG ({dkgCommitmentCount}/7 parties đã xong B1).</p>
+                    </div>
+                  )}
+                  <button
+                    onClick={() => handleStartSigning(determinedAction)}
+                    disabled={dkgCommitmentCount < 7}
+                    className={`w-full md:w-auto px-8 py-3 rounded-xl text-white font-bold shadow-lg transform transition
+                      ${dkgCommitmentCount < 7 ? `${cfg.disabledColor} cursor-not-allowed opacity-50` : `${cfg.color} hover:-translate-y-1`}`}
+                  >
+                    {cfg.label}
+                  </button>
+                </>
               )}
-              <button
-                onClick={handleStartRelease}
-                disabled={progress < 7}
-                className={`w-full md:w-auto px-6 py-3 rounded-xl text-white font-bold shadow-lg transform transition
-                  ${progress < 7 ? 'bg-emerald-800/50 cursor-not-allowed opacity-50' : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20 hover:-translate-y-1'}`}
-              >
-                Start Release (TSS)
-              </button>
 
-              <button
-                onClick={handleStartRefund}
-                disabled={progress < 7}
-                className={`w-full md:w-auto px-6 py-3 rounded-xl text-white font-bold shadow-lg transform transition
-                  ${progress < 7 ? 'bg-amber-800/50 cursor-not-allowed opacity-50' : 'bg-amber-600 hover:bg-amber-500 shadow-amber-500/20 hover:-translate-y-1'}`}
-              >
-                Start Refund (TSS)
-              </button>
-
-              {/* Only Buyer and Seller can raise a dispute, not mediators */}
-              {!isResolved && isCoreRole && (
-                <button
-                  onClick={handleRaiseDispute}
-                  className="w-full md:w-auto px-6 py-3 bg-rose-600 hover:bg-rose-500 rounded-xl text-white font-bold shadow-lg shadow-rose-500/20 transform transition hover:-translate-y-1"
-                >
-                  Raise Dispute
-                </button>
+              {/* Only Buyer and Seller can raise a dispute; hide once a dispute is resolved */}
+              {!resolvedDispute && isCoreRole && (
+                activeDispute ? (
+                  <a
+                    href={`/disputes/${activeDispute.id}`}
+                    className="w-full md:w-auto px-6 py-3 bg-rose-700 hover:bg-rose-600 rounded-xl text-white font-bold shadow-lg text-center transform transition hover:-translate-y-1"
+                  >
+                    ⚖️ Xem Dispute đang mở →
+                  </a>
+                ) : (
+                  <button
+                    onClick={handleRaiseDispute}
+                    className="w-full md:w-auto px-6 py-3 bg-rose-600 hover:bg-rose-500 rounded-xl text-white font-bold shadow-lg shadow-rose-500/20 transform transition hover:-translate-y-1"
+                  >
+                    Raise Dispute
+                  </button>
+                )
               )}
             </section>
           );
@@ -1325,7 +1436,17 @@ export default function EscrowDetail() {
               )}
 
               {/* TRẠNG THÁI 2: ROUND 2 (Z-SHARE) */}
-              {signingPhase === 'z-share' && (
+              {signingPhase === 'z-share' && (() => {
+                // Round 2 signer PHẢI thuộc đúng tập đã ký Round 1 (theo signerBitmap đã khoá).
+                // Người ngoài tập → z không khớp R_agg → InvalidSignature, nên disable + giải thích.
+                const inRound1Set = roleInBitmap(activeRole, nonceRound1?.signerBitmap);
+                const canSignRound2 = isAllowedSigner && inRound1Set;
+                const zShareDisabledReason = !isAllowedSigner
+                  ? 'Not authorized to sign (Mediator 4/5)'
+                  : !inRound1Set
+                    ? 'Bạn không tham gia Round 1 nên không thể ký Round 2 (signer set đã khoá ở Round 1).'
+                    : '';
+                return (
                 <div className="flex flex-col gap-4">
                   <div className="flex justify-between items-center text-sm text-slate-300">
                     <span>Round 2: Partial Signature (Z-Share)</span>
@@ -1336,16 +1457,18 @@ export default function EscrowDetail() {
                   </div>
                   <button
                     onClick={handleSubmitZShare}
-                    disabled={!isAllowedSigner}
+                    disabled={!canSignRound2}
+                    title={zShareDisabledReason}
                     className={`w-full py-3 rounded-lg font-bold text-white shadow-lg transition-colors
-                    ${!isAllowedSigner
+                    ${!canSignRound2
                         ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
                         : 'bg-emerald-600 hover:bg-emerald-500'}`}
                   >
-                    {!isAllowedSigner ? 'Not authorized to sign (Mediator 4/5)' : 'Compute & Submit Z-Share'}
+                    {canSignRound2 ? 'Compute & Submit Z-Share' : zShareDisabledReason}
                   </button>
                 </div>
-              )}
+                );
+              })()}
 
               {/* TRẠNG THÁI 3: READY TO EXECUTE */}
               {signingPhase === 'ready' && aggregatedSignature && (
@@ -1371,11 +1494,21 @@ export default function EscrowDetail() {
 
         {hasVaultAddress && isSigningFlowClosed && (
           <section className="bg-slate-800 p-8 rounded-2xl border border-emerald-500/30 shadow-[0_0_30px_rgba(16,185,129,0.1)] mt-8">
-            <h3 className="text-xl font-bold mb-4 text-emerald-400 border-b border-slate-700 pb-4">Escrow Finalized</h3>
+            <h3 className="text-xl font-bold mb-4 text-emerald-400 border-b border-slate-700 pb-4">✅ Escrow Finalized</h3>
             <p className="text-slate-300">
-              This escrow has already been finalized as <strong>{isEscrowTerminal ? escrow?.status : (Number(onChainVaultStatus) === 2 ? 'RELEASED' : 'REFUNDED')}</strong>.
-              The signing and execution flow is closed.
+              Giao dịch đã hoàn tất với trạng thái <strong>{isEscrowTerminal ? escrow?.status : (Number(onChainVaultStatus) === 2 ? 'RELEASED' : 'REFUNDED')}</strong>.
+              Luồng ký và thực thi đã đóng.
             </p>
+            {finalTxHash && (
+              <a
+                href={`https://sepolia.etherscan.io/tx/${finalTxHash}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 mt-4 px-4 py-2 rounded-lg bg-emerald-600/20 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-600/30 transition-colors font-mono text-sm break-all"
+              >
+                🔗 Xem giao dịch trên Etherscan: {String(finalTxHash).slice(0, 18)}...
+              </a>
+            )}
           </section>
         )}
       </main>

@@ -22,13 +22,17 @@ export default function ResolvedBanner({ dispute: propDispute = null }) {
   const outcome = dispute.outcome || 'UNKNOWN';
 
   const outcomeMeta = (() => {
-    switch (outcome) {
-      case VOTE_CHOICE.RELEASE_TO_BUYER:
-        return { label: 'Release to Buyer', cls: 'bg-green-50 text-green-800' };
-      case VOTE_CHOICE.RETURN_TO_SELLER:
-        return { label: 'Return to Seller', cls: 'bg-red-50 text-red-800' };
+    const canonical =
+      (outcome === VOTE_CHOICE.RELEASE || outcome === 'RETURN_TO_SELLER') ? 'RELEASE'
+      : (outcome === VOTE_CHOICE.REFUND || outcome === 'RELEASE_TO_BUYER') ? 'REFUND'
+      : outcome;
+    switch (canonical) {
+      case 'RELEASE':
+        return { label: 'Release → Seller', cls: 'bg-green-50 text-green-800' };
+      case 'REFUND':
+        return { label: 'Refund → Buyer', cls: 'bg-red-50 text-red-800' };
       case VOTE_CHOICE.SPLIT:
-        return { label: 'Split', cls: 'bg-amber-50 text-amber-800' };
+        return { label: 'Split (50/50)', cls: 'bg-amber-50 text-amber-800' };
       default:
         return { label: outcome, cls: 'bg-gray-100 text-gray-800' };
     }

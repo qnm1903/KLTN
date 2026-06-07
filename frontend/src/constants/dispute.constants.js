@@ -32,18 +32,22 @@ export const MEDIATOR_STATUS = {
  * @readonly
  * @enum {string}
  */
+// Action-aligned vote choices:
+//   RELEASE = release() = funds to seller
+//   REFUND  = refund()  = funds to buyer
+//   SPLIT   = 50/50, auto-derived on a 3-2 deadlock (not a manual choice)
 export const VOTE_CHOICE = {
-  RELEASE_TO_BUYER: 'RELEASE_TO_BUYER',
-  RETURN_TO_SELLER: 'RETURN_TO_SELLER',
+  RELEASE: 'RELEASE',
+  REFUND: 'REFUND',
   SPLIT: 'SPLIT',
   OTHER: 'OTHER'
 };
 
 /**
- * Hệ thống threshold (5-of-7)
+ * Số phiếu cùng một phe cần để quyết định (4/5). 3-2 → SPLIT.
  * @constant {number}
  */
-export const DISPUTE_THRESHOLD = 5;
+export const DISPUTE_THRESHOLD = 4;
 
 /**
  * @typedef {Object} FileMetadata

@@ -40,12 +40,8 @@ export async function uploadEvidence(disputeId, formData) {
     throw new Error('Cannot determine escrowId from dispute');
   }
 
-  // Call escrow evidence endpoint (Khi dùng axios với FormData, không set Content-Type boundary thủ công; axios sẽ tự thêm.)
-  const res = await api.post(`/escrows/${encodeURIComponent(dispute.escrowId)}/evidence`, formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data'
-    }
-  });
+  // Do NOT set Content-Type manually — axios sets it with the correct multipart boundary for FormData
+  const res = await api.post(`/escrows/${encodeURIComponent(dispute.escrowId)}/evidence`, formData);
   // Add escrowId + disputeId to response for FE convenience
   return { ...res.data, escrowId: dispute.escrowId, disputeId };
 }

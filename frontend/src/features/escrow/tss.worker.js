@@ -357,11 +357,13 @@ self.onmessage = async (event) => {
         throw new Error(`Unknown action specified for TSS Worker: ${action}`);
     }
   } catch (error) {
+    // DOMException (e.g., AES-GCM decrypt failure) has empty .message — fall back to .name
+    const errMsg = error?.message || error?.name || String(error) || 'Unknown worker error';
     self.postMessage({
       taskId,
       status: 'error',
-      error: error.message,
-      log: `Worker Error: ${error.message}`
+      error: errMsg,
+      log: `Worker Error: ${errMsg}`
     });
   }
 };

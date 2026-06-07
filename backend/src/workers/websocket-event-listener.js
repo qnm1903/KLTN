@@ -262,17 +262,17 @@ async function handleRandomMediatorSelected(prisma, escrowId, mediators, logger,
       }
 
       // 2. MỞ PHIÊN DKG (POST /escrow/init) - Bắt buộc để vượt qua rào chặn hasSession()
+      // Chỉ gửi escrowId + chainId + contractAddress để backend chạy nhánh INCREMENTAL DKG
+      // (tự resolve participants từ DB). KHÔNG gửi addr fields — chúng kích nhánh "batch" vốn
+      // bắt buộc kèm pubKeys (pubkey chỉ sinh sau ở DKG B1) → gây 400 "Missing required fields".
       const initUrl = `${baseUrl}/escrow/init`;
       const initPayload = {
         escrowId: escrow.id,
         chainId: process.env.CHAIN_ID || "11155111",
         contractAddress: resolvedContractAddress,
-        buyerAddr: buyerWalletAddress,
-        sellerAddr: sellerWalletAddress,
-        mediatorAddrs: mediators.map(m => normalizeAddress(m))
       };
 
-      logger?.info?.(`[DKG-ORCHESTRATOR] Init payload: buyer=${buyerWalletAddress}, seller=${sellerWalletAddress}, mediators=${initPayload.mediatorAddrs.length}`);
+      logger?.info?.(`[DKG-ORCHESTRATOR] Init payload: escrowId=${escrow.id}, chainId=${initPayload.chainId} (incremental DKG, participants resolved from DB)`);
 
 
       logger?.info?.(`[mediator-pool] [DKG-ORCHESTRATOR] Gọi API Khởi tạo phiên DKG...`);

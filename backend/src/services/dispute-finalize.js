@@ -1,23 +1,31 @@
 import prisma from '../lib/prisma.js';
 import { DISPUTE_EVENT_TYPES, queueDisputeEvent } from '../lib/dispute-outbox.js';
 
-const VOTE_THRESHOLD = 5;
+// A side needs 4 of 5 votes to win decisively. A 3-2 split (no side reaches 4)
+// is resolved as SPLIT once all 5 have voted.
+const VOTE_THRESHOLD = 4;
+
+// Map any stored vote value (incl. legacy) to canonical RELEASE/REFUND/SPLIT.
+//   RELEASE = funds to seller, REFUND = funds to buyer
+function canonicalizeVote(raw) {
+  const v = String(raw ?? '').trim().toUpperCase();
+  if (v === 'RELEASE' || v === 'RELEASE_TO_SELLER' || v === 'RETURN_TO_SELLER' || v === 'RETURN') return 'RELEASE';
+  if (v === 'REFUND' || v === 'REFUND_TO_BUYER' || v === 'RELEASE_TO_BUYER') return 'REFUND';
+  if (v === 'SPLIT') return 'SPLIT';
+  return 'OTHER';
+}
 
 function buildTally(votes) {
   const tally = {
-    RELEASE_TO_BUYER: 0,
-    RETURN_TO_SELLER: 0,
+    RELEASE: 0,
+    REFUND: 0,
     SPLIT: 0,
     OTHER: 0
   };
 
   for (const row of votes) {
     if (!row?.vote) continue;
-    if (!Object.prototype.hasOwnProperty.call(tally, row.vote)) {
-      tally.OTHER += 1;
-      continue;
-    }
-    tally[row.vote] += 1;
+    tally[canonicalizeVote(row.vote)] += 1;
   }
 
   return tally;
@@ -109,10 +117,11 @@ export async function finalizeDisputeVotes(disputeId, options = {}) {
       }
     });
 
-    // Xác định tssAction dựa trên outcome
-    let tssAction = 'timeout'; // Mặc định hoặc Split
-    if (outcome === 'RELEASE_TO_BUYER') tssAction = 'release';
-    if (outcome === 'RETURN_TO_SELLER') tssAction = 'refund';
+    // Outcome is action-aligned: RELEASE → release() (funds to seller),
+    // REFUND → refund() (funds to buyer), SPLIT → split() (50/50).
+    let tssAction = 'timeout';
+    if (outcome === 'RELEASE') tssAction = 'release';
+    if (outcome === 'REFUND') tssAction = 'refund';
     if (outcome === 'SPLIT') tssAction = 'split';
 
     await queueDisputeEvent(tx, {

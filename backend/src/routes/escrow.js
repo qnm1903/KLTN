@@ -49,7 +49,7 @@ let pubKeyPersistenceDisabled = false;
 
 async function getAllowedSignerRoles(escrowId) {
   let allowedRoles = [...VALID_ROLES];
-  const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
+  let isDisputeResolution = false;
 
   const dispute = await prisma.dispute.findFirst({
     where: { escrowId, status: 'RESOLVED' },
@@ -57,16 +57,25 @@ async function getAllowedSignerRoles(escrowId) {
   });
 
   if (dispute) {
-    const outcome = String(dispute.outcome || '').toUpperCase();
-    if (outcome.includes('RELEASE') || outcome.includes('BUYER')) {
-      allowedRoles = allowedRoles.filter(r => r !== 'seller');
-    }
-    else if (outcome.includes('RETURN') || outcome.includes('REFUND') || outcome.includes('SELLER')) {
+    isDisputeResolution = true;
+    // Canonicalize outcome (incl. legacy values). Exclude the losing core party from the signer set.
+    //   RELEASE = funds to seller (seller wins) → buyer is the loser
+    //   REFUND  = funds to buyer  (buyer wins)  → seller is the loser
+    //   SPLIT   = 50/50 → both may sign
+    const raw = String(dispute.outcome || '').toUpperCase();
+    let outcome = 'OTHER';
+    if (raw === 'RELEASE' || raw === 'RELEASE_TO_SELLER' || raw === 'RETURN_TO_SELLER' || raw === 'RETURN') outcome = 'RELEASE';
+    else if (raw === 'REFUND' || raw === 'REFUND_TO_BUYER' || raw === 'RELEASE_TO_BUYER') outcome = 'REFUND';
+    else if (raw === 'SPLIT') outcome = 'SPLIT';
+
+    if (outcome === 'RELEASE') {
       allowedRoles = allowedRoles.filter(r => r !== 'buyer');
+    } else if (outcome === 'REFUND') {
+      allowedRoles = allowedRoles.filter(r => r !== 'seller');
     }
   }
 
-  return allowedRoles;
+  return { allowedRoles, isDisputeResolution };
 }
 
 async function checkSession(escrowId, res) {
@@ -240,7 +249,7 @@ async function checkSession(escrowId, res) {
         session.signingBitmap = calculateSignerBitmap(roles);
 
         if (roles.length >= 5) {
-          const validation = validateSignerBitmap(session.signingBitmap, roles, activeAction);
+          const validation = validateSignerBitmap(session.signingBitmap, roles, activeAction, session.isDisputeResolution);
           if (validation.valid) {
             try {
               const signingPubKeys = await resolveSigningPubKeys(escrowId, session);
@@ -516,9 +525,11 @@ function calculateSignerBitmap(roles) {
 }
 
 // Helper: Validate signerBitmap
-function validateSignerBitmap(bitmap, submittedRoles, action) {
+// isDisputeResolution=true relaxes core-role check to AT LEAST ONE (mirrors contract logic)
+// because dispute may exclude the losing party from the signer set
+function validateSignerBitmap(bitmap, submittedRoles, action, isDisputeResolution = false) {
   const ALLOWED_BITS_MASK = 0x7f; // bits 0..6 only
-  const CORE_ROLE_MASK = 0x03; // buyer (bit0) or seller (bit1)
+  const CORE_ROLE_MASK = 0x03; // buyer (bit0) | seller (bit1)
   const MIN_SIGNERS = 5;
 
   const b = Number(bitmap);
@@ -533,8 +544,16 @@ function validateSignerBitmap(bitmap, submittedRoles, action) {
   if (count < MIN_SIGNERS) return { valid: false, error: `Need at least ${MIN_SIGNERS} signers, got ${count}` };
 
   if (action === 'release' || action === 'split') {
-    if ((b & CORE_ROLE_MASK) !== CORE_ROLE_MASK) {
-      return { valid: false, error: `Action '${action}' requires both buyer and seller to approve` };
+    if (isDisputeResolution) {
+      // Dispute path: contract only requires at least one core role
+      if ((b & CORE_ROLE_MASK) === 0) {
+        return { valid: false, error: `Action '${action}' requires at least one core party (buyer or seller)` };
+      }
+    } else {
+      // Happy path: both buyer and seller must approve
+      if ((b & CORE_ROLE_MASK) !== CORE_ROLE_MASK) {
+        return { valid: false, error: `Action '${action}' requires both buyer and seller to approve` };
+      }
     }
   }
 
@@ -604,8 +623,12 @@ router.post('/pubkey/submit', authMiddleware, escrowPubKeySubmitRateLimiter, asy
     const session = await checkSession(escrowId, res);
     if (!session) return;
     const io = req.app.get('io');
+    // DKG flow: bypass expiry when all 7 parties have committed (Feldman VSS is the
+    // authorization, not the old time-based window). Old non-DKG escrows still expire normally.
+    const dkgCount = await prisma.dkgCommitment.count({ where: { escrowId } });
+    const dkgComplete = dkgCount >= 7;
     const summaryBefore = getPubKeyCollectionSummary(session);
-    if (summaryBefore.expired) {
+    if (summaryBefore.expired && !dkgComplete) {
       session.pubKeyCollectionState = 'EXPIRED';
       await saveSession(escrowId, session);
       if (io) io.to(escrowId).emit('pubkey_collection_expired', { escrowId, dueAt: toIsoTimestamp(summaryBefore.dueAt), expiredAt: new Date().toISOString() });
@@ -675,15 +698,24 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     const expectedAddress = getRoleAddress(session.participants || session.parties, role);
     if (normalizeAddress(req.user?.walletAddress) !== expectedAddress) return res.status(403).json({ error: `Auth mismatch for role '${role}'` });
 
-    const collection = getPubKeyCollectionSummary(session);
-    if (!collection.complete) return res.status(409).json({ error: 'Pubkey collection is incomplete.', collection: toCollectionPayload(collection) });
+    // Derive signing pubkeys from DKG commitments if not already in session.
+    // Eliminates need for parties to submit pubkeys separately after DKG.
+    if (!getPubKeyCollectionSummary(session).complete) {
+      const derived = await deriveSigningPubKeys(escrowId);
+      if (!derived) return res.status(409).json({ error: 'DKG chưa hoàn tất (cần đủ 7 commitments).' });
+      session.pubKeys = { ...derived, ...session.pubKeys };
+      session.pubKeyCollectionState = 'COMPLETE';
+      await saveSession(escrowId, session);
+    }
 
-    const allowedRoles = await getAllowedSignerRoles(escrowId);
+    const { allowedRoles, isDisputeResolution } = await getAllowedSignerRoles(escrowId);
     if (!allowedRoles.includes(role)) return res.status(403).json({ error: `Role '${role}' is not allowed to sign according to the dispute outcome.` });
 
     const bitmap = Number(signerBitmap);
     if (!session.signingAction) {
-      session.signingAction = action; session.nonces = {}; session.zShares = {}; session.signingBitmap = 0; session.signingStartedAt = Date.now(); // Start with 0, will update as nonces are submitted
+      session.signingAction = action; session.nonces = {}; session.zShares = {}; session.signingBitmap = 0; session.signingStartedAt = Date.now();
+      // Cache dispute flag so all subsequent callsites use same value without extra DB query
+      session.isDisputeResolution = isDisputeResolution;
     } else if (session.signingAction !== action) {
       return res.status(409).json({ error: 'Different action in progress' });
     }
@@ -757,7 +789,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
         // If enough nonces collected but round2Context missing, auto-compute challenge
         if (nonceCount >= 5) {
           const roles = Object.keys(session.nonces);
-          const validation = validateSignerBitmap(session.signingBitmap, roles, action);
+          const validation = validateSignerBitmap(session.signingBitmap, roles, action, session.isDisputeResolution);
           if (validation.valid) {
             try {
               const dbEscrow = await prisma.escrow.findUnique({ where: { id: escrowId } });
@@ -898,7 +930,7 @@ router.post('/nonce', authMiddleware, async (req, res) => {
     }
 
     const roles = Object.keys(session.nonces);
-    const validation = validateSignerBitmap(session.signingBitmap, roles, action);
+    const validation = validateSignerBitmap(session.signingBitmap, roles, action, session.isDisputeResolution);
     if (!validation.valid) return res.status(403).json({ error: validation.error });
     session.signingRoles = roles;
 
@@ -1009,7 +1041,7 @@ router.post('/sign', authMiddleware, escrowSignRateLimiter, async (req, res) => 
     }
 
     // Validate bitmap structure (minimum 5 signers, core role required)
-    const validation = validateSignerBitmap(submittedBitmap, session.signingRoles, session.signingAction);
+    const validation = validateSignerBitmap(submittedBitmap, session.signingRoles, session.signingAction, session.isDisputeResolution);
     if (!validation.valid) {
       return res.status(400).json({ error: `Invalid signer bitmap: ${validation.error}` });
     }
@@ -1097,19 +1129,24 @@ router.post('/:id/dkg/commitment', authMiddleware, async (req, res) => {
   }
 
   try {
-    // Upsert commitment
+    // Guard: reject identity pubkey change mid-DKG — other parties may have already
+    // encrypted shares using the old pubkey; allowing a swap would cause OperationError in B3.
+    const existingCommitment = await prisma.dkgCommitment.findUnique({
+      where: { escrowId_role: { escrowId, role } }
+    });
+    if (existingCommitment?.identityPubKey && existingCommitment.identityPubKey !== pubKeyHex) {
+      return res.status(409).json({
+        error: `pubkey mismatch: party '${role}' already registered a different pubkey. Run DKG Reset first.`,
+        code: 'DKG_PUBKEY_MISMATCH'
+      });
+    }
+
+    // Upsert commitment + identity pubkey together. Identity pubkey lives on this row
+    // (not PubKeySubmission) so /pubkey/submit's later signing-pubkey write can't clobber it.
     await prisma.dkgCommitment.upsert({
       where: { escrowId_role: { escrowId, role } },
-      create: { escrowId, role, commitments: JSON.stringify(commitments) },
-      update: { commitments: JSON.stringify(commitments) }
-    });
-
-    // Also persist identity pubkey to pubKeySubmission for /dkg/shares ECDH lookup.
-    // This row will be overwritten with the signing pubkey when party calls /pubkey/submit.
-    await prisma.pubKeySubmission.upsert({
-      where: { escrowId_role: { escrowId, role } },
-      create: { escrowId, role, pubKey: pubKeyHex },
-      update: { pubKey: pubKeyHex }
+      create: { escrowId, role, commitments: JSON.stringify(commitments), identityPubKey: pubKeyHex },
+      update: { commitments: JSON.stringify(commitments), identityPubKey: pubKeyHex }
     });
 
     // Đếm xem đã có bao nhiêu commitments
@@ -1194,13 +1231,10 @@ router.get('/:id/dkg/shares', authMiddleware, async (req, res) => {
       where: { escrowId, toRole }
     });
 
-    // Fetch tất cả commitments (cần để Feldman verify)
+    // Fetch tất cả commitments (cần để Feldman verify) + identity pubkeys (cần để ECDH decrypt).
+    // Identity pubkeys live on the DkgCommitment row, so /pubkey/submit's signing-pubkey
+    // write cannot overwrite them mid-DKG (root cause of the prior B3 OperationError).
     const commitments = await prisma.dkgCommitment.findMany({
-      where: { escrowId }
-    });
-
-    // Fetch identity pubkeys của tất cả parties (cần để ECDH decrypt)
-    const pubKeys = await prisma.pubKeySubmission.findMany({
       where: { escrowId }
     });
 
@@ -1208,7 +1242,7 @@ router.get('/:id/dkg/shares', authMiddleware, async (req, res) => {
       commitments.map(c => [c.role, JSON.parse(c.commitments)])
     );
     const pubKeysMap = Object.fromEntries(
-      pubKeys.map(p => [p.role, p.pubKey])
+      commitments.filter(c => c.identityPubKey).map(c => [c.role, c.identityPubKey])
     );
 
     res.json({
@@ -1265,17 +1299,23 @@ router.get('/:id/dkg/master-pubkey', async (req, res) => {
 });
 
 router.get('/:id/status', async (req, res) => {
-  const session = await checkSession(req.params.id, res);
+  const escrowId = req.params.id;
+  const session = await checkSession(escrowId, res);
   if (!session) return;
   // Báo frontend biết đang ở phase nào của signing để khôi phục UI sau khi re-login.
   // round2_ready: Round 1 đã chốt, có round2Context → FE hiển thị nút Z-Share ngay.
   const signingState = session.round2Context ? 'round2_ready' : (session.signingAction ? 'round1_in_progress' : 'idle');
+  // dkgCommitmentCount: số parties đã hoàn thành DKG B1 (0-7). Gate signing/dispute
+  // bằng giá trị này thay vì pubkeyCollection.received (đã không còn được submit sau refactor).
+  const dkgCommitmentCount = await prisma.dkgCommitment.count({ where: { escrowId } });
   res.json({
     status: session.status, signingAction: session.signingAction, signerBitmap: session.signingBitmap,
     nonceCount: Object.keys(session.nonces).length, zShareCount: Object.keys(session.zShares).length,
     completedActions: session.completedActions, pubkeyCollection: toCollectionPayload(getPubKeyCollectionStatus(session)),
     signingState,
-    round2Context: session.round2Context || null
+    round2Context: session.round2Context || null,
+    dkgCommitmentCount,
+    dkgReady: dkgCommitmentCount >= 7
   });
 });
 
@@ -1330,8 +1370,9 @@ router.get('/:id/approvals', authMiddleware, async (req, res) => {
     // Calculate expected signerBitmap
     const expectedBitmap = calculateSignerBitmap(approvedRoles);
 
-    // Validate bitmap
-    const validation = validateSignerBitmap(expectedBitmap, approvedRoles, action);
+    // Validate bitmap (approvals endpoint is read-only, no session available; use DB dispute check)
+    const { isDisputeResolution: approvalDisputeFlag } = await getAllowedSignerRoles(escrowId);
+    const validation = validateSignerBitmap(expectedBitmap, approvedRoles, action, approvalDisputeFlag);
 
     res.json({
       escrowId,

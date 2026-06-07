@@ -37,11 +37,18 @@ function assertMessageObject(message) {
   }
 }
 
+// Canonical vote values are action-aligned:
+//   RELEASE = release() = funds to seller (seller wins)
+//   REFUND  = refund()  = funds to buyer  (buyer wins)
+//   SPLIT   = split()   = 50/50 (only auto-derived on a 3-2 deadlock, not a manual choice)
+// Legacy values (RELEASE_TO_BUYER/RETURN_TO_SELLER) are mapped for backward compat.
 function normalizeVote(raw) {
   const v = String(raw ?? '').trim().toLowerCase();
   if (!v) return null;
-  if (v === 'release' || v === 'release_to_buyer' || v === '0') return 'RELEASE_TO_BUYER';
-  if (v === 'refund' || v === 'return' || v === 'return_to_seller' || v === '1') return 'RETURN_TO_SELLER';
+  // funds to seller
+  if (v === 'release' || v === 'release_to_seller' || v === 'return_to_seller' || v === 'return' || v === '0') return 'RELEASE';
+  // funds to buyer
+  if (v === 'refund' || v === 'refund_to_buyer' || v === 'release_to_buyer' || v === '1') return 'REFUND';
   if (v === 'split' || v === '2') return 'SPLIT';
   return 'OTHER';
 }
@@ -160,18 +167,20 @@ function buildEvidenceResponse(evidence) {
   };
 }
 
+// Map any stored vote value (incl. legacy) to canonical RELEASE/REFUND/SPLIT.
+function canonicalizeVoteValue(raw) {
+  const v = String(raw ?? '').trim().toUpperCase();
+  if (v === 'RELEASE' || v === 'RELEASE_TO_SELLER' || v === 'RETURN_TO_SELLER' || v === 'RETURN') return 'RELEASE';
+  if (v === 'REFUND' || v === 'REFUND_TO_BUYER' || v === 'RELEASE_TO_BUYER') return 'REFUND';
+  if (v === 'SPLIT') return 'SPLIT';
+  return 'OTHER';
+}
+
 function buildCurrentTallyFromVotes(votes = []) {
-  const tally = {
-    RELEASE_TO_BUYER: 0,
-    RETURN_TO_SELLER: 0,
-    SPLIT: 0,
-    OTHER: 0
-  };
+  const tally = { RELEASE: 0, REFUND: 0, SPLIT: 0, OTHER: 0 };
 
   for (const vote of votes) {
-    const key = vote?.vote;
-    if (Object.prototype.hasOwnProperty.call(tally, key)) tally[key] += 1;
-    else tally.OTHER += 1;
+    tally[canonicalizeVoteValue(vote?.vote)] += 1;
   }
 
   const totalVotes = Object.values(tally).reduce((sum, value) => sum + Number(value || 0), 0);
@@ -179,7 +188,7 @@ function buildCurrentTallyFromVotes(votes = []) {
   return {
     ...tally,
     totalVotes,
-    threshold: 5
+    threshold: 4
   };
 }
 
@@ -278,13 +287,15 @@ router.post('/', authMiddleware, async (req, res) => {
           initiatorAddress: normalizeAddress(req.user.walletAddress),
           reason,
           description,
-          status: 'MEDIATORS_ASSIGNED',
+          // Auto-accept all mediators on dispute creation → jump to VOTING immediately
+          status: 'VOTING',
           assignedAt: new Date(),
           mediators: {
             create: finalMediators.map((row) => ({
               mediatorId: row.mediatorId,
               slot: row.slot,
-              status: 'assigned'
+              status: 'accepted',
+              acceptedAt: new Date()
             }))
           }
         },
@@ -574,9 +585,9 @@ router.post('/:id/vote', authMiddleware, async (req, res) => {
     
       // Trigger execution asynchronously if dispute finalized
       if (finalizeResult.finalized === true) {
-        // RETURN_TO_SELLER = seller thắng → release() trả tiền seller → signer set không cần buyer
-        // RELEASE_TO_BUYER = buyer thắng → refund() trả tiền buyer → signer set không cần seller
-        const tssAction = finalizeResult.tssAction || (finalizeResult.outcome === 'RELEASE_TO_BUYER' ? 'release' : (finalizeResult.outcome === 'RETURN_TO_SELLER' ? 'refund' : (finalizeResult.outcome === 'SPLIT' ? 'split' : 'timeout')));
+        // Outcome is action-aligned: RELEASE → release() (funds to seller),
+        // REFUND → refund() (funds to buyer), SPLIT → split() (50/50).
+        const tssAction = finalizeResult.tssAction || (finalizeResult.outcome === 'RELEASE' ? 'release' : (finalizeResult.outcome === 'REFUND' ? 'refund' : (finalizeResult.outcome === 'SPLIT' ? 'split' : 'timeout')));
 
         // Use signer roles from the active signing session as the single source of truth.
         let signerRoles = null;
@@ -711,16 +722,7 @@ router.get('/:id/evidence', authMiddleware, async (req, res) => {
 });
 
 router.post('/:id/execute-outcome', authMiddleware, async (req, res) => {
-  try {
-    const access = await getDisputeWithAccess(req.params.id, req.user.id);
-    if (access.error) return res.status(access.code).json({ error: access.error });
-
-    const result = await executeDisputeOutcome(req.params.id);
-    res.json(result);
-  } catch (error) {
-    console.error('Error in POST /disputes/:id/execute-outcome:', error.message);
-    res.status(500).json({ error: error.message });
-  }
+  return res.status(501).json({ error: 'Dispute outcome is executed via TSS signing flow, not this endpoint.' });
 });
 
 export default router;

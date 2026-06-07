@@ -13,7 +13,7 @@ import signatureUtils from '../../utils/signatureUtils.js';
  * - preSignedOutcomeSignatures: optional object - { schnorrSigRefund?, schnorrSigRelease? }
  */
 export default function MediatorVoteModal({ isOpen, onClose, onSubmit, mediatorAddress = null, disputeId = '', preSignedOutcomeSignatures = null }) {
-  const [choice, setChoice] = useState('RELEASE_TO_BUYER');
+  const [choice, setChoice] = useState('RELEASE');
   const [justification, setJustification] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const { address } = useAccount();
@@ -91,16 +91,12 @@ export default function MediatorVoteModal({ isOpen, onClose, onSubmit, mediatorA
             <div className="text-sm font-medium text-gray-700 mb-2">Vote Outcome</div>
             <div className="space-y-2">
               <label className="flex items-center space-x-3">
-                <input type="radio" name="vote" value="RELEASE_TO_BUYER" checked={choice === 'RELEASE_TO_BUYER'} onChange={() => setChoice('RELEASE_TO_BUYER')} disabled={submitting} />
-                <span className="text-sm">Release to Buyer</span>
+                <input type="radio" name="vote" value="RELEASE" checked={choice === 'RELEASE'} onChange={() => setChoice('RELEASE')} disabled={submitting} />
+                <span className="text-sm">Release → Seller (release())</span>
               </label>
               <label className="flex items-center space-x-3">
-                <input type="radio" name="vote" value="RETURN_TO_SELLER" checked={choice === 'RETURN_TO_SELLER'} onChange={() => setChoice('RETURN_TO_SELLER')} disabled={submitting} />
-                <span className="text-sm">Return to Seller</span>
-              </label>
-              <label className="flex items-center space-x-3">
-                <input type="radio" name="vote" value="SPLIT" checked={choice === 'SPLIT'} onChange={() => setChoice('SPLIT')} disabled={submitting} />
-                <span className="text-sm">Split</span>
+                <input type="radio" name="vote" value="REFUND" checked={choice === 'REFUND'} onChange={() => setChoice('REFUND')} disabled={submitting} />
+                <span className="text-sm">Refund → Buyer (refund())</span>
               </label>
             </div>
           </div>

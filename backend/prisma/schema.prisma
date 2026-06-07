@@ -353,6 +353,9 @@ model DkgCommitment {
   role        String   // buyer | seller | mediator1-5
   // JSON array of 5 EC points: [{x, y}, {x, y}, {x, y}, {x, y}, {x, y}]
   commitments String   // JSON serialized
+  // Identity pubkey (privKey*G) for ECDH share encryption. Stored here — not in
+  // PubKeySubmission — so the later signing-pubkey submission cannot overwrite it mid-DKG.
+  identityPubKey String?
   submittedAt DateTime @default(now())
 
   escrow Escrow @relation(fields: [escrowId], references: [id], onDelete: Cascade)

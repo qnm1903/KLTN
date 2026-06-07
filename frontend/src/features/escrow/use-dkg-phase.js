@@ -126,17 +126,38 @@ export function useDkgPhase(escrowId, myRole, executeWorkerTask, privKeyHex, add
       // ─── Bước 1: Sinh polynomial + upload commitments ─────────────────────
       // Resume from localStorage if step 1 was already completed in a previous session
       let savedStep1 = loadStep1(escrowId, address);
+      // Pre-fix saved state lacks the persisted identity privKey, so ECDH consistency can't be
+      // guaranteed. Discard it and clear step2 so a fresh polynomial is generated with a key
+      // whose pubkey we can register and reuse. (If the old pubkey is still on the server this
+      // triggers the 409 mismatch guard below, correctly forcing a DKG reset.)
+      if (savedStep1 && !savedStep1.identityPrivKeyHex) {
+        savedStep1 = null;
+        try { localStorage.removeItem(dkgStep2Key(escrowId, address)); } catch { /* storage unavailable */ }
+        addLog({ message: `[DKG B1] Phát hiện state DKG cũ (thiếu identity key). Tạo lại polynomial...`, type: 'warning' });
+      }
       let coeffs, commitments, pubKeyHex;
+      // ECDH identity key for ALL share encryption/decryption. Must stay identical across
+      // B1/B2/B3, so it is persisted with the polynomial — NOT read from the volatile
+      // sessionStorage wallet key (which regenerates on tab close, breaking ECDH symmetry).
+      let ecdhPrivKeyHex = privKeyHex;
 
       if (savedStep1?.coeffs && savedStep1?.pubKeyHex && savedStep1?.commitments) {
         ({ coeffs, pubKeyHex, commitments } = savedStep1);
+        // Use the identity privKey saved at B1; fall back to current key for pre-fix escrows.
+        ecdhPrivKeyHex = savedStep1.identityPrivKeyHex || privKeyHex;
         setState(DKG_STATE.COMMITTED);
         addLog({ message: `[DKG B1] Tiếp tục từ polynomial đã lưu. Đang kiểm tra commitments trên server...`, type: 'info' });
         // Re-upload commitment (idempotent) to ensure it's on server
         try {
           await api.post(`/escrow/${escrowId}/dkg/commitment`, { role: myRole, commitments, pubKeyHex });
         } catch (e) {
-          if (!e?.response?.status || e.response.status !== 409) {
+          if (e?.response?.status === 409 && e.response?.data?.code === 'DKG_PUBKEY_MISMATCH') {
+            // Our saved pubkey differs from server → local state is stale, must reset
+            clearDkgLocalState(escrowId, address);
+            throw new Error('[DKG B1] Pubkey lệch với server (key thay đổi giữa session). Hãy chạy Reset DKG rồi thử lại.');
+          }
+          // Regular 409 = idempotent duplicate commit, safe to ignore
+          if (e?.response?.status !== 409) {
             addLog({ message: `[DKG B1] Cảnh báo upload commitment: ${e.message}`, type: 'warning' });
           }
         }
@@ -146,12 +167,23 @@ export function useDkgPhase(escrowId, myRole, executeWorkerTask, privKeyHex, add
 
         const polyResult = await executeWorkerTask('COMPUTE_DKG_POLYNOMIAL', { escrowId, privKeyHex });
         ({ commitments, pubKeyHex, coeffs } = polyResult);
+        ecdhPrivKeyHex = privKeyHex; // identity key registered now == key used for ECDH later
 
-        // Persist polynomial so step 2 can resume after page refresh
-        saveStep1(escrowId, address, { coeffs, pubKeyHex, commitments });
+        // Persist polynomial + identity privKey so step 2/3 can resume with the SAME ECDH key
+        // even if the sessionStorage wallet key is regenerated in a later session.
+        saveStep1(escrowId, address, { coeffs, pubKeyHex, commitments, identityPrivKeyHex: privKeyHex });
 
         addLog({ message: `[DKG B1] Đã sinh ${commitments.length} commitments. Uploading...`, type: 'info' });
-        await api.post(`/escrow/${escrowId}/dkg/commitment`, { role: myRole, commitments, pubKeyHex });
+        try {
+          await api.post(`/escrow/${escrowId}/dkg/commitment`, { role: myRole, commitments, pubKeyHex });
+        } catch (e) {
+          if (e?.response?.status === 409 && e.response?.data?.code === 'DKG_PUBKEY_MISMATCH') {
+            // Server still holds this role's old identity pubkey from a prior DKG run.
+            clearDkgLocalState(escrowId, address);
+            throw new Error('[DKG B1] Server còn pubkey cũ của bạn từ lần DKG trước. Hãy bấm "Reset DKG" (xóa toàn bộ) rồi chạy lại.');
+          }
+          throw e;
+        }
 
         setState(DKG_STATE.COMMITTED);
         addLog({ message: `[DKG B1] Commitments đã upload. Chờ ${TOTAL_PARTIES - 1} parties khác...`, type: 'success' });
@@ -161,8 +193,24 @@ export function useDkgPhase(escrowId, myRole, executeWorkerTask, privKeyHex, add
       await waitForAllCommitments(escrowId, addLog, setProgress);
 
       // ─── Bước 2: Fetch pubkeys của tất cả parties, tính và upload shares ──
-      // Skip if already done in a previous session
-      if (loadStep2Done(escrowId, address)) {
+      // Skip if already done in a previous session, but verify pubkey consistency first
+      let step2WasDone = loadStep2Done(escrowId, address);
+      if (step2WasDone) {
+        try {
+          const checkResp = await api.get(`/escrow/${escrowId}/dkg/shares?toRole=${myRole}`);
+          const serverPubKey = checkResp.data.pubKeys?.[myRole];
+          if (serverPubKey && serverPubKey !== pubKeyHex) {
+            // Key changed between sessions → cached B2 is invalid, must re-upload
+            step2WasDone = false;
+            localStorage.removeItem(dkgStep2Key(escrowId, address));
+            addLog({ message: `[DKG B2] ⚠️ Pubkey lệch server (key thay đổi giữa session). Re-upload shares...`, type: 'warning' });
+          }
+        } catch (e) {
+          addLog({ message: `[DKG B2] Không thể xác minh pubkey: ${e.message}`, type: 'warning' });
+        }
+      }
+
+      if (step2WasDone) {
         setState(DKG_STATE.SHARES_SENT);
         addLog({ message: `[DKG B2] Shares đã upload từ session trước. Chờ parties khác...`, type: 'info' });
       } else {
@@ -186,7 +234,7 @@ export function useDkgPhase(escrowId, myRole, executeWorkerTask, privKeyHex, add
 
         const sharesPayload = await executeWorkerTask('COMPUTE_DKG_SHARES', {
           escrowId,
-          myPrivKeyHex: privKeyHex,
+          myPrivKeyHex: ecdhPrivKeyHex, // persisted identity key — matches registered pubkey
           parties: allParties,
           coeffs, // fallback if worker memory was cleared by page refresh
         });
@@ -220,13 +268,19 @@ export function useDkgPhase(escrowId, myRole, executeWorkerTask, privKeyHex, add
           continue;
         }
 
-        // Giải mã
-        const decryptResult = await executeWorkerTask('COMPUTE_ECDH_DECRYPT', {
-          recipientPrivKeyHex: privKeyHex,
-          senderPubKeyHex: senderPubKey,
-          encryptedBlob,
-        });
-        const shareHex = decryptResult.shareHex;
+        // Giải mã + Feldman verify — wrap per-share to surface fromRole in errors
+        let shareHex;
+        try {
+          const decryptResult = await executeWorkerTask('COMPUTE_ECDH_DECRYPT', {
+            recipientPrivKeyHex: ecdhPrivKeyHex, // persisted identity key — matches registered pubkey
+            senderPubKeyHex: senderPubKey,
+            encryptedBlob,
+          });
+          shareHex = decryptResult.shareHex;
+        } catch (decryptErr) {
+          const msg = decryptErr?.message || decryptErr?.name || String(decryptErr);
+          throw new Error(`[DKG B3] ECDH decrypt thất bại cho share từ ${fromRole}: ${msg}`);
+        }
 
         // Feldman verify
         const senderCommitments = allCommitments[fromRole];
@@ -266,8 +320,19 @@ export function useDkgPhase(escrowId, myRole, executeWorkerTask, privKeyHex, add
       return { finalShareHex, signingPubKey };
     } catch (err) {
       setState(DKG_STATE.ERROR);
-      setError(err.message);
-      addLog({ message: `[DKG Error] ${err.message}`, type: 'error' });
+
+      // ECDH OperationError at B3 = key mismatch (shares encrypted with old pubkey)
+      // Clear step2Done so next attempt re-uploads shares with correct key
+      const isEcdhMismatch = err.message?.includes('OperationError') || err.message?.includes('ECDH decrypt thất bại');
+      if (isEcdhMismatch) {
+        localStorage.removeItem(dkgStep2Key(escrowId, address));
+        const hint = '[DKG B3] Key mismatch: share được mã hóa bằng pubkey cũ. Đã xóa cache B2. Hãy chạy Reset DKG, đổi privKey, rồi thử lại.';
+        setError(hint);
+        addLog({ message: hint, type: 'error' });
+      } else {
+        setError(err.message);
+        addLog({ message: `[DKG Error] ${err.message}`, type: 'error' });
+      }
       throw err;
     } finally {
       runningRef.current = false;

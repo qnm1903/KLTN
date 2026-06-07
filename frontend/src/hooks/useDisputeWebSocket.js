@@ -150,12 +150,12 @@ export function useDisputeWebSocket(disputeId) {
       const base = incoming.tally || {};
 
       setVoteTally({
-        RELEASE_TO_BUYER: Number(base.RELEASE_TO_BUYER || 0),
-        RETURN_TO_SELLER: Number(base.RETURN_TO_SELLER || 0),
+        RELEASE: Number(base.RELEASE || 0),
+        REFUND: Number(base.REFUND || 0),
         SPLIT: Number(base.SPLIT || 0),
         OTHER: Number(base.OTHER || 0),
         totalVotes: Number(incoming.totalVotes ?? 0),
-        threshold: Number(incoming.threshold ?? 5)
+        threshold: Number(incoming.threshold ?? 4)
       });
 
       setCurrentDispute((prev) => {

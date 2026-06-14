@@ -66,7 +66,7 @@ async function buildMsgHash(vault, action, signerBitmap) {
   const chainId = (await ethers.provider.getNetwork()).chainId;
   const escrowId = await vault.escrowId();
   return ethers.solidityPackedKeccak256(
-    ["uint256", "address", "bytes32", "string", "uint8"],
+    ["uint256", "address", "bytes32", "string", "uint256"],
     [chainId, await vault.getAddress(), escrowId, action, signerBitmap]
   );
 }
@@ -133,7 +133,8 @@ async function deployFreshVault(buyer, seller, mediators, aggKey) {
     ],
     AMOUNT,
     CONFIRM_DAYS,
-    TIMEOUT_DAYS
+    TIMEOUT_DAYS,
+    BigInt(5)
   );
   const receipt = await tx.wait();
 
@@ -174,7 +175,7 @@ const tss = {
   lockFunds:       [],
   release:         [],
   refund:          [],
-  timeoutRelease:  [],
+  triggerTimeout:  [],
   dispute:         [],
 };
 
@@ -300,8 +301,10 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
       }
     });
 
-    // ── 1e. timeoutRelease ───────────────────────────────────────────────────
-    describe(`timeoutRelease (${N} runs)`, function () {
+    // ── 1e. triggerTimeout ─────────────────────────────────────────────────
+    // Quá hạn nay chỉ chuyển LOCKED→DISPUTED (không verify chữ ký, không payout),
+    // nên chi phí thấp hơn hẳn timeoutRelease cũ.
+    describe(`triggerTimeout (${N} runs)`, function () {
       for (let i = 0; i < N; i++) {
         it(`run #${i + 1}`, async function () {
           const aggKey = randomAggKey();
@@ -311,14 +314,9 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
           // Bỏ qua timeout deadline
           await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);
 
-          const msgHash  = await buildMsgHash(vault, "timeout", BITMAP_TIMEOUT);
-          const sig      = buildSchnorrSignature(
-            aggKey.pk, aggKey.x, aggKey.y, msgHash
-          );
-
-          const tx      = await vault.timeoutRelease(sig.R_addr, sig.z, sig.e, msgHash, BITMAP_TIMEOUT);
+          const tx      = await vault.triggerTimeout();
           const receipt = await tx.wait();
-          tss.timeoutRelease.push(Number(receipt.gasUsed));
+          tss.triggerTimeout.push(Number(receipt.gasUsed));
         });
       }
     });
@@ -426,7 +424,7 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
       lockFunds:      calcStats(tss.lockFunds),
       release:        calcStats(tss.release),
       refund:         calcStats(tss.refund),
-      timeoutRelease: calcStats(tss.timeoutRelease),
+      triggerTimeout: calcStats(tss.triggerTimeout),
       dispute:        calcStats(tss.dispute),
     };
 
@@ -466,7 +464,7 @@ describe(`Gas Benchmark — TSS vs MultiSig (N=${N} iterations each)`, function 
                            ms5of7Stats.signRefund_5.mean;
 
     // Timeout
-    const tss_timeout  = tssStats.lockFunds.mean + tssStats.timeoutRelease.mean;
+    const tss_timeout  = tssStats.lockFunds.mean + tssStats.triggerTimeout.mean;
     const ms5of7_timeout = ms5of7Stats.lockFunds.mean + ms5of7Stats.signTimeout_1.mean +
                            ms5of7Stats.signTimeout_2.mean + ms5of7Stats.signTimeout_3.mean +
                            ms5of7Stats.signTimeout_4.mean + ms5of7Stats.signTimeout_5.mean;

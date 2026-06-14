@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { buildDisputeLifecycleData, DISPUTE_PHASES, resolveNextDisputePhase } from '../lib/dispute-lifecycle.js';
-//import { retryStuckExecutions } from '../services/dispute-contract-executor.js';
+import { triggerTimeoutOnChain, executeMediationTimeout } from '../services/timeout-resolution-executor.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_UPLOADS_DIR = path.join(__dirname, '../../uploads');
@@ -42,100 +42,54 @@ async function checkTimeoutEscrows(prisma, options = {}) {
   const logger = options.logger ?? console;
   const now = options.now ?? new Date();
   const startTime = Date.now();
+  // Relayer fallback có thể inject để test; mặc định gọi contract thật.
+  const trigger = options.triggerTimeoutOnChain ?? triggerTimeoutOnChain;
 
-  // Backward-compatible fallback for tests/mocks that only provide updateMany.
-  const hasHistoryModel = Boolean(prisma.escrowStatusHistory);
-  const hasTransactions = typeof prisma.$transaction === 'function';
   const hasFindMany = typeof prisma.escrow?.findMany === 'function';
-
-  if (!hasHistoryModel || !hasTransactions || !hasFindMany) {
-    const updated = await prisma.escrow.updateMany({
-      where: {
-        status: 'LOCKED',
-        timeoutDeadline: {
-          not: null,
-          lt: now
-        }
-      },
-      data: {
-        status: 'DISPUTED',
-        ...buildDisputeLifecycleData('LOCKED', 'DISPUTED', now)
-      }
-    });
-
-    const duration = Date.now() - startTime;
-    logMetric(logger, 'cron.timeout_check.completed', { updated: updated.count }, duration);
-
-    return { updatedEscrows: updated.count };
+  if (!hasFindMany) {
+    return { triggeredEscrows: 0, updatedEscrows: 0 };
   }
 
+  // Contract là nguồn sự thật cho LOCKED→DISPUTED: relayer gọi triggerTimeout() on-chain,
+  // DB sẽ tự chuyển DISPUTED qua event DisputeOpened (event listener). Đây là fallback cho
+  // trường hợp không bên nào bấm nút trên FE.
   const timedOutEscrows = await prisma.escrow.findMany({
     where: {
       status: 'LOCKED',
-      timeoutDeadline: {
-        not: null,
-        lt: now
-      }
+      timeoutDeadline: { not: null, lt: now },
+      contractAddress: { not: null }
     },
-    select: {
-      id: true,
-      status: true
-    }
+    select: { id: true, contractAddress: true }
   });
 
-  let updatedCount = 0;
+  let triggeredCount = 0;
 
   for (const escrow of timedOutEscrows) {
     try {
-      await prisma.$transaction(async (tx) => {
-        const guarded = await tx.escrow.updateMany({
-          where: {
-            id: escrow.id,
-            status: 'LOCKED'
-          },
-          data: {
-            status: 'DISPUTED',
-            ...buildDisputeLifecycleData('LOCKED', 'DISPUTED', now)
-          }
-        });
-
-        if (guarded.count !== 1) return;
-
-        await tx.escrowStatusHistory.create({
-          data: {
-            escrowId: escrow.id,
-            actorUserId: null,
-            source: 'CRON_TIMEOUT',
-            fromStatus: 'LOCKED',
-            toStatus: 'DISPUTED',
-            reason: 'timeout reached',
-            metadata: {
-              triggeredAt: now.toISOString()
-            }
-          }
-        });
-
-        updatedCount += 1;
-      });
+      const result = await trigger(escrow.contractAddress, { logger });
+      if (result?.triggered) triggeredCount += 1;
     } catch (error) {
-      logger.error?.('[cron] Failed to process timeout escrow transition', {
+      logger.error?.('[cron] Failed to trigger on-chain timeout', {
         escrowId: escrow.id,
-        error
+        error: error.message
       });
       continue;
     }
   }
 
   const duration = Date.now() - startTime;
-  logMetric(logger, 'cron.timeout_check.completed', { updated: updatedCount }, duration);
+  logMetric(logger, 'cron.timeout_check.completed', { triggered: triggeredCount }, duration);
 
-  return { updatedEscrows: updatedCount };
+  // Giữ alias updatedEscrows cho log pipeline tương thích ngược.
+  return { triggeredEscrows: triggeredCount, updatedEscrows: triggeredCount };
 }
 
 async function checkDisputePhaseTransitions(prisma, options = {}) {
   const logger = options.logger ?? console;
   const now = options.now ?? new Date();
   const startTime = Date.now();
+  // Bước 4: hết hạn trong hòa giải → chia đôi + phạt MV. Injectable để test.
+  const runMediationTimeout = options.executeMediationTimeout ?? executeMediationTimeout;
 
   const hasHistoryModel = Boolean(prisma.escrowStatusHistory);
   const hasTransactions = typeof prisma.$transaction === 'function';
@@ -184,6 +138,7 @@ async function checkDisputePhaseTransitions(prisma, options = {}) {
     }
 
     try {
+      let committed = false;
       await prisma.$transaction(async (tx) => {
         const where = {
           id: escrow.id,
@@ -219,7 +174,19 @@ async function checkDisputePhaseTransitions(prisma, options = {}) {
         });
 
         progressedCount += 1;
+        committed = true;
       });
+
+      // Bước 4: khi hòa giải hết hạn (DECISION_PENDING → RESOLVED) mà không có phán quyết,
+      // chạy chia đôi tiền + phạt MV on-chain (executor tự kiểm tra idempotency on-chain).
+      if (committed && transition.nextPhase === DISPUTE_PHASES.RESOLVED) {
+        try {
+          const result = await runMediationTimeout({ prisma, escrowId: escrow.id, logger });
+          logMetric(logger, 'cron.mediation_timeout.executed', { escrowId: escrow.id, ...result }, 0);
+        } catch (execError) {
+          logMetric(logger, 'cron.mediation_timeout.failed', { escrowId: escrow.id, error: execError.message }, 0, 'failed');
+        }
+      }
     } catch (error) {
       logger.error?.('[cron] Failed to process dispute phase transition', {
         escrowId: escrow.id,

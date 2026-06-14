@@ -46,7 +46,7 @@ function main() {
 
   if (avgRelease !== null) data.tss_escrow_vault.release = avgRelease;
   if (avgRefund !== null) data.tss_escrow_vault.refund = avgRefund;
-  if (avgTimeout !== null) data.tss_escrow_vault.timeoutRelease = avgTimeout;
+  if (avgTimeout !== null) data.tss_escrow_vault.triggerTimeout = avgTimeout;
 
   const tssLock = toNumber(data.tss_escrow_vault.lockFunds, 0);
   const tssRelease = toNumber(data.tss_escrow_vault.release, 0);
@@ -78,7 +78,7 @@ function main() {
   console.log('Synced gas_results.json');
   console.log(`- tss_escrow_vault.release = ${data.tss_escrow_vault.release}`);
   console.log(`- tss_escrow_vault.refund = ${data.tss_escrow_vault.refund}`);
-  console.log(`- tss_escrow_vault.timeoutRelease = ${data.tss_escrow_vault.timeoutRelease}`);
+  console.log(`- tss_escrow_vault.triggerTimeout = ${data.tss_escrow_vault.triggerTimeout}`);
   console.log(`- ${data.comparative_analysis.conclusion}`);
 }
 

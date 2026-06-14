@@ -386,7 +386,7 @@ async function callRefund(vault, sig) {
   return receipt;
 }
 
-async function callTimeoutRelease(vault, sig) {
+async function callTriggerTimeout(vault) {
   console.log(`⏰ Advancing time for timeout...\n`);
 
   // Advance time on hardhat/local testnet
@@ -402,13 +402,13 @@ async function callTimeoutRelease(vault, sig) {
     console.log(`✓ Advanced time by ${advanceBy} seconds\n`);
   }
 
-  console.log(`✓ Calling timeoutRelease()...\n`);
+  console.log(`✓ Calling triggerTimeout()...\n`);
 
-  const rAddr = sig.R_addr || sig.rAddr;
-  const tx = await vault.timeoutRelease(rAddr, sig.z, sig.e, sig.msgHash, sig.signerBitmap);
+  // Quá hạn → chuyển LOCKED sang DISPUTED (không cần chữ ký TSS).
+  const tx = await vault.triggerTimeout();
   const receipt = await tx.wait();
 
-  console.log(`✓ Timeout release executed`);
+  console.log(`✓ Timeout triggered → DISPUTED`);
   console.log(`  Tx: ${receipt.hash}`);
   console.log(`  Gas used: ${receipt.gasUsed.toString()}\n`);
 
@@ -547,44 +547,47 @@ async function runSmokeTest(action) {
     const amount = ethers.parseEther('0.1');
     await lockFunds(vault.connect(wallets.buyer.signer), wallets.buyer.signer, amount);
 
-    // 6. Backend round 1: Collect nonces from the action committee
-    console.log(`🔄 Round 1: Collecting nonces from ${signers.join(' + ')}...\n`);
-    for (const role of signers) {
-      await backendNonce(ctx, wallets, role);
-    }
-
-    // Verify challenge was set
-    if (!ctx.e) {
-      throw new Error('Challenge e not set after round 1. Check backend nonce responses.');
-    }
-
-    // 7. Backend round 2: Collect z-shares
-    console.log(`🔄 Round 2: Collecting z-shares from ${signers.join(' + ')}...\n`);
-    for (const role of signers) {
-      await backendSign(ctx, wallets, role);
-    }
-
-    // Verify signature is available
-    if (!ctx.finalSig || !ctx.finalSig.R_addr) {
-      throw new Error('Final signature not available. Check backend sign responses.');
-    }
-
-    console.log(`✓ Signature ready for on-chain execution\n`);
-
-    // 8. Call on-chain action
-    console.log(`🚀 Executing on-chain ${action}...\n`);
-
     let receipt;
-    switch (action) {
-      case 'release':
-        receipt = await callRelease(vault, ctx.finalSig);
-        break;
-      case 'refund':
-        receipt = await callRefund(vault, ctx.finalSig);
-        break;
-      case 'timeout':
-        receipt = await callTimeoutRelease(vault, ctx.finalSig);
-        break;
+
+    // Luồng quá hạn nay không cần TSS: ai cũng gọi triggerTimeout() để chuyển sang DISPUTED.
+    if (action === 'timeout') {
+      console.log(`🚀 Executing on-chain ${action}...\n`);
+      receipt = await callTriggerTimeout(vault);
+    } else {
+      // 6. Backend round 1: Collect nonces from the action committee
+      console.log(`🔄 Round 1: Collecting nonces from ${signers.join(' + ')}...\n`);
+      for (const role of signers) {
+        await backendNonce(ctx, wallets, role);
+      }
+
+      // Verify challenge was set
+      if (!ctx.e) {
+        throw new Error('Challenge e not set after round 1. Check backend nonce responses.');
+      }
+
+      // 7. Backend round 2: Collect z-shares
+      console.log(`🔄 Round 2: Collecting z-shares from ${signers.join(' + ')}...\n`);
+      for (const role of signers) {
+        await backendSign(ctx, wallets, role);
+      }
+
+      // Verify signature is available
+      if (!ctx.finalSig || !ctx.finalSig.R_addr) {
+        throw new Error('Final signature not available. Check backend sign responses.');
+      }
+
+      console.log(`✓ Signature ready for on-chain execution\n`);
+
+      // 8. Call on-chain action
+      console.log(`🚀 Executing on-chain ${action}...\n`);
+      switch (action) {
+        case 'release':
+          receipt = await callRelease(vault, ctx.finalSig);
+          break;
+        case 'refund':
+          receipt = await callRefund(vault, ctx.finalSig);
+          break;
+      }
     }
 
     // 9. Update metrics

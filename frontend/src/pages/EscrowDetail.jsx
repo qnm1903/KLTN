@@ -19,6 +19,7 @@ import {
 import { useEscrowSync } from '../features/escrow/useEscrowSync';
 import { useSessionRecovery } from '../features/escrow/useSessionRecovery';
 import { useContractCall } from '../features/escrow/useContractCall';
+import { useTimeoutCountdown } from '../features/escrow/useTimeoutCountdown';
 import { useTssWorker } from '../features/escrow/useTssWorker'; // Tích hợp Phase 5: Web Worker
 import { useDkgPhase, DKG_STATE, clearDkgLocalState } from '../features/escrow/use-dkg-phase';
 
@@ -121,7 +122,7 @@ export default function EscrowDetail() {
   // 2. Khởi tạo Logic Chạy ngầm (Cập nhật lấy thêm deployEscrowVault)
   const { isRecovering } = useSessionRecovery(escrowId, address);
   const { submitPubKey, submitNonce, submitZShare, resetSigning } = useEscrowSync(escrowId, escrow?.status);
-  const { executeTssAction, fundEscrow, getVaultStatus, isPending, isConfirming, isConfirmed, deployEscrowVault, waitForTx, hash: hookTxHash } = useContractCall();
+  const { executeTssAction, fundEscrow, getVaultStatus, triggerTimeoutAction, isPending, isConfirming, isConfirmed, deployEscrowVault, waitForTx, hash: hookTxHash } = useContractCall();
   const { computeNonceFrost, computeZShare, hasNonce, executeWorkerTask, clearNonce } = useTssWorker(); // Khởi tạo Web Worker Hook
 
   // 3. Đọc State từ Jotai để render UI
@@ -224,6 +225,40 @@ export default function EscrowDetail() {
   const isVaultTerminalOnChain = onChainVaultStatus !== null && [2, 3].includes(Number(onChainVaultStatus));
   const isEscrowTerminal = ['RELEASED', 'REFUNDED', 'COMPLETED'].includes(String(escrow?.status || '').toUpperCase());
   const isSigningFlowClosed = isVaultTerminalOnChain || isEscrowTerminal;
+
+  // ─── Luồng quá hạn (timeout) ────────────────────────────────────────────────
+  const vaultAddress = escrow?.contractAddress || escrow?.vaultAddress || null;
+  const escrowStatusUpper = String(escrow?.status || '').toUpperCase();
+  const isLockedStatus = escrowStatusUpper === 'LOCKED' || (isVaultLockedOnChain && !isVaultTerminalOnChain && escrowStatusUpper !== 'DISPUTED');
+  const isDisputedStatus = escrowStatusUpper === 'DISPUTED' || Number(onChainVaultStatus) === 4;
+  const isParticipant = activeRole && activeRole !== 'Unknown';
+  const [isTriggeringTimeout, setIsTriggeringTimeout] = useState(false);
+
+  // Đếm ngược tới timeoutDeadline khi LOCKED, hoặc disputeDeadline khi DISPUTED.
+  const timeoutCountdown = useTimeoutCountdown(vaultAddress, 'timeout', Boolean(vaultAddress) && isLockedStatus);
+  const disputeCountdown = useTimeoutCountdown(vaultAddress, 'dispute', Boolean(vaultAddress) && isDisputedStatus);
+
+  const handleTriggerTimeout = useCallback(async () => {
+    if (!vaultAddress) return;
+    setIsTriggeringTimeout(true);
+    try {
+      const txHash = await triggerTimeoutAction(vaultAddress);
+      addLog({ message: 'Đã gửi giao dịch kích hoạt quá hạn. Đang chờ xác nhận...', type: 'info' });
+      if (txHash) await waitForTx(txHash);
+      addLog({ message: 'Quá hạn đã được kích hoạt — escrow chuyển sang DISPUTED.', type: 'success' });
+      // Đồng bộ lại trạng thái escrow + on-chain.
+      try {
+        const { data: fresh } = await api.get(`/escrows/${escrowId}`);
+        setEscrow(fresh);
+        const addr = fresh?.contractAddress || fresh?.vaultAddress || vaultAddress;
+        if (addr) setOnChainVaultStatus(Number(await getVaultStatus(addr)));
+      } catch { /* refresh lỗi không chặn flow */ }
+    } catch (error) {
+      addLog({ message: `Kích hoạt quá hạn thất bại: ${error.message}`, type: 'error' });
+    } finally {
+      setIsTriggeringTimeout(false);
+    }
+  }, [vaultAddress, triggerTimeoutAction, waitForTx, escrowId, getVaultStatus, addLog]);
 
   // Auto-scroll Terminal
   const logsEndRef = useRef(null);
@@ -1074,6 +1109,57 @@ export default function EscrowDetail() {
               </div>
             </div>
           </div>
+
+          {/* ĐỒNG HỒ ĐẾM NGƯỢC QUÁ HẠN (LOCKED) */}
+          {isLockedStatus && timeoutCountdown.deadlineSec != null && (() => {
+            const danger = timeoutCountdown.expired;
+            const warning = !danger && timeoutCountdown.remainingSec < 24 * 3600;
+            // Class tĩnh để Tailwind không purge nhầm (không dùng nội suy động).
+            const toneCls = danger
+              ? { box: 'bg-rose-900/20 border-rose-500/40', title: 'text-rose-300', time: 'text-rose-200' }
+              : warning
+                ? { box: 'bg-amber-900/20 border-amber-500/40', title: 'text-amber-300', time: 'text-amber-200' }
+                : { box: 'bg-emerald-900/20 border-emerald-500/40', title: 'text-emerald-300', time: 'text-emerald-200' };
+            return (
+              <div className={`mt-2 rounded-xl border p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${toneCls.box}`}>
+                <div>
+                  <p className={`${toneCls.title} text-sm font-semibold`}>
+                    {danger ? '⏰ Giao dịch đã quá hạn' : '⏳ Thời gian còn lại trước khi quá hạn'}
+                  </p>
+                  <p className={`${toneCls.time} text-2xl font-mono font-bold tracking-wider`}>{timeoutCountdown.formatted}</p>
+                  {timeoutCountdown.deadlineDate && (
+                    <p className="text-slate-400 text-xs mt-1">Hạn chót: {timeoutCountdown.deadlineDate.toLocaleString()}</p>
+                  )}
+                </div>
+                {isParticipant && (
+                  <button
+                    onClick={handleTriggerTimeout}
+                    disabled={!danger || isTriggeringTimeout}
+                    title={!danger ? 'Chỉ có thể kích hoạt sau khi hết hạn' : 'Chuyển escrow sang DISPUTED để hội đồng phán quyết'}
+                    className={`shrink-0 px-5 py-3 rounded-lg font-bold text-white transition-colors
+                      ${!danger || isTriggeringTimeout
+                        ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
+                        : 'bg-rose-600 hover:bg-rose-500 shadow-lg shadow-rose-500/20'}`}
+                  >
+                    {isTriggeringTimeout ? 'Đang kích hoạt...' : 'Kích hoạt quá hạn'}
+                  </button>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* ĐỒNG HỒ ĐẾM NGƯỢC HÒA GIẢI (DISPUTED) */}
+          {isDisputedStatus && disputeCountdown.deadlineSec != null && (
+            <div className="mt-2 rounded-xl border p-4 bg-indigo-900/20 border-indigo-500/40">
+              <p className="text-indigo-300 text-sm font-semibold">
+                {disputeCountdown.expired ? '⚖️ Thời hạn hòa giải đã hết — chờ hệ thống chia tiền & xử lý' : '⚖️ Thời gian hòa giải còn lại'}
+              </p>
+              <p className="text-indigo-200 text-2xl font-mono font-bold tracking-wider">{disputeCountdown.formatted}</p>
+              {disputeCountdown.deadlineDate && (
+                <p className="text-slate-400 text-xs mt-1">Hạn chót hòa giải: {disputeCountdown.deadlineDate.toLocaleString()}</p>
+              )}
+            </div>
+          )}
         </section>
 
         {/* ACTIVE DISPUTE BANNER */}

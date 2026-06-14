@@ -36,6 +36,8 @@ export const vaultAbi = [
   { "inputs": [ { "internalType": "uint256", "name": "signerBitmap", "type": "uint256" } ], "name": "signerCount", "outputs": [ { "internalType": "uint8", "name": "", "type": "uint8" } ], "stateMutability": "pure", "type": "function" },
   { "inputs": [], "name": "status", "outputs": [ { "internalType": "enum EscrowVault.Status", "name": "", "type": "uint8" } ], "stateMutability": "view", "type": "function" },
   { "inputs": [], "name": "timeoutDeadline", "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ], "stateMutability": "view", "type": "function" },
-  { "inputs": [ { "internalType": "address", "name": "rAddr", "type": "address" }, { "internalType": "bytes32", "name": "z", "type": "bytes32" }, { "internalType": "bytes32", "name": "e", "type": "bytes32" }, { "internalType": "bytes32", "name": "msgHash", "type": "bytes32" }, { "internalType": "uint256", "name": "signerBitmap", "type": "uint256" } ], "name": "timeoutRelease", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
+  { "inputs": [], "name": "disputeDeadline", "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [], "name": "triggerTimeout", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
+  { "inputs": [], "name": "timeoutSplit", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
   { "inputs": [ { "internalType": "uint256", "name": "signerBitmap", "type": "uint256" } ], "name": "validateSignerBitmap", "outputs": [ { "internalType": "bool", "name": "", "type": "bool" } ], "stateMutability": "view", "type": "function" }
 ];

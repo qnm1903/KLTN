@@ -25,94 +25,57 @@ describe('cron-jobs', () => {
     stopCronJobs({ logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } });
   });
 
-  it('updates LOCKED escrows that passed timeout deadline', async () => {
-    const updateMany = jest.fn().mockResolvedValue({ count: 2 });
-    const prisma = {
-      escrow: { updateMany },
-      authNonce: { deleteMany: jest.fn() },
-      evidence: { findMany: jest.fn() }
-    };
+  it('triggers on-chain timeout for LOCKED escrows past deadline', async () => {
+    const findMany = jest.fn().mockResolvedValue([
+      { id: 'e1', contractAddress: '0xabc' },
+      { id: 'e2', contractAddress: '0xdef' }
+    ]);
+    const triggerTimeoutOnChain = jest.fn().mockResolvedValue({ triggered: true });
+    const prisma = { escrow: { findMany } };
 
     const now = new Date('2026-03-26T10:00:00.000Z');
-    const result = await checkTimeoutEscrows(prisma, { now, logger: console });
+    const result = await checkTimeoutEscrows(prisma, { now, logger: console, triggerTimeoutOnChain });
 
-    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: {
         status: 'LOCKED',
-        timeoutDeadline: {
-          not: null,
-          lt: now
-        }
+        timeoutDeadline: { not: null, lt: now },
+        contractAddress: { not: null }
       },
-      data: expect.objectContaining({
-        status: 'DISPUTED',
-        disputePhase: 'OPENED',
-        disputeOpenedAt: now,
-        evidenceDeadlineAt: expect.any(Date),
-        reviewDeadlineAt: expect.any(Date),
-        decisionDeadlineAt: expect.any(Date)
-      })
+      select: { id: true, contractAddress: true }
     }));
-    expect(result).toEqual({ updatedEscrows: 2 });
+    expect(triggerTimeoutOnChain).toHaveBeenCalledTimes(2);
+    expect(triggerTimeoutOnChain).toHaveBeenCalledWith('0xabc', expect.anything());
+    expect(result).toEqual({ triggeredEscrows: 2, updatedEscrows: 2 });
   });
 
-  it('does not update when no timed out escrows exist', async () => {
-    const updateMany = jest.fn().mockResolvedValue({ count: 0 });
-    const prisma = {
-      escrow: { updateMany },
-      authNonce: { deleteMany: jest.fn() },
-      evidence: { findMany: jest.fn() }
-    };
+  it('does nothing when no timed out escrows exist', async () => {
+    const findMany = jest.fn().mockResolvedValue([]);
+    const triggerTimeoutOnChain = jest.fn();
+    const prisma = { escrow: { findMany } };
 
-    const result = await checkTimeoutEscrows(prisma, { now: new Date(), logger: console });
+    const result = await checkTimeoutEscrows(prisma, { now: new Date(), logger: console, triggerTimeoutOnChain });
 
-    expect(updateMany).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ updatedEscrows: 0 });
+    expect(findMany).toHaveBeenCalledTimes(1);
+    expect(triggerTimeoutOnChain).not.toHaveBeenCalled();
+    expect(result).toEqual({ triggeredEscrows: 0, updatedEscrows: 0 });
   });
 
-  it('writes status history per escrow when transaction-capable prisma is available', async () => {
-    const now = new Date('2026-03-26T10:00:00.000Z');
+  it('only counts escrows that were actually triggered (idempotent skips)', async () => {
+    const findMany = jest.fn().mockResolvedValue([
+      { id: 'e1', contractAddress: '0xabc' },
+      { id: 'e2', contractAddress: '0xdef' }
+    ]);
+    // e2 đã được ai đó bấm nút trước (on-chain không còn LOCKED) → triggered=false.
+    const triggerTimeoutOnChain = jest.fn()
+      .mockResolvedValueOnce({ triggered: true })
+      .mockResolvedValueOnce({ triggered: false, reason: 'not_locked' });
+    const prisma = { escrow: { findMany } };
 
-    const txEscrowUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
-    const txHistoryCreate = jest.fn().mockResolvedValue({ id: 'history-1' });
+    const result = await checkTimeoutEscrows(prisma, { now: new Date(), logger: console, triggerTimeoutOnChain });
 
-    const prisma = {
-      escrow: {
-        updateMany: jest.fn(),
-        findMany: jest.fn().mockResolvedValue([
-          { id: 'escrow-1', status: 'LOCKED' },
-          { id: 'escrow-2', status: 'LOCKED' }
-        ])
-      },
-      escrowStatusHistory: {
-        create: jest.fn()
-      },
-      $transaction: jest.fn(async (callback) => callback({
-        escrow: {
-          updateMany: txEscrowUpdateMany
-        },
-        escrowStatusHistory: {
-          create: txHistoryCreate
-        }
-      })),
-      authNonce: { deleteMany: jest.fn() },
-      evidence: { findMany: jest.fn() }
-    };
-
-    const result = await checkTimeoutEscrows(prisma, { now, logger: console });
-
-    expect(prisma.escrow.findMany).toHaveBeenCalledTimes(1);
-    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
-    expect(txEscrowUpdateMany).toHaveBeenCalledTimes(2);
-    expect(txHistoryCreate).toHaveBeenCalledTimes(2);
-    expect(txHistoryCreate).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        source: 'CRON_TIMEOUT',
-        fromStatus: 'LOCKED',
-        toStatus: 'DISPUTED'
-      })
-    }));
-    expect(result).toEqual({ updatedEscrows: 2 });
+    expect(triggerTimeoutOnChain).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ triggeredEscrows: 1, updatedEscrows: 1 });
   });
 
   it('progresses dispute phases by deadlines and records CRON_PHASE history', async () => {
@@ -356,7 +319,7 @@ describe('cron-jobs', () => {
     const longRunning = deferred();
     const prisma = {
       escrow: {
-        updateMany: jest.fn().mockImplementation(() => longRunning.promise)
+        findMany: jest.fn().mockImplementation(() => longRunning.promise)
       },
       authNonce: {
         deleteMany: jest.fn().mockResolvedValue({ count: 0 })
@@ -378,7 +341,7 @@ describe('cron-jobs', () => {
     const secondTick = timeoutCallback();
     await Promise.resolve();
 
-    expect(prisma.escrow.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.escrow.findMany).toHaveBeenCalledTimes(1);
 
     // Check that overlap skip metric was logged
     const skippedCallArgs = logger.info
@@ -392,7 +355,7 @@ describe('cron-jobs', () => {
       });
     expect(skippedCallArgs).toBeDefined();
 
-    longRunning.resolve({ count: 1 });
+    longRunning.resolve([]);
     await firstTick;
     await secondTick;
 

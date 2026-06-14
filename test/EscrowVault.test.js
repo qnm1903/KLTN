@@ -66,7 +66,8 @@ describe("EscrowVault & EscrowFactory (5-of-7)", function () {
       [BigInt(aggPk.x), BigInt(aggPk.y)],
       AMOUNT,
       CONFIRM_DAYS,
-      TIMEOUT_DAYS
+      TIMEOUT_DAYS,
+      BigInt(5) // threshold 5-of-7 (buyer + seller + 5 mediators)
     );
     const receipt = await tx.wait();
 
@@ -80,7 +81,7 @@ describe("EscrowVault & EscrowFactory (5-of-7)", function () {
   async function buildActionHashForDomain(action, signerBitmap, chainId, contractAddress) {
     const escrowId = await vault.escrowId();
     return ethers.solidityPackedKeccak256(
-      ["uint256", "address", "bytes32", "string", "uint8"],
+      ["uint256", "address", "bytes32", "string", "uint256"],
       [chainId, contractAddress, escrowId, action, signerBitmap]
     );
   }
@@ -150,7 +151,8 @@ describe("EscrowVault & EscrowFactory (5-of-7)", function () {
           [BigInt(aggPk.x), BigInt(aggPk.y)],
           AMOUNT,
           CONFIRM_DAYS,
-          TIMEOUT_DAYS
+          TIMEOUT_DAYS,
+          BigInt(5)
         )
       ).to.be.revertedWithCustomError(factory, "DuplicateMediator");
     });
@@ -171,7 +173,8 @@ describe("EscrowVault & EscrowFactory (5-of-7)", function () {
           [BigInt(aggPk.x), BigInt(aggPk.y)],
           AMOUNT,
           CONFIRM_DAYS,
-          TIMEOUT_DAYS
+          TIMEOUT_DAYS,
+          BigInt(5)
         )
       ).to.be.revertedWithCustomError(factory, "ParticipantConflict");
     });
@@ -184,7 +187,8 @@ describe("EscrowVault & EscrowFactory (5-of-7)", function () {
           [0, BigInt(aggPk.y)],
           AMOUNT,
           CONFIRM_DAYS,
-          TIMEOUT_DAYS
+          TIMEOUT_DAYS,
+          BigInt(5)
         )
       ).to.be.revertedWithCustomError(factory, "InvalidAggregateKey");
     });
@@ -199,7 +203,8 @@ describe("EscrowVault & EscrowFactory (5-of-7)", function () {
           [BigInt(aggPk.x), offCurveY],
           AMOUNT,
           CONFIRM_DAYS,
-          TIMEOUT_DAYS
+          TIMEOUT_DAYS,
+          BigInt(5)
         )
       ).to.be.revertedWithCustomError(factory, "InvalidAggregateKey");
     });
@@ -223,7 +228,8 @@ describe("EscrowVault & EscrowFactory (5-of-7)", function () {
           [BigInt(aggPk.x), BigInt(aggPk.y)],
           AMOUNT,
           CONFIRM_DAYS,
-          TIMEOUT_DAYS
+          TIMEOUT_DAYS,
+          BigInt(5)
         )
       ).to.be.revertedWithCustomError(Vault, "DuplicateMediator");
     });
@@ -240,7 +246,8 @@ describe("EscrowVault & EscrowFactory (5-of-7)", function () {
           [BigInt(aggPk.x), BigInt(aggPk.y)],
           0,
           CONFIRM_DAYS,
-          TIMEOUT_DAYS
+          TIMEOUT_DAYS,
+          BigInt(5)
         )
       ).to.be.revertedWithCustomError(Vault, "InvalidAmount");
     });
@@ -257,7 +264,8 @@ describe("EscrowVault & EscrowFactory (5-of-7)", function () {
           [BigInt(aggPk.x), BigInt(aggPk.y)],
           AMOUNT,
           0,
-          TIMEOUT_DAYS
+          TIMEOUT_DAYS,
+          BigInt(5)
         )
       ).to.be.revertedWithCustomError(Vault, "InvalidDeadline");
     });
@@ -393,9 +401,16 @@ describe("EscrowVault & EscrowFactory (5-of-7)", function () {
       await vault.connect(buyer).lockFunds({ value: AMOUNT });
     });
 
-    it("only buyer can open dispute", async function () {
+    it("only buyer or seller can open dispute", async function () {
+      // Bên ngoài (không phải buyer/seller) bị từ chối.
       await expect(vault.connect(otherAccount).dispute())
-        .to.be.revertedWithCustomError(vault, "NotBuyer");
+        .to.be.revertedWithCustomError(vault, "NotAuthorized");
+
+      // Seller mở dispute hợp lệ.
+      const escrowId = await vault.escrowId();
+      await expect(vault.connect(seller).dispute())
+        .to.emit(vault, "DisputeOpened")
+        .withArgs(escrowId);
     });
 
     it("opens dispute then refunds with valid bitmap", async function () {
@@ -422,37 +437,65 @@ describe("EscrowVault & EscrowFactory (5-of-7)", function () {
     });
   });
 
-  describe("Timeout release path", function () {
+  describe("Timeout trigger path", function () {
+    const DISPUTE_TIMEOUT = 3 * 24 * 60 * 60; // khớp DISPUTE_TIMEOUT trong contract
+
     beforeEach(async function () {
       await vault.connect(buyer).lockFunds({ value: AMOUNT });
     });
 
-    it("rejects timeout release before deadline", async function () {
-      const sig = await signAction("timeout", BITMAP_TIMEOUT);
-
-      await expect(vault.timeoutRelease(sig.rAddr, sig.z, sig.e, sig.msgHash, BITMAP_TIMEOUT))
+    it("rejects trigger timeout before deadline", async function () {
+      await expect(vault.triggerTimeout())
         .to.be.revertedWithCustomError(vault, "NotTimedOut");
     });
 
-    it("releases seller after timeout with valid signature", async function () {
+    it("any party can trigger timeout after deadline → DISPUTED + DisputeOpened", async function () {
       await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);
-      const sig = await signAction("timeout", BITMAP_TIMEOUT);
       const escrowId = await vault.escrowId();
 
-      await expect(vault.timeoutRelease(sig.rAddr, sig.z, sig.e, sig.msgHash, BITMAP_TIMEOUT))
-        .to.emit(vault, "FundsReleased")
-        .withArgs(escrowId, seller.address, BigInt(BITMAP_TIMEOUT), "timeout");
+      // Bất kỳ ai (kể cả tài khoản ngoài) cũng có thể kích hoạt — không cần chữ ký.
+      await expect(vault.connect(otherAccount).triggerTimeout())
+        .to.emit(vault, "DisputeOpened")
+        .withArgs(escrowId);
 
-      expect(await vault.status()).to.equal(2n);
+      expect(await vault.status()).to.equal(4n); // DISPUTED
+      expect(await vault.timeoutDeadline()).to.equal(ethers.MaxUint256);
+      expect(await vault.disputeDeadline()).to.be.gt(0n);
     });
 
-    it("rejects invalid signer bitmap in timeout release", async function () {
+    it("rejects trigger timeout when not LOCKED", async function () {
       await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);
-      const invalidBitmap = 0x7c;
-      const sig = await signAction("timeout", invalidBitmap);
+      await vault.triggerTimeout(); // → DISPUTED
+      await expect(vault.triggerTimeout())
+        .to.be.revertedWithCustomError(vault, "InvalidStatus");
+    });
 
-      await expect(vault.timeoutRelease(sig.rAddr, sig.z, sig.e, sig.msgHash, invalidBitmap))
-        .to.be.revertedWithCustomError(vault, "InvalidSignerBitmap");
+    it("council can refund after timeout-triggered dispute", async function () {
+      await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);
+      await vault.triggerTimeout();
+      const escrowId = await vault.escrowId();
+
+      const sig = await signAction("refund", BITMAP_REFUND);
+      await expect(vault.refund(sig.rAddr, sig.z, sig.e, sig.msgHash, BITMAP_REFUND))
+        .to.emit(vault, "FundsReleased")
+        .withArgs(escrowId, buyer.address, BigInt(BITMAP_REFUND), "refund");
+      expect(await vault.status()).to.equal(3n); // REFUNDED
+    });
+
+    it("splits 50/50 when mediation also times out (timeoutSplit)", async function () {
+      await time.increase(TIMEOUT_DAYS * 24 * 60 * 60 + 1);
+      await vault.triggerTimeout();
+      const escrowId = await vault.escrowId();
+
+      // Trước disputeDeadline → revert
+      await expect(vault.timeoutSplit())
+        .to.be.revertedWithCustomError(vault, "DisputeNotTimedOut");
+
+      await time.increase(DISPUTE_TIMEOUT + 1);
+      await expect(vault.timeoutSplit())
+        .to.emit(vault, "FundsSplit")
+        .withArgs(escrowId, buyer.address, seller.address, AMOUNT / 2n, AMOUNT - AMOUNT / 2n, 0n);
+      expect(await vault.status()).to.equal(2n); // RELEASED
     });
   });
 });

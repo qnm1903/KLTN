@@ -161,13 +161,21 @@ contract EscrowVault {
         emit FundsSplit(escrowId, buyer, seller, buyerAmount, sellerAmount, 0);
     }
 
-    function timeoutRelease(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint256 signerBitmap) external {
+    /**
+     * @dev Luồng quá hạn thụ động: khi LOCKED vượt timeoutDeadline mà không bên nào
+     *      hành động, bất kỳ ai cũng có thể
+     *      kích hoạt để chuyển sang DISPUTED cho hội đồng hòa giải phán quyết.
+     *      Không trả thẳng cho seller — quyết định cuối do hội đồng ký (release/refund/split).
+     */
+    function triggerTimeout() external {
         if (status != Status.LOCKED) revert InvalidStatus();
         if (block.timestamp <= timeoutDeadline) revert NotTimedOut();
-        _verifyAction("timeout", rAddr, z, e, msgHash, signerBitmap);
-        status = Status.RELEASED;
-        _payout(seller, amount);
-        emit FundsReleased(escrowId, seller, signerBitmap, "timeout");
+
+        status = Status.DISPUTED;
+        timeoutDeadline = type(uint256).max;
+        disputeDeadline = block.timestamp + DISPUTE_TIMEOUT;
+
+        emit DisputeOpened(escrowId);
     }
 
     // ─── Bitmap helpers ────────────────────────────────────────────────────────

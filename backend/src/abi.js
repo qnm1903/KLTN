@@ -15,10 +15,12 @@ export const factoryAbi = [
 export const mediatorPoolAbi = [
   'function mediators(address) external view returns (address wallet, uint256 stakeAmount, bool isActive, uint256 timeoutCount, uint256 reputationScore, uint256 totalVotes, uint256 successfulVotes)',
   'function requestRandomMediator(bytes32 escrowId, address buyer, address seller) external',
+  'function slashForTimeout(address mediator, address buyer, address seller) external',
   'event RandomMediatorSelected(bytes32 indexed escrowId, address[] mediators)',
   'event RandomnessRequested(uint256 requestId, bytes32 indexed escrowId)',
   'event ReputationUpdated(address indexed mediator, uint256 oldScore, uint256 newScore)',
-  'event MediatorSlashed(address indexed mediator, uint256 amount)'
+  'event MediatorSlashed(address indexed mediator, uint256 slashAmount, address buyer, address seller, uint256 timeoutCount)',
+  'event MediatorDeactivated(address indexed mediator, uint256 timeoutCount)'
 ];
 
 // 3. ABI của Vault 
@@ -46,6 +48,8 @@ export const vaultAbi = [
   { "inputs": [ { "internalType": "uint8", "name": "signerBitmap", "type": "uint8" } ], "name": "signerCount", "outputs": [ { "internalType": "uint8", "name": "", "type": "uint8" } ], "stateMutability": "pure", "type": "function" },
   { "inputs": [], "name": "status", "outputs": [ { "internalType": "enum EscrowVault.Status", "name": "", "type": "uint8" } ], "stateMutability": "view", "type": "function" },
   { "inputs": [], "name": "timeoutDeadline", "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ], "stateMutability": "view", "type": "function" },
-  { "inputs": [ { "internalType": "address", "name": "rAddr", "type": "address" }, { "internalType": "bytes32", "name": "z", "type": "bytes32" }, { "internalType": "bytes32", "name": "e", "type": "bytes32" }, { "internalType": "bytes32", "name": "msgHash", "type": "bytes32" }, { "internalType": "uint8", "name": "signerBitmap", "type": "uint8" } ], "name": "timeoutRelease", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
+  { "inputs": [], "name": "disputeDeadline", "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ], "stateMutability": "view", "type": "function" },
+  { "inputs": [], "name": "triggerTimeout", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
+  { "inputs": [], "name": "timeoutSplit", "outputs": [], "stateMutability": "nonpayable", "type": "function" },
   { "inputs": [ { "internalType": "uint8", "name": "signerBitmap", "type": "uint8" } ], "name": "validateSignerBitmap", "outputs": [ { "internalType": "bool", "name": "", "type": "bool" } ], "stateMutability": "pure", "type": "function" }
 ];

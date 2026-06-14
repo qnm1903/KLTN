@@ -5,17 +5,17 @@ stateDiagram-v2
     [*] --> CREATED: UC1: Create Escrow
     CREATED --> LOCKED: UC2: Lock Funds\n(Buyer locks money)
     
-    LOCKED --> RELEASED: UC4: Release Funds\n(Selected 5-of-7 committee agree)\nor UC6: Timeout Release
-    LOCKED --> DISPUTED: Buyer initiates\ndispute
+    LOCKED --> RELEASED: UC4: Release Funds\n(Selected 5-of-7 committee agree)
+    LOCKED --> DISPUTED: Buyer/Seller initiates dispute\nor UC6: Timeout (triggerTimeout)
     
     DISPUTED --> RELEASED: UC5A: Mediator+Seller\nrelease to seller
     DISPUTED --> REFUNDED: UC5B: Mediator+Buyer\nrefund to buyer
-    DISPUTED --> RELEASED: UC6: Timeout Release\n(Mediator+Seller)
+    DISPUTED --> RELEASED: UC6: Mediation timeout\nsplit 50/50 (timeoutSplit)
     
     RELEASED --> [*]: Funds transferred\nto Seller
     REFUNDED --> [*]: Funds transferred\nto Buyer
     
-    note right of CREATED\n        DKG initialized\n        7 participant keys created\n        signerBitmap binds the 5-of-7 committee\n    end note\n    \n    note right of LOCKED\n        Buyer funds locked\n        in smart contract\n        Timer starts\n    end note\n    \n    note right of DISPUTED\n        Evidence window open\n        Both parties can upload\n        documents to IPFS\n    end note\n```\n\n**Key States:**\n- **CREATED**: Escrow initialized, DKG session active, 7 participant committee ready\n- **LOCKED**: Funds held in EscrowVault, awaiting action/completion\n- **DISPUTED**: Evidence period open, mediator reviews submissions\n- **RELEASED**: Funds transferred to Seller (happy path or timeout)\n- **REFUNDED**: Funds transferred to Buyer (mediator decision)\n\n---\n\n## Phần 1: Use Cases
+    note right of CREATED\n        DKG initialized\n        7 participant keys created\n        signerBitmap binds the 5-of-7 committee\n    end note\n    \n    note right of LOCKED\n        Buyer funds locked\n        in smart contract\n        Timer starts\n    end note\n    \n    note right of DISPUTED\n        Evidence window open\n        Both parties can upload\n        documents to IPFS\n    end note\n```\n\n**Key States:**\n- **CREATED**: Escrow initialized, DKG session active, 7 participant committee ready\n- **LOCKED**: Funds held in EscrowVault, awaiting action/completion\n- **DISPUTED**: Evidence period open, mediator reviews submissions\n- **RELEASED**: Funds transferred to Seller (happy path) hoặc chia 50/50 khi hết hạn hòa giải\n- **REFUNDED**: Funds transferred to Buyer (mediator decision)\n- **Timeout**: LOCKED quá hạn → DISPUTED (qua triggerTimeout), không tự release cho seller\n\n---\n\n## Phần 1: Use Cases
 ```
 ## UC1: Tạo Giao Dịch Escrow Mới
 
@@ -94,8 +94,8 @@ graph TB
             S2["✓ 5 Mediators vote<br/>✓ Buyer + Seller present<br/>5-of-7 Quorum:<br/>Majority decides<br/>(RELEASE or REFUND)"]
         end
         
-        subgraph ScenarioC["Timeout Release<br/>UC6"]
-            S3["✓ 5 Mediators vote<br/>✓ Seller present<br/>5-of-7 Formal Voting<br/>(Practical: auto-release)"]
+        subgraph ScenarioC["Timeout → Dispute<br/>UC6"]
+            S3["✓ triggerTimeout() permissionless<br/>✓ Không cần chữ ký<br/>LOCKED → DISPUTED<br/>(hội đồng phán quyết sau)"]
         end
     end
     
@@ -122,7 +122,8 @@ graph TB
 |----------|---------|-----------|----------|
 | **UC4: Happy Path** | Selected 5 of 7 committee | 5-of-7 | Direct release with bitmap-bound quorum |
 | **UC5: Dispute** | Buyer + Seller + 5 Mediators | 5-of-7 | Majority resolves release/refund |
-| **UC6: Timeout** | Seller + 4 Mediators | 5-of-7 | Formal timeout release after deadline |
+| **UC6: Timeout** | Bất kỳ ai (không chữ ký) | — | `triggerTimeout()` chuyển LOCKED → DISPUTED sau deadline |
+| **UC6b: Mediation timeout** | Relayer (không chữ ký) | — | `timeoutSplit()` 50/50 + `slashForTimeout()` khi hội đồng quá hạn |
 
 ---
 
@@ -379,73 +380,54 @@ sequenceDiagram
 
 ---
 
-### UC6: Timeout Release
+### UC6: Timeout → Dispute (Passive Protection)
 
-**Mô tả**: Nếu vượt deadline, 5 Mediators vote formal release cho seller (5-of-7 quorum).
+**Mô tả**: Nếu escrow `LOCKED` vượt `timeoutDeadline` mà không bên nào hành động (thường do người bán không giao hàng), quá hạn chuyển escrow sang **DISPUTED** để hội đồng hòa giải phán quyết. Timeout **không** tự trả tiền cho seller.
 
-**Tác Nhân Chính**: 5 Mediators & Seller
+**Tác Nhân Chính**: Bất kỳ bên tham gia nào (buyer/seller/mediator) + Cron relayer (fallback)
 
 **Precondition**:
-- Escrow status: `LOCKED` hoặc `DISPUTED`
-- Vượt quá `reviewDeadlineAt` hoặc `decisionDeadlineAt`
-- 5 Mediators đã được assign
+- Escrow status: `LOCKED`
+- `block.timestamp > timeoutDeadline`
 
 **Main Flow**:
-1. Cron job kiểm tra timeout escrows
-2. Trigger formal 5-of-7 voting flow (auto-release procedure)
-3. Mỗi Mediator gọi `POST /escrows/:id/vote` với lựa chọn "AUTO-RELEASE"
-4. Khi 5-of-7 threshold đạt được:
-   - Tạo Schnorr signature từ 5 mediators + seller
-5. Gọi `EscrowVault.timeoutRelease()` on-chain
-6. Smart contract verify timestamp + votes + chữ ký
-7. Transfer tiền cho seller
-8. Event Listener cập nhật -> RELEASED
+1. Đồng hồ đếm ngược (FE) chạy tới `timeoutDeadline`.
+2. Khi hết hạn, một bên bấm nút "Kích hoạt quá hạn" → gọi `EscrowVault.triggerTimeout()` (permissionless, không cần chữ ký). Nếu không ai bấm, cron relayer tự gọi.
+3. Contract: `status = DISPUTED`, `timeoutDeadline = max`, `disputeDeadline = now + 3 ngày`, emit `DisputeOpened`.
+4. Event listener đồng bộ DB → `DISPUTED` + khởi tạo dispute lifecycle.
+5. Tiếp tục luồng hòa giải (UC5): hội đồng đánh giá ngữ cảnh và ký `release`/`refund`/`split` theo ngưỡng 5-of-7.
 
 **Postcondition**:
-- Timeout được xử lý tự động với formal voting
-- Tiền được release cho seller
-- Giao dịch kết thúc
+- Escrow ở `DISPUTED`, chờ hội đồng phán quyết (không tự release cho seller).
 
-**Diagram (5-of-7 Formal Release):**
+**Hết hạn TRONG hòa giải**: nếu quá `disputeDeadline`/decision deadline mà hội đồng không phán quyết → hệ thống tự gọi `timeoutSplit()` (chia 50/50) và `slashForTimeout()` (phạt MV không bỏ phiếu, bù cho buyer/seller).
+
+**Diagram (Passive Timeout → Dispute):**
 ```mermaid
 sequenceDiagram
-    participant CronJob
-    participant System as Backend System
-    participant M1 as Mediator 1
-    participant M2 as Mediator 2
-    participant M3 as Mediator 3
-    participant M4 as Mediator 4
-    participant M5 as Mediator 5
-    actor Seller
+    actor Party as Buyer/Seller/Mediator
+    participant CronJob as Cron Relayer (fallback)
     participant SmartContract as Smart Contract
     participant EventListener
     participant DB
 
-    CronJob->>System: Scan escrows past deadline
-    CronJob->>DB: Find: status=LOCKED|DISPUTED AND now > deadline
-    System->>DB: Trigger 5-of-7 formal voting
-    
-    System->>M1: AutoVote: Timeout Release (AUTO)
-    System->>M2: AutoVote: Timeout Release (AUTO)
-    System->>M3: AutoVote: Timeout Release (AUTO)
-    System->>M4: AutoVote: Timeout Release (AUTO)
-    System->>M5: AutoVote: Timeout Release (AUTO)
-    
-    System->>DB: Record all 5 auto-votes
-    System->>System: 5-of-7 reached = AUTO-RELEASE approved
-    
-    System->>System: Create Schnorr sig from 5 mediators + seller
-    System->>SmartContract: TX: timeoutRelease(escrow_id, aggregate_sig, vote_proof)
-    
-    SmartContract->>SmartContract: Verify timestamp > deadline
-    SmartContract->>SmartContract: Verify 5-of-7 votes on-chain record
-    SmartContract->>SmartContract: Verify Schnorr signature
-    SmartContract->>SmartContract: Transfer funds to seller
-    SmartContract->>SmartContract: Update status = RELEASED
-    SmartContract-->>EventListener: Emit TimeoutReleased event
-    
-    EventListener->>DB: Update escrow status = RELEASED
-    Seller-->>System: Notify: "Timeout Release Executed (5-of-7)"
+    Note over Party,SmartContract: LOCKED vượt timeoutDeadline
+    alt Có người bấm nút FE
+        Party->>SmartContract: triggerTimeout()
+    else Không ai bấm
+        CronJob->>SmartContract: triggerTimeout() (ví relayer)
+    end
+    SmartContract->>SmartContract: status = DISPUTED, disputeDeadline = now + 3d
+    SmartContract-->>EventListener: Emit DisputeOpened
+    EventListener->>DB: status = DISPUTED + init dispute lifecycle
+
+    Note over SmartContract,DB: Tiếp tục hội đồng hòa giải (UC5)
+    opt Hết hạn trong hòa giải
+        CronJob->>SmartContract: timeoutSplit() (chia 50/50)
+        CronJob->>SmartContract: slashForTimeout(MV không vote)
+        SmartContract-->>EventListener: Emit FundsSplit
+        EventListener->>DB: status = RELEASED, dispute = TIMED_OUT
+    end
 ```
 
 ---
@@ -544,15 +526,16 @@ Tôi muốn upload bằng chứng cho thấy tôi đã giao hàng,
 
 #### SS4: Timeout protection
 ```
-Là một Người Bán, nếu người mua không phản hồi,
-Tôi muốn phát hành tự động sau N ngày,
-Để tôi không mất thanh toán của mình.
+Là một bên tham gia, nếu giao dịch bị treo ở LOCKED quá hạn,
+Tôi muốn kích hoạt quá hạn để đưa vào hòa giải,
+Để hội đồng phán quyết công bằng thay vì tiền bị khóa vô thời hạn.
 ```
 
 **Tiêu chí chấp nhận**:
-- Nếu buyer không action sau 7 ngày -> cron job tự release
-- Tôi được notify khi timeout release được approve
-- Tiền được transfer tự động
+- FE hiển thị đồng hồ đếm ngược tới `timeoutDeadline`.
+- Sau khi hết hạn, bất kỳ bên nào bấm "Kích hoạt quá hạn" → escrow chuyển DISPUTED (hoặc cron relayer tự gọi nếu không ai bấm).
+- Timeout KHÔNG tự trả cho seller; hội đồng quyết định release/refund/split.
+- Nếu hội đồng cũng quá hạn → tự chia 50/50 và phạt hòa giải viên không bỏ phiếu.
 
 ---
 
@@ -607,4 +590,4 @@ Tôi muốn xem thống kê của tôi: tổng tranh chấp đã giải quyết,
 | UC3: Upload Evidence | BS3, SS3 | Buyer, Seller |
 | UC4: Release Funds | BS4, SS2 | Buyer, Seller |
 | UC5: Refund via Mediator | BS5, MS1, MS2 | Mediator, Buyer/Seller |
-| UC6: Timeout Release | SS4, MS2 | Seller, Mediator |
+| UC6: Timeout → Dispute | SS4, MS2 | Any participant, Mediator |

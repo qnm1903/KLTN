@@ -42,7 +42,7 @@ export const addSystemLogAtom = atom(
 // PHASE 1: SIGNING ORCHESTRATION ATOMS
 
 export const signingPhaseAtom = atom(null); // Trạng thái: "nonce", "z-share", "ready", null
-export const selectedActionAtom = atom(null); // Hành động: "release", "refund", "timeoutRelease"
+export const selectedActionAtom = atom(null); // Hành động: "release", "refund", "split"
 
 export const nonceRound1Atom = atom(null); // Lưu trữ challenge/context trả về từ Backend sau Round 1
 export const zShareRound2Atom = atom(null); // Lưu trữ dữ liệu z-share do user tính toán

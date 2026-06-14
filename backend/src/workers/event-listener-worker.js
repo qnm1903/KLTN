@@ -1,5 +1,6 @@
 import { ethers } from 'ethers';
 import { canTransitionStatus } from '../lib/escrow-status.js';
+import { buildDisputeLifecycleData } from '../lib/dispute-lifecycle.js';
 
 const FACTORY_ABI = [
   'event EscrowCreatedEvent(address escrowAddress, bytes32 escrowId, address buyer, address seller, address[] mediators, uint256 threshold, uint256 numParties)'
@@ -245,7 +246,9 @@ async function handleVaultEvent({ prisma, parsedLog, contractAddress }) {
   }
 
   if (eventName === 'DisputeOpened') {
-    await updateEscrowStatus(prisma, escrow, 'DISPUTED');
+    // Khởi tạo lifecycle hòa giải (phase OPENED + các deadline) ngay khi nhận event,
+    // bất kể dispute do bên chủ động mở hay do quá hạn (triggerTimeout) kích hoạt.
+    await updateEscrowStatus(prisma, escrow, 'DISPUTED', buildDisputeLifecycleData('LOCKED', 'DISPUTED', new Date()));
     return;
   }
 

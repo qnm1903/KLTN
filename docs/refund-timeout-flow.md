@@ -5,28 +5,41 @@ Tài liệu này mô tả chi tiết luồng xử lý khi giao dịch escrow có
 
 ---
 
-## 1. Luồng Timeout (Automatic Transition)
+## 1. Luồng Timeout (Passive Protection → DISPUTED)
 
 ### Scenario
-Nếu escrow ở trạng thái `LOCKED` và quá `timeoutDeadline` (được tính từ lúc `lockFunds()` được gọi on-chain), hệ thống sẽ tự động chuyển sang dispute flow.
+Nếu escrow ở trạng thái `LOCKED` và quá `timeoutDeadline` (tính từ lúc `lockFunds()` on-chain) mà không bên nào hành động (thường do người bán không giao hàng), hệ thống chuyển escrow sang **DISPUTED** để hội đồng hòa giải phán quyết. Timeout **không** tự trả tiền cho seller.
 
 ### Implementation Status: ✅ DONE
 
+### Trigger on-chain: `triggerTimeout()`
+Quá hạn được kích hoạt on-chain bởi **hàm permissionless** `triggerTimeout()` (ai cũng gọi được, không cần chữ ký):
+- Điều kiện: `status == LOCKED` và `block.timestamp > timeoutDeadline`.
+- Hành động: `status = DISPUTED`, `timeoutDeadline = type(uint256).max`, đặt `disputeDeadline = now + DISPUTE_TIMEOUT (3 ngày)`, emit `DisputeOpened`.
+
+Hai nguồn kích hoạt (theo thiết kế "cả hai"):
+1. **Nút FE** — bất kỳ bên tham gia nào bấm "Kích hoạt quá hạn" sau khi đồng hồ đếm ngược về 0 (tự trả gas).
+2. **Cron relayer (fallback)** — nếu không ai bấm, cron gọi `triggerTimeout()` bằng ví relayer.
+
 ### Key Components
 
-#### 1.1 Cron Job: `checkTimeoutEscrows()`
+#### 1.1 Cron Job: `checkTimeoutEscrows()` (relayer fallback)
 **File**: [backend/src/workers/cron-jobs.js](../backend/src/workers/cron-jobs.js)
 
 ```
 Chạy mỗi giờ (config: TIMEOUT_CHECK_CRON_PATTERN = '0 * * * *')
   ↓
-Tìm escrow WHERE status = 'LOCKED' AND timeoutDeadline < now()
+Tìm escrow WHERE status = 'LOCKED' AND timeoutDeadline < now() AND contractAddress != null
   ↓
 Với mỗi escrow timeout:
-  - Cập nhật status: LOCKED → DISPUTED
-  - Khởi tạo dispute lifecycle data (disputePhase, deadlines)
-  - Ghi vào escrowStatusHistory (source: CRON_TIMEOUT)
+  - Ví relayer gọi vault.triggerTimeout() ON-CHAIN (không flip DB trực tiếp)
+  - Idempotent: bỏ qua nếu on-chain không còn LOCKED (đã có ai bấm nút)
+  ↓
+DB chuyển LOCKED → DISPUTED qua event DisputeOpened (event listener),
+đồng thời khởi tạo dispute lifecycle (disputePhase, deadlines).
 ```
+
+> Contract là nguồn sự thật cho LOCKED→DISPUTED; DB đồng bộ theo event, tránh lệch trạng thái.
 
 #### 1.2 Dispute Lifecycle Initialization
 **File**: [backend/src/lib/dispute-lifecycle.js](../backend/src/lib/dispute-lifecycle.js)
@@ -151,7 +164,7 @@ PATCH /api/escrows/:id/status
 **File**: [contracts/EscrowVault.sol](../contracts/EscrowVault.sol#L97)
 
 ```solidity
-function refund(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 signerBitmap) external {
+function refund(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint256 signerBitmap) external {
   require(status == LOCKED || status == DISPUTED, "Invalid status");
   
   // Schnorr signature verification
@@ -178,7 +191,7 @@ function refund(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 sign
 
 ```
 When FundsReleased event detected from contract:
-  ├─ Extract escrowId, recipient, action (refund/release/timeout)
+  ├─ Extract escrowId, recipient, action (refund/release)
   ├─ Verify action == "refund"
   ├─ Update DB:
   │   escrow.status = REFUNDED
@@ -195,7 +208,7 @@ When FundsReleased event detected from contract:
 
 **Contract Call**:
 ```solidity
-function release(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 signerBitmap) external {
+function release(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint256 signerBitmap) external {
   require(status == LOCKED || status == DISPUTED);
   _verifyAction("release", rAddr, z, e, msgHash, signerBitmap);
   
@@ -208,24 +221,45 @@ function release(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 sig
 
 **Status**: ⚠️ Same as refund - contract ready, backend integration pending.
 
-### 4.2 Timeout Release (Alternative)
-**Scenario**: Escrow vẫn LOCKED (chưa dispute), quá timeoutDeadline. Seller + 4 mediators có thể call `timeoutRelease()`.
+### 4.2 Trigger Timeout (Passive → DISPUTED)
+**Scenario**: Escrow vẫn LOCKED, quá `timeoutDeadline`. Bất kỳ ai cũng có thể kích hoạt chuyển sang DISPUTED (không trả thẳng cho seller — quyết định do hội đồng).
 
 **Contract Call**:
 ```solidity
-function timeoutRelease(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, uint8 signerBitmap) external {
-  require(status == LOCKED);
-  require(block.timestamp > timeoutDeadline);
-  _verifyAction("timeout", rAddr, z, e, msgHash, signerBitmap);
-  
-  status = RELEASED;
-  _payout(seller);  // Send funds to seller, NOT buyer
-  
-  emit FundsReleased(escrowId, seller, signerBitmap, "timeout");
+function triggerTimeout() external {
+  if (status != LOCKED) revert InvalidStatus();
+  if (block.timestamp <= timeoutDeadline) revert NotTimedOut();
+
+  status = DISPUTED;
+  timeoutDeadline = type(uint256).max;
+  disputeDeadline = block.timestamp + DISPUTE_TIMEOUT; // 3 ngày
+  emit DisputeOpened(escrowId);
 }
 ```
 
-**⚠️ IMPORTANT**: When `dispute()` is called on-chain, it sets `timeoutDeadline = type(uint256).max`, blocking timeout release path. This forces resolution through mediator voting instead.
+**⚠️ IMPORTANT**: `dispute()` và `triggerTimeout()` đều đặt `timeoutDeadline = max` và mở dispute; khác biệt: `dispute()` chỉ buyer/seller gọi (chủ động), `triggerTimeout()` ai cũng gọi được sau khi hết hạn (thụ động).
+
+### 4.3 Timeout TRONG hòa giải (Auto Split + Slash)
+**Scenario**: Đã DISPUTED nhưng hội đồng không phán quyết kịp (quá `disputeDeadline` / decision deadline). Hệ thống tự chia đôi tiền và phạt các hòa giải viên gây trễ.
+
+**Contract**: `timeoutSplit()` (permissionless, không cần chữ ký)
+```solidity
+function timeoutSplit() external {
+  if (status != DISPUTED) revert InvalidStatus();
+  if (block.timestamp <= disputeDeadline) revert DisputeNotTimedOut();
+  // chia 50/50 cho buyer & seller
+  status = RELEASED;
+  _payout(buyer, amount/2);
+  _payout(seller, amount - amount/2);
+  emit FundsSplit(escrowId, buyer, seller, buyerAmount, sellerAmount, 0);
+}
+```
+
+**Backend executor** ([backend/src/services/timeout-resolution-executor.js](../backend/src/services/timeout-resolution-executor.js)) — chạy khi cron chuyển phase `DECISION_PENDING → RESOLVED` mà dispute chưa có outcome do vote:
+1. Ví relayer gọi `vault.timeoutSplit()` → chia 50/50 (DB → RELEASED qua event `FundsSplit`).
+2. Xác định MV **không bỏ phiếu** (DisputeMediator trừ DisputeVote) → gọi `MediatorPool.slashForTimeout(mv, buyer, seller)` (phạt 30% stake, bù cho buyer/seller).
+3. Cập nhật `Dispute`: `status='TIMED_OUT'`, `outcome='SPLIT'`, `onChainTxHash`.
+4. Idempotent: bỏ qua nếu on-chain đã RELEASED/REFUNDED hoặc dispute đã chốt bằng vote.
 
 ---
 
@@ -278,7 +312,9 @@ function timeoutRelease(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, ui
 
 | Component | Status | File | Notes |
 |-----------|--------|------|-------|
-| **Timeout Detection** | ✅ DONE | `cron-jobs.js` | Auto transitions LOCKED → DISPUTED |
+| **Timeout Trigger (FE button)** | ✅ DONE | `EscrowDetail.jsx`, `useContractCall.js` | Bất kỳ bên nào gọi `triggerTimeout()` sau khi đếm ngược về 0 |
+| **Timeout Trigger (cron relayer)** | ✅ DONE | `cron-jobs.js`, `timeout-resolution-executor.js` | Fallback: relayer gọi `triggerTimeout()` on-chain; DB sync qua `DisputeOpened` |
+| **Countdown Timer (FE)** | ✅ DONE | `useTimeoutCountdown.js` | Đếm ngược `timeoutDeadline` (LOCKED) / `disputeDeadline` (DISPUTED) |
 | **Dispute Phase Auto-Progression** | ✅ DONE | `cron-jobs.js` | OPENED → EVIDENCE → REVIEW → DECISION → RESOLVED |
 | **Mediator Assignment** | ✅ DONE | `disputes.js` | VRF + manual assignment |
 | **Mediator Accept/Decline** | ✅ DONE | `disputes.js` | EIP-712 signed, nonce protected |
@@ -287,7 +323,7 @@ function timeoutRelease(address rAddr, bytes32 z, bytes32 e, bytes32 msgHash, ui
 | **Database Status Transition** | ✅ DONE | `escrows.js` | DISPUTED → RELEASED/REFUNDED |
 | **Refund Contract Call** | ⚠️ TODO | `dispute-finalize.js` | Need backend to aggregate sig + call `refund()` |
 | **Release Contract Call** | ⚠️ TODO | `dispute-finalize.js` | Need backend to aggregate sig + call `release()` |
-| **Timeout Release Path** | ✅ Exists | `EscrowVault.sol` | Can be called by seller + 4 mediators if LOCKED (not DISPUTED) |
+| **Mediation Timeout (split + slash)** | ✅ DONE | `timeout-resolution-executor.js`, `EscrowVault.sol`, `MediatorPool.sol` | Quá `disputeDeadline` → `timeoutSplit()` 50/50 + `slashForTimeout()` các MV không vote |
 | **Event Listener: FundsReleased** | ✅ DONE | `event-listener-worker.js` | Syncs on-chain events back to DB |
 | **WebSocket Real-time Updates** | ✅ DONE | `socket-emitter.js` | Emits vote-tally-updated, dispute-finalized, etc. |
 
@@ -316,12 +352,10 @@ After vote finalization, frontend should:
 - **Option A**: Frontend calls backend endpoint to trigger contract execution
 - **Option B**: Frontend directly calls contract with aggregated signature
 
-### 7.3 Timeout Release Flow
-Currently, when escrow times out while LOCKED:
-- Cron auto-transitions to DISPUTED
-- This blocks `timeoutRelease()` path on contract (because timeoutDeadline is set to max)
-
-**Question**: Should timeout auto-transition to DISPUTED, or should it call `timeoutRelease()` directly if seller wants it?
+### 7.3 Timeout Flow — ✅ RESOLVED
+Quyết định cuối: timeout là **cơ chế bảo vệ thụ động → DISPUTED** (không trả thẳng cho seller), vì quá hạn thường do người bán không giao hàng.
+- Kích hoạt: nút FE (bất kỳ bên) + cron relayer fallback, cùng gọi `triggerTimeout()`.
+- Hết hạn trong hòa giải: tự `timeoutSplit()` (50/50) + `slashForTimeout()` (phạt MV không vote).
 
 ---
 
@@ -376,9 +410,7 @@ PATCH /api/escrows/:id/status
    - Should backend auto-call after vote finalization?
    - Or should frontend submit signature + call contract?
 
-2. **Timeout behavior:**
-   - Should timeout auto-transition to DISPUTED + mediation?
-   - Or should it call `timeoutRelease()` directly for faster resolution?
+2. **Timeout behavior:** ✅ RESOLVED — timeout → DISPUTED (qua `triggerTimeout()`), không trả thẳng cho seller. Hết hạn hòa giải → `timeoutSplit()` + slash.
 
 3. **Refund semantics:**
    - Is "REFUND" = "RETURN_TO_SELLER" (return funds to buyer)?

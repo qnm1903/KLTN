@@ -88,7 +88,9 @@ export const useContractCall = () => {
         pkAggCoords,
         parseEther(amountEth.toString()),
         BigInt(7),
-        BigInt(14),
+        // timeoutDays: tối thiểu 1 ngày (contract nhân * 1 days). Đặt 1 để test timeout
+        // nhanh trên hardhat node bằng evm_increaseTime. Đổi lại 14 cho production.
+        BigInt(1),
         // threshold: 5-of-7 signing scheme (buyer + seller + 5 mediators = 7 parties)
         BigInt(5)
       ],
@@ -197,6 +199,27 @@ export const useContractCall = () => {
     });
   };
 
+  // Luồng quá hạn: bất kỳ bên nào cũng có thể kích hoạt khi LOCKED đã quá timeoutDeadline.
+  // Chuyển escrow sang DISPUTED để hội đồng hòa giải phán quyết (không trả thẳng cho seller).
+  const triggerTimeoutAction = async (vaultContractAddress) => {
+    if (!vaultContractAddress) throw new Error('Vault Contract Address is missing.');
+
+    addLog({ message: 'Requesting MetaMask to trigger timeout (escrow → DISPUTED)...', type: 'warning' });
+
+    try {
+      return await writeContractAsync({
+        address: vaultContractAddress,
+        abi: vaultAbi,
+        functionName: 'triggerTimeout',
+        gas: 200000n
+      });
+    } catch (error) {
+      const exactReason = extractViemReason(error);
+      addLog({ message: `Trigger timeout failed: ${exactReason}`, type: 'error' });
+      throw new Error(exactReason);
+    }
+  };
+
   const executeTssAction = async (actionType, signatureData, fallbackAddress) => {
     if (!['release', 'refund', 'split'].includes(actionType)) {
       const invalidActionMessage = `Code error: invalid actionType ${actionType}`;
@@ -282,6 +305,7 @@ export const useContractCall = () => {
     fundEscrow,
     getVaultStatus,
     executeTssAction,
+    triggerTimeoutAction,
     waitForTx,
     isPending,
     isConfirming,

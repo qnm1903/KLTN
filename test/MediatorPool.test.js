@@ -27,6 +27,9 @@ describe("MediatorPool", function () {
       }
     );
     await mediatorPool.waitForDeployment();
+
+    // Constructor chỉ chạy trên implementation; proxy cần set coordinator riêng.
+    await mediatorPool.updateVrfCoordinator(await vrfCoordinator.getAddress());
   });
 
   describe("Registration", function () {
@@ -443,18 +446,18 @@ describe("MediatorPool", function () {
     });
 
     it("Should increment timeout count", async function () {
-      await mediatorPool.slashForTimeout(user1.address);
-      
+      await mediatorPool.slashForTimeout(user1.address, user2.address, user3.address);
+
       const mediator = await mediatorPool.mediators(user1.address);
       expect(mediator.timeoutCount).to.equal(1);
     });
 
     it("Should slash and remove mediator after max timeouts", async function () {
       const MAX_TIMEOUTS = 3;
-      
+
       // Increment timeout count to max
       for (let i = 0; i < MAX_TIMEOUTS; i++) {
-        await mediatorPool.slashForTimeout(user1.address);
+        await mediatorPool.slashForTimeout(user1.address, user2.address, user3.address);
       }
       
       const mediator = await mediatorPool.mediators(user1.address);
@@ -464,7 +467,7 @@ describe("MediatorPool", function () {
 
     it("Should only allow admin to slash", async function () {
       await expect(
-        mediatorPool.connect(user1).slashForTimeout(user1.address)
+        mediatorPool.connect(user1).slashForTimeout(user1.address, user2.address, user3.address)
       ).to.be.revertedWithCustomError(mediatorPool, "AccessControlUnauthorizedAccount");
     });
   });

@@ -11,7 +11,30 @@ export const factoryAbi = [
   { "inputs": [ { "internalType": "address", "name": "", "type": "address" }, { "internalType": "uint256", "name": "", "type": "uint256" } ], "name": "escrowsBySeller", "outputs": [ { "internalType": "address", "name": "", "type": "address" } ], "stateMutability": "view", "type": "function" }
 ];
 
-// 2. ABI của Vault
+// 2. ABI của MediatorPool (minimal interface for frontend interactions)
+export const mediatorPoolAbi = [
+  { inputs: [], name: 'registerAsMediator', outputs: [], stateMutability: 'payable', type: 'function' },
+  { inputs: [], name: 'unregister', outputs: [], stateMutability: 'nonpayable', type: 'function' },
+  { inputs: [], name: 'getRequiredStake', outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }], stateMutability: 'view', type: 'function' },
+  { inputs: [], name: 'isTestnet', outputs: [{ internalType: 'bool', name: '', type: 'bool' }], stateMutability: 'view', type: 'function' },
+  {
+    inputs: [{ internalType: 'address', name: '', type: 'address' }],
+    name: 'mediators',
+    outputs: [
+      { internalType: 'address', name: 'wallet', type: 'address' },
+      { internalType: 'uint256', name: 'stakeAmount', type: 'uint256' },
+      { internalType: 'bool', name: 'isActive', type: 'bool' },
+      { internalType: 'uint256', name: 'timeoutCount', type: 'uint256' },
+      { internalType: 'uint256', name: 'reputationScore', type: 'uint256' },
+      { internalType: 'uint256', name: 'totalVotes', type: 'uint256' },
+      { internalType: 'uint256', name: 'successfulVotes', type: 'uint256' },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+];
+
+// 3. ABI của Vault
 export const vaultAbi = [
   { "inputs": [ { "internalType": "bytes32", "name": "_escrowId", "type": "bytes32" }, { "internalType": "address", "name": "_buyer", "type": "address" }, { "internalType": "address", "name": "_seller", "type": "address" }, { "internalType": "address[5]", "name": "_mediators", "type": "address[5]" }, { "internalType": "uint256[2]", "name": "_pkAggCoords", "type": "uint256[2]" }, { "internalType": "uint256", "name": "_amount", "type": "uint256" }, { "internalType": "uint256", "name": "_confirmDays", "type": "uint256" }, { "internalType": "uint256", "name": "_timeoutDays", "type": "uint256" } ], "stateMutability": "nonpayable", "type": "constructor" },
   { "inputs": [], "name": "DuplicateMediator", "type": "error" }, { "inputs": [], "name": "IncorrectValue", "type": "error" }, { "inputs": [], "name": "InvalidAggregateKey", "type": "error" }, { "inputs": [], "name": "InvalidAmount", "type": "error" }, { "inputs": [], "name": "InvalidDeadline", "type": "error" }, { "inputs": [], "name": "InvalidMsgHash", "type": "error" }, { "inputs": [], "name": "InvalidSignature", "type": "error" }, { "inputs": [], "name": "InvalidSignerBitmap", "type": "error" }, { "inputs": [], "name": "InvalidStatus", "type": "error" }, { "inputs": [], "name": "NotAuthorized", "type": "error" }, { "inputs": [], "name": "NotBuyer", "type": "error" }, { "inputs": [], "name": "NotTimedOut", "type": "error" }, { "inputs": [], "name": "ParticipantConflict", "type": "error" }, { "inputs": [], "name": "TransferFailed", "type": "error" }, { "inputs": [], "name": "ZeroAddress", "type": "error" },

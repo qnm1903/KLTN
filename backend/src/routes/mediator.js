@@ -341,6 +341,57 @@ router.get('/random-result/:chainEscrowId', authMiddleware, async (req, res) => 
 });
 
 /**
+ * @route   GET /api/mediator/me
+ * @desc    Get current authenticated user's mediator status (DB + on-chain)
+ * @access  Private
+ */
+router.get('/me', authMiddleware, async (req, res) => {
+  try {
+    const user = req.user;
+
+    const dbUser = await prisma.user.findUnique({
+      where: { id: user.id },
+      select: { isMediator: true, mediatorRegisteredAt: true, walletAddress: true }
+    });
+
+    if (!dbUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    let onChain = null;
+    try {
+      const mediatorPoolAddress = process.env.MEDIATOR_POOL_CONTRACT;
+      if (mediatorPoolAddress && dbUser.walletAddress) {
+        const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+        const mediatorPool = new ethers.Contract(mediatorPoolAddress, MEDIATOR_POOL_ABI, provider);
+        const info = await mediatorPool.mediators(dbUser.walletAddress);
+        if (info.isActive) {
+          onChain = {
+            stakeAmount: ethers.formatEther(info.stakeAmount),
+            timeoutCount: Number(info.timeoutCount),
+            reputationScore: Number(info.reputationScore),
+            totalVotes: Number(info.totalVotes),
+            successfulVotes: Number(info.successfulVotes),
+          };
+        }
+      }
+    } catch (e) {
+      console.warn('[Mediator Me] On-chain read failed:', e.message);
+    }
+
+    res.json({
+      isMediator: dbUser.isMediator,
+      registeredAt: dbUser.mediatorRegisteredAt,
+      walletAddress: dbUser.walletAddress,
+      onChain,
+    });
+  } catch (error) {
+    console.error('[Mediator Me Error]:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+/**
  * @route   GET /api/mediator/all
  * @desc    Get all mediators from contract
  * @access  Public

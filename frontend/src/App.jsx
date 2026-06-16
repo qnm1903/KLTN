@@ -7,8 +7,9 @@ import Home from './pages/Home';
 import CreateEscrow from './pages/CreateEscrow';
 import EscrowDetail from './pages/EscrowDetail';
 import GenerateKey from './pages/GenerateKey';
-import DisputeList from './pages/DisputeList'; 
-import DisputeDetail from './pages/DisputeDetail'; 
+import DisputeList from './pages/DisputeList';
+import DisputeDetail from './pages/DisputeDetail';
+import MediatorPool from './pages/MediatorPool';
 
 function App() {
 
@@ -46,9 +47,12 @@ function App() {
             <Route path="/escrow/:id" element={<EscrowDetail />} />
             <Route path="/generate-key" element={<GenerateKey />} />
             
-            {/* Thêm 2 Route cho luồng Dispute */}
+            {/* Dispute flow */}
             <Route path="/disputes" element={<DisputeList />} />
             <Route path="/disputes/:id" element={<DisputeDetail />} />
+
+            {/* Mediator pool registration */}
+            <Route path="/mediator" element={<MediatorPool />} />
           </Routes>
         </div>
       </BrowserRouter>

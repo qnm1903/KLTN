@@ -102,11 +102,17 @@ export default function Navbar() {
           TSS Escrow
         </div>
         
-        <a 
-          href="/generate-key" 
+        <a
+          href="/generate-key"
           className="text-sm font-medium text-slate-400 hover:text-white transition-colors"
         >
           Key Generator
+        </a>
+        <a
+          href="/mediator"
+          className="text-sm font-medium text-slate-400 hover:text-white transition-colors"
+        >
+          Mediator Pool
         </a>
       </div>
       

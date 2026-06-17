@@ -44,6 +44,9 @@ const CONFIGS = [
 
 const WARMUP = 5;
 const RUNS   = 20;
+// Số lần đo mỗi ID khi sweep VERIFY (1 là đủ — variance chính đến từ khác biệt giữa các ID,
+// không phải noise trong một lần đo)
+const VERIFY_REPS_PER_ID = 3;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -79,43 +82,64 @@ function stats(arr) {
 //  VERIFY : xác minh n-1 shares nhận từ các party khác tại vị trí myId
 //           verifyShare(s, C, myId, t): 1 + t EC scalar mults mỗi lần
 //           → (n-1)(t+1) EC scalar mults tổng, tương ứng B3
+//           Chi phí phụ thuộc myId vì xPow = myId^k mod ORDER:
+//             - myId nhỏ (e.g. 1)  → xPow nhỏ/trivial → quá nhanh (không đại diện)
+//             - myId lớn (e.g. n)  → xPow đầy đủ 256-bit → chậm nhất
+//           → Cần sweep tất cả IDs để có avg và max thực tế
 //
 //  AGG    : tổng hợp n shares nhận được + tính signing pubkey
 //           → n field additions + 1 EC scalar mult, tương ứng B4 (local)
 
-function measureDKGParty(t, n, myId, allIds) {
+function measureGENDISTAGG(t, n, myId, allIds) {
   const ph = {};
 
-  // GEN: poly + commitments
   let t0 = hrNow();
   const { coeffs }   = generatePolynomial(t);
   const myCommitments = computeCommitments(coeffs);
   ph.GEN = toMs(hrNow() - t0);
 
-  // DIST: evaluate at each other party's id
   t0 = hrNow();
   for (const id of allIds) {
     if (id !== myId) evaluatePolynomial(coeffs, id);
   }
   ph.DIST = toMs(hrNow() - t0);
 
-  // VERIFY: verify n-1 incoming shares at myId
-  // Timing dùng cùng commitments/share — EC operations không đổi theo giá trị cụ thể
-  t0 = hrNow();
-  const shareAtMyId = evaluatePolynomial(coeffs, myId);
-  for (let i = 0; i < n - 1; i++) {
-    verifyShare(shareAtMyId, myCommitments, myId, t);
-  }
-  ph.VERIFY = toMs(hrNow() - t0);
-
-  // AGG: aggregate n shares → signing share → signing pubkey
   t0 = hrNow();
   const inShares  = allIds.map(id => evaluatePolynomial(coeffs, id));
   const finalShare = aggregateShares(inShares);
   computeSigningPublicKey(finalShare);
   ph.AGG = toMs(hrNow() - t0);
 
-  return ph;
+  return { ph, coeffs, myCommitments };
+}
+
+// Đo VERIFY cho một party ID cụ thể (n-1 lần verifyShare tại vị trí `id`).
+// VERIFY là phase duy nhất phụ thuộc mạnh vào ID vì xPow = id^k mod ORDER.
+function measureVERIFYForId(coeffs, myCommitments, id, n, t) {
+  const shareAtId = evaluatePolynomial(coeffs, id);
+  const t0 = hrNow();
+  for (let i = 0; i < n - 1; i++) {
+    verifyShare(shareAtId, myCommitments, id, t);
+  }
+  return toMs(hrNow() - t0);
+}
+
+// Sweep tất cả n party IDs và trả về thời gian VERIFY cho từng ID.
+// Trả về: { perIdMs: number[], avg: number, max: number, maxId: number }
+function sweepVerifyAllIds(coeffs, myCommitments, allIds, n, t) {
+  const perIdMs = [];
+  for (const id of allIds) {
+    // Lấy trung bình VERIFY_REPS_PER_ID lần đo để giảm noise
+    let sum = 0;
+    for (let r = 0; r < VERIFY_REPS_PER_ID; r++) {
+      sum += measureVERIFYForId(coeffs, myCommitments, id, n, t);
+    }
+    perIdMs.push(sum / VERIFY_REPS_PER_ID);
+  }
+  const avg    = perIdMs.reduce((s, x) => s + x, 0) / perIdMs.length;
+  const max    = Math.max(...perIdMs);
+  const maxId  = allIds[perIdMs.indexOf(max)];
+  return { perIdMs, avg, max, maxId };
 }
 
 // ─── Signing per-party computation (FROST 2-round) ───────────────────────────
@@ -177,11 +201,12 @@ async function main() {
   console.log('Config      DKG(ms)   SIGN(ms)  TOTAL(ms)  MSG_DKG  MSG_SIGN  MSG_TOTAL');
   console.log('─'.repeat(76));
 
-  const csvRows = ['config,phase,avg_ms,p95_ms,min_ms,max_ms,std_ms,msg_count'];
+  // max_party_ms = thời gian party chậm nhất (= wall-clock DKG thực tế khi song song)
+  const csvRows = ['config,phase,avg_ms,p95_ms,min_ms,max_ms,std_ms,max_party_ms,msg_count'];
 
   const PHASE_MSG_KEY = { GEN: 'B1', DIST: 'B2', VERIFY: 'B3', AGG: 'B4', R1: 'R1', R2: 'R2' };
 
-  function addRow(config, phase, s, msgCount) {
+  function addRow(config, phase, s, msgCount, maxPartyMs = '') {
     csvRows.push([
       config, phase,
       s.avg?.toFixed(3) ?? '',
@@ -189,46 +214,71 @@ async function main() {
       s.min?.toFixed(3) ?? '',
       s.max?.toFixed(3) ?? '',
       s.std?.toFixed(3) ?? '',
+      typeof maxPartyMs === 'number' ? maxPartyMs.toFixed(3) : maxPartyMs,
       msgCount,
     ].join(','));
   }
 
   for (const { t, n } of CONFIGS) {
     const allIds = Array.from({ length: n }, (_, i) => i + 1);
-    // Dùng myId = ceil(n/2) thay vì 1 — khi myId=1 thì xPow=1^k=1 mãi,
-    // khiến pointMul(Cik, 1n) trivially fast và bỏ qua hầu hết EC scalar mults.
-    // myId ở giữa range cho timing đại diện thực tế.
-    const myId   = Math.ceil(n / 2);
+    const medId  = Math.ceil(n / 2);  // dùng cho GEN/DIST/AGG warmup
     const msgs   = msgCounts(t, n);
     const cfg    = `${t}-of-${n}`;
 
-    const dkgSamples  = { GEN: [], DIST: [], VERIFY: [], AGG: [] };
+    const gdaSamples  = { GEN: [], DIST: [], AGG: [] };
     const signSamples = { R1: [],  R2: [] };
 
-    // Warmup (JIT, cache warm-up)
+    // Warmup với medId — đủ để JIT compile và warm CPU/cache
     for (let i = 0; i < WARMUP; i++) {
-      measureDKGParty(t, n, myId, allIds);
+      measureGENDISTAGG(t, n, medId, allIds);
       measureSignParty();
     }
 
-    // Measurement
+    // Đo GEN, DIST, AGG với RUNS lần (không phụ thuộc myId đáng kể)
+    let warmCoeffs, warmCommitments;
     for (let i = 0; i < RUNS; i++) {
-      const dkg  = measureDKGParty(t, n, myId, allIds);
+      const { ph, coeffs, myCommitments } = measureGENDISTAGG(t, n, medId, allIds);
+      for (const [k, v] of Object.entries(ph)) gdaSamples[k].push(v);
+      // Giữ lại một bộ coeffs/commitments dùng cho sweep VERIFY
+      if (i === RUNS - 1) { warmCoeffs = coeffs; warmCommitments = myCommitments; }
+    }
+
+    // Sweep VERIFY qua tất cả n IDs — đây là phép đo thực tế nhất:
+    // mỗi party trong mạng có một ID khác nhau, wall-clock DKG = max của tất cả.
+    process.stdout.write(`  ${cfg}: sweeping VERIFY for ${n} IDs...`);
+    const verifySweep = sweepVerifyAllIds(warmCoeffs, warmCommitments, allIds, n, t);
+    process.stdout.write(` avg=${verifySweep.avg.toFixed(0)}ms max=${verifySweep.max.toFixed(0)}ms (id=${verifySweep.maxId})\n`);
+
+    // Đo SIGN
+    for (let i = 0; i < RUNS; i++) {
       const sign = measureSignParty();
-      for (const [k, v] of Object.entries(dkg))  dkgSamples[k].push(v);
       for (const [k, v] of Object.entries(sign)) signSamples[k].push(v);
     }
 
-    // DKG phase rows
-    let dkgTotal = 0;
-    for (const phase of ['GEN', 'DIST', 'VERIFY', 'AGG']) {
-      const s = stats(dkgSamples[phase]);
-      dkgTotal += s.avg;
-      addRow(cfg, phase, s, msgs[PHASE_MSG_KEY[phase]]);
-    }
-    addRow(cfg, 'DKG_TOTAL', { avg: dkgTotal }, msgs.DKG);
+    // DKG phase rows — VERIFY dùng avg từ sweep, max_party = max từ sweep
+    const genS  = stats(gdaSamples.GEN);
+    const distS = stats(gdaSamples.DIST);
+    const aggS  = stats(gdaSamples.AGG);
+    // Synthetic stats object cho VERIFY: avg = avg across IDs, max = max across IDs
+    const verifyAvg = verifySweep.avg;
+    const verifyS = {
+      avg: verifyAvg,
+      p95: verifySweep.perIdMs.sort((a,b)=>a-b)[Math.floor(n * 0.95)] ?? verifySweep.max,
+      min: Math.min(...verifySweep.perIdMs),
+      max: verifySweep.max,
+      std: Math.sqrt(verifySweep.perIdMs.map(x=>(x-verifyAvg)**2).reduce((s,x)=>s+x,0)/n),
+    };
 
-    // Signing phase rows
+    addRow(cfg, 'GEN',    genS,    msgs.B1);
+    addRow(cfg, 'DIST',   distS,   msgs.B2);
+    addRow(cfg, 'VERIFY', verifyS, msgs.B3, verifySweep.max);
+    addRow(cfg, 'AGG',    aggS,    msgs.B4);
+
+    const dkgAvg  = genS.avg + distS.avg + verifyAvg + aggS.avg;
+    const dkgMax  = genS.avg + distS.avg + verifySweep.max + aggS.avg;
+    addRow(cfg, 'DKG_TOTAL', { avg: dkgAvg }, msgs.DKG, dkgMax);
+
+    // SIGN phase rows
     let signTotal = 0;
     for (const phase of ['R1', 'R2']) {
       const s = stats(signSamples[phase]);
@@ -237,20 +287,17 @@ async function main() {
     }
     addRow(cfg, 'SIGN_TOTAL', { avg: signTotal }, msgs.SIGN);
 
-    const partyTotal = dkgTotal + signTotal;
-    addRow(cfg, 'PARTY_TOTAL', { avg: partyTotal }, msgs.TOTAL);
+    const partyAvg = dkgAvg + signTotal;
+    const partyMax = dkgMax + signTotal;
+    addRow(cfg, 'PARTY_TOTAL', { avg: partyAvg }, msgs.TOTAL, partyMax);
 
     console.log(
-      `${cfg.padEnd(12)}${dkgTotal.toFixed(1).padStart(8)}  ` +
-      `${signTotal.toFixed(2).padStart(8)}  ` +
-      `${partyTotal.toFixed(1).padStart(9)}  ` +
-      `${String(msgs.DKG).padStart(7)}  ` +
-      `${String(msgs.SIGN).padStart(8)}  ` +
-      `${String(msgs.TOTAL).padStart(9)}`
+      `${cfg.padEnd(12)}DKG avg=${dkgAvg.toFixed(0)}ms  max=${dkgMax.toFixed(0)}ms  ` +
+      `sign=${signTotal.toFixed(1)}ms  msgs=${msgs.TOTAL}`
     );
   }
 
-  const outPath = join(__dirname, `../experiments/party-compute-${date}-combined.csv`);
+  const outPath = join(__dirname, `../experiments/party-compute-${date}-allids.csv`);
   writeFileSync(outPath, csvRows.join('\n') + '\n');
   console.log(`\nOutput: ${outPath}`);
 }

@@ -19,6 +19,8 @@ const config = {
   networks: {
     hardhat: {
       chainId: 31337,
+      // 60 funded accounts: cần cho benchmark scale tới n=55 (buyer+seller+53 mediators)
+      accounts: { count: 60 },
       // Optional: for VRF testing with real coordinator, uncomment and set env
       // forking: { url: process.env.SEPOLIA_RPC_URL || '' }
     },

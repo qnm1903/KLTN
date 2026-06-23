@@ -30,7 +30,8 @@ describe("MultiSigEscrow Benchmark", function () {
       mediators,
       AMOUNT,
       CONFIRM_DAYS,
-      TIMEOUT_DAYS
+      TIMEOUT_DAYS,
+      5 // threshold t (5-of-7)
     );
   });
 

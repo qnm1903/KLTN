@@ -1,0 +1,39 @@
+{
+  "metadata": {
+    "N": 20,
+    "network": "hardhat",
+    "timestamp": "2026-06-23T04:25:52.147Z",
+    "config": "5-of-7 (Schnorr); single-aggregate (ECDSA/BLS)",
+    "note": "lock+release end-to-end gas. BLS H(m) dùng MAP_FP_TO_G1 đơn ánh (không phải hash_to_curve 2-map đầy đủ)."
+  },
+  "schnorr_tss": {
+    "mean": 122664,
+    "min": 122647,
+    "max": 122671,
+    "stdDev": 9.05,
+    "ci95": [
+      122660,
+      122668
+    ]
+  },
+  "ecdsa_tss": {
+    "mean": 82755,
+    "min": 82736,
+    "max": 82760,
+    "stdDev": 7.18,
+    "ci95": [
+      82752,
+      82758
+    ]
+  },
+  "bls": {
+    "mean": 227190,
+    "min": 227180,
+    "max": 227192,
+    "stdDev": 4.92,
+    "ci95": [
+      227187,
+      227192
+    ]
+  }
+}

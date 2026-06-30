@@ -85,16 +85,18 @@ describe(`Gas Bảng B on-chain — Schnorr vs ECDSA vs BLS (N=${N})`, function 
 
   it(`ECDSA-TSS (EcdsaEscrow) ×${N}`, async function () {
     const F = await ethers.getContractFactory("EcdsaEscrow");
+    const bm = 0x1fn; // bitmap 5-of-7, giống Schnorr
     for (let i = 0; i < N; i++) {
       const w = ethers.Wallet.createRandom();
       const eid = ethers.hexlify(ethers.randomBytes(32));
-      const c = await F.deploy(eid, buyer.address, seller.address, AMOUNT, w.address); await c.waitForDeployment();
+      const c = await F.deploy(eid, buyer.address, seller.address, mediators, AMOUNT, CONFIRM_DAYS, TIMEOUT_DAYS, 5n, w.address);
+      await c.waitForDeployment();
       const addr = await c.getAddress();
       let g = await gasOf(c.connect(buyer).lockFunds({ value: AMOUNT }));
       const chainId = (await ethers.provider.getNetwork()).chainId;
-      const mh = ethers.solidityPackedKeccak256(["uint256", "address", "bytes32", "string"], [chainId, addr, eid, "release"]);
+      const mh = ethers.solidityPackedKeccak256(["uint256", "address", "bytes32", "string", "uint256"], [chainId, addr, eid, "release", bm]);
       const sg = new ethers.SigningKey(w.privateKey).sign(mh);
-      g += await gasOf(c.release(sg.v, sg.r, sg.s));
+      g += await gasOf(c.release(sg.v, sg.r, sg.s, bm));
       acc.ecdsa.push(g);
     }
     console.log("  ECDSA settlement gas:", calcStats(acc.ecdsa).mean);

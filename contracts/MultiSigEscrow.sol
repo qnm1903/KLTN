@@ -20,9 +20,12 @@ contract MultiSigEscrow {
     Status public status;
     uint256 public confirmDeadline;
     uint256 public timeoutDeadline;
+    uint256 public disputeDeadline;
 
     uint256 public threshold;   // số chữ ký tối thiểu (t)
     uint256 public numParties;  // tổng số bên = 2 + mediators.length
+
+    uint256 private constant DISPUTE_TIMEOUT = 3 days;
 
     // Theo dõi chữ ký theo từng làn
     mapping(address => bool) public hasSignedRelease;
@@ -140,11 +143,12 @@ contract MultiSigEscrow {
     }
 
     function dispute() external {
-        require(msg.sender == buyer, "Only buyer");
+        require(msg.sender == buyer || msg.sender == seller, "Not authorized");
         require(status == Status.LOCKED, "Invalid status");
 
         status = Status.DISPUTED;
         timeoutDeadline = type(uint256).max; // chặn quá hạn tự động trong lúc tranh chấp
+        disputeDeadline = block.timestamp + DISPUTE_TIMEOUT;
 
         emit DisputeOpened(escrowId);
     }

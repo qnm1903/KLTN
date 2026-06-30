@@ -20,6 +20,11 @@ contract BatchedMultiSigEscrow {
     uint256 public threshold;
     uint256 public numParties;
     Status  public status;
+    uint256 public confirmDeadline;
+    uint256 public timeoutDeadline;
+    uint256 public disputeDeadline;
+
+    uint256 private constant DISPUTE_TIMEOUT = 3 days;
 
     mapping(address => bool) public isOwner;
 
@@ -45,6 +50,8 @@ contract BatchedMultiSigEscrow {
         address _seller,
         address[] memory _mediators,
         uint256 _amount,
+        uint256 _confirmDays,
+        uint256 _timeoutDays,
         uint256 _threshold
     ) {
         require(_buyer != address(0) && _seller != address(0) && _buyer != _seller, "bad parties");
@@ -55,6 +62,8 @@ contract BatchedMultiSigEscrow {
         buyer = _buyer;
         seller = _seller;
         amount = _amount;
+        confirmDeadline = _confirmDays;
+        timeoutDeadline = _timeoutDays;
         threshold = _threshold;
         numParties = _numParties;
         status = Status.CREATED;
@@ -71,13 +80,17 @@ contract BatchedMultiSigEscrow {
         if (msg.value != amount) revert IncorrectValue();
         if (status != Status.CREATED) revert InvalidStatus();
         status = Status.LOCKED;
+        confirmDeadline = block.timestamp + confirmDeadline * 1 days;
+        timeoutDeadline = block.timestamp + timeoutDeadline * 1 days;
         emit FundsLocked(escrowId, amount);
     }
 
     function dispute() external {
-        if (msg.sender != buyer) revert NotBuyer();
+        if (msg.sender != buyer && msg.sender != seller) revert NotBuyer();
         if (status != Status.LOCKED) revert InvalidStatus();
         status = Status.DISPUTED;
+        timeoutDeadline = type(uint256).max;
+        disputeDeadline = block.timestamp + DISPUTE_TIMEOUT;
         emit DisputeOpened(escrowId);
     }
 

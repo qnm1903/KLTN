@@ -145,6 +145,38 @@ def plot_onchain_ceiling():
     fig.tight_layout(); fig.savefig(OUT / "onchain-ceiling.png"); plt.close(fig)
 
 
+def plot_gas_per_op():
+    # Biểu đồ cột nhóm: gas mỗi thao tác ở 5-of-7, TSS (1 tx) vs Đa chữ ký (t tx).
+    d = json.load(open(ROOT / "gas_benchmark_results.json"))
+    tss, ms = d["tss"], d["multisig_5of7"]
+    val = lambda x: x["mean"] if isinstance(x, dict) else x
+    mssum = lambda pfx: sum(val(ms[f"{pfx}_{i}"]) for i in range(1, 6) if f"{pfx}_{i}" in ms)
+    ms_dispute = val(ms["dispute"]) if "dispute" in ms else 37009
+    ops = [
+        ("Khóa quỹ",      val(tss["lockFunds"]),      val(ms["lockFunds"])),
+        ("Giải ngân",     val(tss["release"]),        mssum("signRelease")),
+        ("Hoàn tiền",     val(tss["refund"]),         mssum("signRefund")),
+        ("Mở tranh chấp", val(tss["dispute"]),        ms_dispute),
+        ("Quá hạn",       val(tss["triggerTimeout"]), mssum("signTimeout")),
+    ]
+    labels = [o[0] for o in ops]
+    tv = [o[1] / 1000 for o in ops]
+    mv = [o[2] / 1000 for o in ops]
+    x = range(len(labels)); w = 0.38
+    fig, ax = plt.subplots(figsize=(8.5, 4.6))
+    b1 = ax.bar([i - w/2 for i in x], tv, w, color="#1f77b4", label="TSS (1 tx)")
+    b2 = ax.bar([i + w/2 for i in x], mv, w, color="#ff7f0e", label="Đa chữ ký 5-of-7")
+    for bars, vals in [(b1, tv), (b2, mv)]:
+        for b, v in zip(bars, vals):
+            ax.annotate(f"{v:.0f}", (b.get_x() + b.get_width()/2, v),
+                        textcoords="offset points", xytext=(0, 3), ha="center", fontsize=8)
+    ax.set_xticks(list(x)); ax.set_xticklabels(labels)
+    ax.set_ylabel(r"Gas ($\times 10^3$)")
+    ax.set_title("Gas mỗi thao tác (cấu hình 5-of-7)")
+    ax.legend()
+    fig.tight_layout(); fig.savefig(OUT / "gas-per-operation.png"); plt.close(fig)
+
+
 def plot_gas_per_settlement():
     fig, ax = plt.subplots(figsize=(6, 4.2))
     bars = ax.bar(["TSS (1 tx)", "MultiSig 5-of-7 (5 tx)"], [TSS_RELEASE, MS_RELEASE],
@@ -294,30 +326,80 @@ def plot_party_compute():
 
 # ─── 9. Gas scaling: TSS O(1) vs MultiSig O(t) ───────────────────────────────────
 def plot_gas_scaling():
-    # TSS release = O(1): contract verify 1 chữ ký tổng hợp → gas không đổi theo t/n.
-    # MultiSig = O(t): cần t giao dịch signRelease (mỗi signer 1 tx).
-    d = json.load(open(ROOT / "gas_benchmark_results.json"))
-    ms = d["multisig_5of7"]
-    per_sig = sum((ms[f"signRelease_{i}"]["mean"] if isinstance(ms[f"signRelease_{i}"], dict)
-                   else ms[f"signRelease_{i}"]) for i in range(1, 6)) / 5
-    ts = [1, 3, 5, 7, 9, 11, 13]
-    tss = [TSS_RELEASE] * len(ts)
-    msig = [t * per_sig for t in ts]
+    # Dữ liệu gas theo quy mô n (kịch bản thuận lợi = khóa quỹ + giải ngân).
+    # 3 lược đồ: TSS O(1); đa chữ ký gộp kiểu Gnosis Safe O(t), 1 tx; đa chữ ký t-giao-dịch O(t).
+    scal = json.load(open(ROOT / "gas_scaling_results.json"))["results"]
+    batch = json.load(open(ROOT / "gas_scaling_batched_results.json"))["results"]
+    batch_by_t = {r["t"]: r["happy"]["mean"] for r in batch}
 
-    fig, ax = plt.subplots(figsize=(7.5, 4.4))
-    ax.plot(ts, msig, "s-", color="#ff7f0e", lw=2, label=f"MultiSig — O(t), ~{per_sig:,.0f} gas/chữ ký")
-    ax.plot(ts, tss, "o-", color="#1f77b4", lw=2, label=f"TSS — O(1), ~{TSS_RELEASE:,} gas")
-    ax.scatter([5], [MS_RELEASE], marker="*", s=240, color="#d62728", zorder=5,
-               label=f"MultiSig 5-of-7 đo thực ({MS_RELEASE:,})")
-    save5 = (1 - TSS_RELEASE / msig[2]) * 100
-    save13 = (1 - TSS_RELEASE / msig[-1]) * 100
-    ax.annotate(f"tiết kiệm {save5:.0f}%", (5, msig[2]), textcoords="offset points", xytext=(6, -4), fontsize=9, color="#d62728")
-    ax.annotate(f"tiết kiệm {save13:.0f}%", (13, msig[-1]), textcoords="offset points", xytext=(-70, 4), fontsize=9, color="#d62728")
-    ax.set_xlabel("Ngưỡng t (số bên ký bắt buộc)")
-    ax.set_ylabel("Gas giải ngân (release)")
-    ax.set_title("Gas giải ngân on-chain theo ngưỡng t")
+    ts = [r["t"] for r in scal]
+    tss = [r["tss"]["happy"]["mean"] / 1000 for r in scal]
+    ttx = [r["multisig"]["happy"]["mean"] / 1000 for r in scal]
+    gn_ts = [r["t"] for r in scal if r["t"] in batch_by_t]
+    gnosis = [batch_by_t[r["t"]] / 1000 for r in scal if r["t"] in batch_by_t]
+
+    batch_disp = {r["t"]: r["dispute"]["mean"] for r in batch}
+    fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.6), sharey=True)
+    scenarios = [
+        ("Kịch bản thuận lợi", "happy", batch_by_t),
+        ("Kịch bản tranh chấp", "dispute", batch_disp),
+    ]
+    for ax, (title, key, bdict) in zip(axes, scenarios):
+        tss_y = [r["tss"][key]["mean"] / 1000 for r in scal]
+        ttx_y = [r["multisig"][key]["mean"] / 1000 for r in scal]
+        gx = [r["t"] for r in scal if r["t"] in bdict]
+        gy = [bdict[r["t"]] / 1000 for r in scal if r["t"] in bdict]
+        ax.plot(ts, ttx_y, "s-", color="#ff7f0e", lw=2, label="Đa chữ ký t-giao-dịch — O(t)")
+        ax.plot(gx, gy, "^-", color="#9467bd", lw=2, label="Đa chữ ký gộp (Gnosis Safe) — O(t)")
+        ax.plot(ts, tss_y, "o-", color="#1f77b4", lw=2, label="TSS (đề xuất)")
+        ax.set_xlabel("Ngưỡng t (số bên ký bắt buộc)")
+        ax.set_title(title)
+        ax.legend(fontsize=8.5)
+    axes[0].set_ylabel(r"Gas ($\times 10^3$, gồm khóa quỹ)")
+    fig.suptitle("Gas mỗi kịch bản theo ngưỡng t", y=1.02)
+    fig.tight_layout(); fig.savefig(OUT / "gas-scaling-vs-threshold.png", bbox_inches="tight"); plt.close(fig)
+
+
+# ─── 9b. Off-chain scaling đa lược đồ: Schnorr vs BLS vs GG20 ─────────────────────
+def plot_offchain_multischeme():
+    import statistics
+    # Schnorr-FROST: DKG mỗi bên (party-compute CSV)
+    sc = {}
+    for r in read_csv(EXP / PARTY_CSV):
+        if r["phase"] == "DKG_TOTAL" and r.get("avg_ms"):
+            sc[n_of(r["config"])] = float(r["avg_ms"])
+    # BLS: DKG mỗi bên (bls-offchain.csv)
+    bls = {}
+    for r in read_csv(EXP / "bls-offchain.csv"):
+        bls[n_of(r["config"])] = float(r["DKG_per_party_ms"])
+    # GG20: preParams/bên (trung vị) + keygen wall-clock (trung vị mỗi n)
+    # preParams đo riêng 15 mẫu, độc lập n → dùng trung vị chung
+    pp_samples = []
+    for line in open(ROOT / "bench-gg20" / "gg20_preparams.jsonl"):
+        pp_samples.append(json.loads(line)["preparams_ms"])
+    pp_median = statistics.median(pp_samples)
+    gg_keygen = {}
+    for line in open(ROOT / "bench-gg20" / "gg20_range.jsonl"):
+        d = json.loads(line)
+        gg_keygen.setdefault(d["n"], []).append(d["keygen_wall_ms"])
+    gg = {n: pp_median + statistics.median(v) for n, v in gg_keygen.items()}
+
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    xs = sorted(sc)
+    ax.plot(xs, [sc[n] for n in xs], "o-", color="#1f77b4", lw=2,
+            label="Schnorr-FROST — DKG mỗi bên")
+    xb = sorted(bls)
+    ax.plot(xb, [bls[n] for n in xb], "s-", color="#ff7f0e", lw=2,
+            label="BLS — DKG mỗi bên")
+    xg = sorted(gg)
+    ax.plot(xg, [gg[n] for n in xg], "^-", color="#d62728", lw=2,
+            label="ECDSA-TSS GG20 — preParams/bên + keygen")
+    ax.set_yscale("log")
+    ax.set_xlabel("Số bên tham gia n")
+    ax.set_ylabel("Thời gian thiết lập off-chain (ms, log)")
+    ax.set_title("Chi phí thiết lập off-chain theo quy mô n")
     ax.legend(fontsize=9)
-    fig.tight_layout(); fig.savefig(OUT / "gas-scaling-vs-threshold.png"); plt.close(fig)
+    fig.tight_layout(); fig.savefig(OUT / "offchain-multischeme.png"); plt.close(fig)
 
 
 # ─── 10 & 11. Fault tolerance / liveness ──────────────────────────────────────────

@@ -69,7 +69,7 @@ describe(`Gas Scaling — Đa chữ ký gộp (Gnosis Safe) theo n (N=${N})`, fu
         // ── happy: lock + release(gộp) ──
         {
           const eid = ethers.hexlify(ethers.randomBytes(32));
-          const c = await F.connect(buyer).deploy(eid, buyer.address, seller.address, medAddrs, AMOUNT, BigInt(t));
+          const c = await F.connect(buyer).deploy(eid, buyer.address, seller.address, medAddrs, AMOUNT, 14n, 21n, BigInt(t));
           await c.waitForDeployment();
           const addr = await c.getAddress();
           let g = await gasOf(c.connect(buyer).lockFunds({ value: AMOUNT }));
@@ -80,7 +80,7 @@ describe(`Gas Scaling — Đa chữ ký gộp (Gnosis Safe) theo n (N=${N})`, fu
         // ── dispute: lock + dispute + refund(gộp) ──
         {
           const eid = ethers.hexlify(ethers.randomBytes(32));
-          const c = await F.connect(buyer).deploy(eid, buyer.address, seller.address, medAddrs, AMOUNT, BigInt(t));
+          const c = await F.connect(buyer).deploy(eid, buyer.address, seller.address, medAddrs, AMOUNT, 14n, 21n, BigInt(t));
           await c.waitForDeployment();
           const addr = await c.getAddress();
           let g = await gasOf(c.connect(buyer).lockFunds({ value: AMOUNT }));

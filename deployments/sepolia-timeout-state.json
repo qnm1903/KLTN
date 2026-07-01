@@ -1,0 +1,10 @@
+{
+  "vaultAddress": "0x9af63576DbAA886aad061DA7a97E845Bddf83C81",
+  "seller": "0xd15182aFD3A1ED71eA2C34186Aeff728DaB1E6Cc",
+  "createTxHash": "0x7eea304ee1a461f16a2ac4e1bfaaaf9ccb0e87b40400cd396b3798908130276f",
+  "lockTxHash": "0x957a780029dd80279e784c000426efe4dc42a7327a0d6cfb539e9ea7cb9c24cc",
+  "timeoutDeadline": "1782981492",
+  "timeoutDeadlineISO": "2026-07-02T08:38:12.000Z",
+  "amount": "1000000000000000",
+  "network": "sepolia"
+}

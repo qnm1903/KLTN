@@ -191,7 +191,7 @@ async function createTestWallets(provider, funder) {
 
     const fundTx = await funder.sendTransaction({
       to: signer.address,
-      value: ethers.parseEther('1')
+      value: ethers.parseEther('0.15')
     });
     await fundTx.wait();
 

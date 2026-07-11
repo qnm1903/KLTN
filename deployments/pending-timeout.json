@@ -1,0 +1,15 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "vaultAddress": "0xFa3C03648DbB47A128cE3EbD213ae4FB289f6d46",
+  "escrowId": "0x6e914b2fa45e5ce9fdbb2fd4a5d5451742c4146feec5917393eb63ce2037b1f9",
+  "buyer": "0x6CcC9b052f9A429e9Bf945668de8E5fF7117e028",
+  "seller": "0x00f089282F0Ae86c7A0f07332CD147135F9f82a2",
+  "amount": "1000000000000000",
+  "createTxHash": "0x4d37bd10724b4708ee0a389e6b30574c404dd78f19c8f4972dffc9b33a77f4fc",
+  "lockTxHash": "0xabe6d70f98180e955af1a3c0325e405659ff20f69d116ebd6fe69afcd9def598",
+  "timeoutDeadlineTs": 1783578408,
+  "timeoutDeadlineISO": "2026-07-09T06:26:48.000Z",
+  "timeoutDeadlineVN": "13:26:48 9/7/2026",
+  "savedAt": "2026-07-08T06:26:50.577Z"
+}
